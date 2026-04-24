@@ -202,7 +202,7 @@ If this banner is absent, you are not in a coordinated session and none of the r
      > File `foo.ts` is locked by session `<holder_id>` since `<ts>` (~<mins> min). Options:
      > (a) Delegate a SIMPLE/MODERATE task: `Bash: coord task-open --file foo.ts --complexity SIMPLE --anchor '{"search":"...","window_lines":"..."}' --instruction '...' [--rationale '...']`.
      > (b) Self-delegate (do other work, return later): `Bash: coord self-delegate --file foo.ts --instruction '...'`.
-     > (c) Passively wait: `Bash: coord wait foo.ts --timeout 600` (blocks your Bash call until unlocked or timeout).
+     > (c) Passively wait: `Bash: coord wait foo.ts --timeout 570` (blocks your Bash call until unlocked or timeout; 570 s is the max — it sits just below Claude Code's 600 s Bash-tool ceiling).
      > Pick (a) for small, self-contained edits; (b) if you have other productive work; (c) only if the change is too complex to delegate AND you have no other work.
 
 3. **Lock held by yourself:**
@@ -334,6 +334,7 @@ These are cases where Claude sometimes tries to "help" in ways that undermine co
 - **Do not invoke `coord reset` reflexively** when a coordination message is confusing. `coord reset` is destructive (clears locks, read-sets). The right response to confusion is `coord status` first, then `coord mediate` if the situation truly is anomalous.
 - **Do not spawn your own validation subagent via the Agent tool to bypass the validator agent hook.** The validator hook runs automatically on hash mismatch; calling your own subagent duplicates cost.
 - **Do not store session state in your own memory across turns as a substitute for `sessions.json`.** Your memory is advisory; `sessions.json` is authoritative.
+- **Do not spawn a subagent as a workaround to evade coordination.** Subagent tool calls are invisible to the coord layer by design (Decision 2.17: the `agent_type` filter in `pre_tool_use_*`, `post_tool_use_*`, and `stop.sh` causes those hooks to exit 0 without mutating state, emitting only a `SUBAGENT_ACTIVITY_SKIPPED` observability event). A subagent writing a file not locked by its parent can race silently with another session. If you need a bounded deferral, prefer `coord self-delegate` (which IS tracked) over a subagent.
 
 ### B.11 Quick-reference table
 
