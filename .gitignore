@@ -17,6 +17,9 @@ phase-*-signoff.md
 # Phase 0 verification artifact (gitignored per plan §5 Phase 0).
 phase0-verification.md
 
+# State-of-system briefings (reporting artifacts, not deliverables).
+STATE_OF_SYSTEM.md
+
 # OS / editor cruft that has no place in VCS.
 .DS_Store
 Thumbs.db
