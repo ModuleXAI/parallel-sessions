@@ -1,0 +1,290 @@
+#!/usr/bin/env bash
+# coord — coordination CLI (Phase 0 slice).
+#
+# Subcommands implemented in Phase 0:
+#   status        — print active sessions, locks, pending self-tasks, validations.
+#   health        — installer-level checks (deps, fs, config bounds).
+#   log [--tail N] [--kind K] — print recent events.jsonl lines.
+#   events --since <iso8601> — dump events after a timestamp.
+#   reset [--confirm]        — reset sessions.json (destructive).
+#   uninstall [--purge]      — remove hook entries (leaves .coord/ intact
+#                              unless --purge).
+#   install                  — re-run the installer (delegates to src/install.sh).
+#
+# Later phases wire in:
+#   wait, task-open, self-delegate, tasks, locks, mediate, mediate --retry.
+
+set -euo pipefail
+
+COORD_BIN="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+COORD_DIR="${COORD_DIR:-$(cd "$COORD_BIN/.." && pwd)}"
+LIB_DIR="$COORD_DIR/lib"
+export COORD_DIR
+
+# Utilities -----------------------------------------------------------------
+
+die()  { printf 'coord: %s\n' "$*" >&2; exit 1; }
+info() { printf '%s\n' "$*"; }
+
+state_file() { printf '%s/sessions.json\n' "$COORD_DIR"; }
+events_file() { printf '%s/events.jsonl\n' "$COORD_DIR"; }
+config_file() { printf '%s/config.json\n' "$COORD_DIR"; }
+
+cmd_status() {
+  if [ ! -f "$(state_file)" ]; then die "no .coord/sessions.json found; run install"; fi
+  local reads_detail=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --reads) reads_detail=1; shift ;;
+      *) die "unknown flag: $1" ;;
+    esac
+  done
+
+  local schema active_count locks wait_q pending_self pending_valid
+  schema=$(jq -r '.schema_version' "$(state_file)" 2>/dev/null || printf '?')
+  active_count=$(jq -r '[.sessions[]|select(.state=="ACTIVE")]|length' "$(state_file)" 2>/dev/null || printf '0')
+  locks=$(jq -r '.locks | length' "$(state_file)" 2>/dev/null || printf '0')
+  wait_q=$(jq -r '[.wait_queue[]|length]|add // 0' "$(state_file)" 2>/dev/null || printf '0')
+  pending_self=$(jq -r '[.self_tasks[]|length]|add // 0' "$(state_file)" 2>/dev/null || printf '0')
+  pending_valid=$(ls "$COORD_DIR/validation" 2>/dev/null | wc -l | tr -d ' ')
+
+  info "coord status  (schema_version=$schema)"
+  info "  sessions:"
+  jq -r '.sessions | to_entries[] | "    \(.key|.[0:8])  state=\(.value.state)  pid=\(.value.pid)  last=\(.value.last_activity_at)"' "$(state_file)" 2>/dev/null
+  if [ "$locks" -gt 0 ]; then
+    info "  locks:"
+    jq -r '.locks | to_entries[] | "    \(.key)  by=\(.value.session|.[0:8])  since=\(.value.acquired_at)"' "$(state_file)"
+  else
+    info "  locks: (none)"
+  fi
+  info "  wait_queue:  $wait_q waiter(s)"
+  info "  self_tasks:  $pending_self pending"
+  info "  validation:  $pending_valid pending"
+
+  # Per-session read-set summary (Phase 1).
+  local rs_count
+  rs_count=$(jq -r '(.read_sets // {}) | length' "$(state_file)" 2>/dev/null || printf '0')
+  if [ "$rs_count" -gt 0 ]; then
+    info "  read_sets:"
+    jq -r '
+      .read_sets
+      | to_entries[]
+      | (.value.reads // []) as $r
+      | "    \(.key|.[0:8])  total=\($r|length)  is_latest=\($r|map(select((.is_latest // false) == true))|length)  head_invalidated=\($r|map(select((.superseded_by_head_change // false) == true))|length)  prompt_invalidated=\($r|map(select((.superseded_by // null) == "new_prompt"))|length)"
+    ' "$(state_file)" 2>/dev/null
+    if [ "$reads_detail" = "1" ]; then
+      info "  read_sets (detail):"
+      jq -r '
+        .read_sets
+        | to_entries[]
+        | (.key|.[0:8]) as $sid
+        | (.value.reads // [])
+        | sort_by(.at // "")
+        | reverse
+        | .[0:20]
+        | map("    " + $sid + "  " + .path
+              + "  hash=" + ((.hash // "")[0:12])
+              + "  is_latest=" + ((.is_latest // false) | tostring)
+              + (if (.superseded_by_head_change // false) then "  HEAD!" else "" end)
+              + (if (.superseded_by // null) == "new_prompt" then "  NEW_PROMPT!" else "" end))
+        | .[]
+      ' "$(state_file)" 2>/dev/null
+    fi
+  else
+    info "  read_sets: (none)"
+  fi
+
+  info "  events.jsonl lines: $(wc -l < "$(events_file)" 2>/dev/null | tr -d ' ')"
+}
+
+cmd_health() {
+  local rc=0
+  local missing=()
+  for c in jq flock shasum ps git; do
+    command -v "$c" >/dev/null 2>&1 || missing+=("$c")
+  done
+  if [ "${#missing[@]}" -gt 0 ]; then
+    printf 'MISSING_DEPS: %s\n' "${missing[*]}" >&2
+    rc=1
+  else
+    info 'deps OK (jq flock shasum ps git)'
+  fi
+  if ! command -v perl >/dev/null 2>&1; then
+    info 'perl: absent (events will use second precision; see FINDINGS F-009)'
+  else
+    info 'perl: present (ms timestamps enabled)'
+  fi
+  if [ -s "$(config_file)" ]; then
+    # Validate config bounds (Decision 2.20 + F-008).
+    local ttl sus con wait_max
+    ttl=$(jq -r '.lock_ttl_seconds' "$(config_file)")
+    sus=$(jq -r '.watchdog_suspicion_seconds' "$(config_file)")
+    con=$(jq -r '.watchdog_confirm_seconds' "$(config_file)")
+    wait_max=$(jq -r '.wait_max_seconds' "$(config_file)")
+    if [ "$ttl" -lt 300 ]; then info "BAD: lock_ttl_seconds < 300"; rc=1; fi
+    if [ "$sus" -le "$ttl" ]; then info "BAD: watchdog_suspicion_seconds <= lock_ttl_seconds"; rc=1; fi
+    if [ "$con" -le "$sus" ]; then info "BAD: watchdog_confirm_seconds <= watchdog_suspicion_seconds"; rc=1; fi
+    if [ "$wait_max" -ge 600 ]; then info "BAD: wait_max_seconds >= 600 (Bash-tool ceiling; F-008 / PR-PHASE0-01 D)"; rc=1; fi
+    if [ "$wait_max" -lt 30 ];  then info "BAD: wait_max_seconds < 30 (passive wait needs at least one poll cycle; PR-PHASE0-01 D)"; rc=1; fi
+    [ "$rc" -eq 0 ] && info 'config bounds OK'
+  else
+    info "WARN: $(config_file) missing; run install --repair"
+    rc=1
+  fi
+
+  # F-003 / F-012 hygiene: refuse stray digit-named files at repo root.
+  # A bare `9` (instead of `9>"<lock>"`) in a flock invocation creates a
+  # 0-byte file named `9` at the working directory. This check makes
+  # accidental commits of such artefacts impossible to miss.
+  local repo_root stray
+  repo_root=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+  stray=""
+  if [ -d "$repo_root" ]; then
+    local f base
+    for f in "$repo_root"/*; do
+      [ -f "$f" ] || continue
+      base=$(basename "$f")
+      case "$base" in
+        ''|*[!0-9]*) ;;
+        *) stray="${stray:+$stray }$base" ;;
+      esac
+    done
+  fi
+  if [ -n "$stray" ]; then
+    info "BAD: stray digit-named file(s) at repo root: $stray (F-003 anti-pattern; see FINDINGS F-012)"
+    rc=1
+  fi
+
+  return "$rc"
+}
+
+cmd_log() {
+  local tail_n=20 kind=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --tail) tail_n="$2"; shift 2 ;;
+      --kind) kind="$2";   shift 2 ;;
+      *)      die "unknown flag: $1" ;;
+    esac
+  done
+  local src
+  src=$(events_file)
+  [ -f "$src" ] || die "no events.jsonl yet"
+  if [ -n "$kind" ]; then
+    jq -c --arg k "$kind" 'select(.kind == $k)' "$src" | tail -n "$tail_n"
+  else
+    tail -n "$tail_n" "$src"
+  fi
+}
+
+cmd_events() {
+  local since=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --since) since="$2"; shift 2 ;;
+      *) die "unknown flag: $1" ;;
+    esac
+  done
+  [ -z "$since" ] && die 'usage: coord events --since <iso8601>'
+  jq -c --arg t "$since" 'select(.ts > $t)' "$(events_file)"
+}
+
+cmd_reset() {
+  local confirm=0
+  [ "${1:-}" = "--confirm" ] && confirm=1
+  if [ "$confirm" -eq 0 ]; then
+    die 'destructive; pass --confirm'
+  fi
+  # shellcheck disable=SC1091
+  . "$LIB_DIR/atomic_write.sh"
+  coord_atomic_reset "$(state_file)"
+  info 'coord: state reset; old sessions.json archived alongside'
+}
+
+cmd_uninstall() {
+  local purge=0
+  [ "${1:-}" = "--purge" ] && purge=1
+  # Delegate the settings cleanup to the in-tree install.sh --uninstall.
+  # If src/install.sh is reachable, use it; otherwise strip our hook entries
+  # from settings.local.json directly.
+  local src_install="$COORD_BIN/../../src/install.sh"
+  if [ -x "$src_install" ]; then
+    "$src_install" --uninstall
+  else
+    local repo settings
+    repo=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+    settings="$repo/.claude/settings.local.json"
+    if [ -f "$settings" ]; then
+      local tmp; tmp=$(mktemp)
+      # Strip coord-owned entries across ALL events; preserve user entries.
+      jq '
+        if has("hooks") then
+          .hooks |= with_entries(
+            .value |= ((. // []) | map(
+              .hooks = ((.hooks // []) | map(select(((.command // "") | contains("/.coord/hooks/")) | not)))
+            ) | map(select((.hooks // []) | length > 0)))
+          )
+        else . end' "$settings" >"$tmp" && mv "$tmp" "$settings"
+    fi
+    info "hook entries removed from $settings"
+  fi
+  if [ "$purge" -eq 1 ]; then
+    info "purge: removing $COORD_DIR"
+    if [ -z "${COORD_UNINSTALL_YES:-}" ]; then
+      read -r -p "Really delete $COORD_DIR? (type YES): " ans
+      [ "$ans" = "YES" ] || die 'purge aborted'
+    fi
+    rm -rf "$COORD_DIR"
+    info "coord: purge complete; IMPLEMENTATION_LOG.md and FINDINGS.md preserved"
+  else
+    info "coord: uninstall complete; .coord/ left in place. Use 'coord uninstall --purge' to remove it."
+  fi
+}
+
+cmd_install() {
+  local src_install="$COORD_BIN/../../src/install.sh"
+  [ -x "$src_install" ] || die "install script not found at $src_install"
+  exec "$src_install" "$@"
+}
+
+usage() {
+  cat <<'USAGE'
+usage: coord <subcommand> [args]
+
+Phase 0 subcommands:
+  status [--reads]   print active sessions, locks, wait queue, self-tasks,
+                     and per-session read-set summary; --reads adds detail
+  health             validate deps, fs, config bounds
+  log [--tail N] [--kind K]   print recent events.jsonl
+  events --since <iso8601>    dump events after a timestamp
+  reset --confirm    destructive: reset sessions.json (archives prior state)
+  install [flags]    delegate to src/install.sh
+  uninstall [--purge]  remove hook entries (and optionally .coord/)
+
+Subcommands coming in later phases:
+  wait, task-open, self-delegate, tasks, locks, mediate, mediate --retry
+USAGE
+}
+
+sub="${1:-}"
+[ -z "$sub" ] && { usage; exit 2; }
+shift
+case "$sub" in
+  status)      cmd_status "$@" ;;
+  health)      cmd_health "$@" ;;
+  log)         cmd_log "$@" ;;
+  events)      cmd_events "$@" ;;
+  reset)       cmd_reset "$@" ;;
+  install)     cmd_install "$@" ;;
+  uninstall)   cmd_uninstall "$@" ;;
+  help|-h|--help) usage ;;
+  *)
+    # Stubs for Phase 1+ subcommands.
+    case "$sub" in
+      wait|task-open|self-delegate|tasks|locks|mediate)
+        die "subcommand '$sub' is not implemented in Phase 0; wait for the corresponding phase"
+        ;;
+      *) die "unknown subcommand: $sub" ;;
+    esac
+    ;;
+esac

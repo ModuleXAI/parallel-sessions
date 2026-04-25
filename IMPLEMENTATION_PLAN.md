@@ -64,9 +64,18 @@ Claude Code allows multiple sessions to operate in the same repository without a
 > **Rationale:** Negligible cost delta over md5; avoids md5's reputation liability; truncation risks aliasing (source design showed 6-char examples which are unsafe).
 > **Source:** Phase 1 `02` D1, `04` Scenario 16, `10` working notes; `05` assumption D.
 
-> **Decision 2.5:** Session identity scheme: Claude Code provides a UUID `session_id` in every hook's stdin JSON. That UUID is the coordination session ID. Session **registration** happens in `SessionStart` when `CLAUDE_COORD=1` is set in the environment. Non-participant sessions (env var unset) are ignored.
-> **Rationale:** UUID is already stable and unique; env-var gate is a clean opt-in that doesn't require a wrapper script and can be toggled per-launch.
-> **Source:** User direction (Session Identity and System Boundary); Phase 1 `03` §9; planner chose env var over wrapper command.
+> **Decision 2.5:** Session identity scheme: Claude Code provides a UUID `session_id` in every hook's stdin JSON. That UUID is the coordination session ID. SessionStart is invoked with a `source` field whose value distinguishes four lifecycle events; the hook's behavior depends on `source` as follows:
+>
+> | `source`  | Registration action | Read-set action | PID / lstart / git_head | Event |
+> |-----------|---------------------|-----------------|-------------------------|-------|
+> | `startup` | Insert new row (schema per §3.3); reject if a row already exists for this `session_id` as anomaly. | Initialize empty read-set. | Capture fresh (`$PPID` + lstart + git_head). | `SESSION_REGISTER` |
+> | `resume`  | Idempotent refresh of the existing row (matched by `session_id`); if no prior row exists, fall back to `startup` semantics and emit `SESSION_REGISTER` with `reason:"resume_without_prior_row"`. | **Preserve read-set intact** — the `session_id` is stable across resume and prior reads semantically still belong to this session. Then: compare stored `git_head` to current; if different, set `superseded_by_head_change: true` on every entry in `read_sets[<id>].reads[]` before proceeding (per Decision 2.22). | Refresh (new `$PPID`, new lstart, new git_head). | `SESSION_RESUME`. Additionally, if lock records keyed to this `session_id` exist with the prior PID/lstart stamp, emit a `RESUME_ORPHAN_LOCK_DETECTED` event per affected lock but do **not** release it in Phase 1 — orphan-lock eviction is deferred to Phase 3's peer-watchdog (Phase 2 introduces locks but the watchdog doesn't arrive until Phase 3). |
+> | `clear`   | Refresh the existing row (idempotent). | Mark prompt-scoped entries `superseded_by: "new_prompt"`. Semantically identical to the invalidation `user_prompt_submit.sh` performs; `source=clear` is the independent "fresh start" channel when the user explicitly clears context. | Refresh git_head only (pid/lstart unchanged — same process). | `SESSION_CLEAR` |
+> | `compact` | Refresh `last_activity_at` on the existing row. | **No change** — context compression preserves read history semantically; the hashes stored in `read_sets` are still the truth about "what this session last observed on disk." | No change. | `SESSION_COMPACTED` (informational) |
+>
+> Non-participant sessions (env var `CLAUDE_COORD` unset) are ignored regardless of `source`. Subagent sessions do not fire SessionStart at all (Decision 2.17 per PR-PHASE0-01); the source-branching above applies only to primary coordinated sessions.
+> **Rationale:** UUID is already stable and unique; env-var gate is a clean opt-in that doesn't require a wrapper script and can be toggled per-launch. Source-matrix was added after Phase 0 Experiment #1 exposed the gap; the matrix preserves read-set semantics across the full session lifecycle.
+> **Source:** User direction (Session Identity and System Boundary); Phase 1 `03` §9; planner chose env var over wrapper command; PR-PHASE1-01 augmented the matrix post-Phase-0 (FINDINGS F-004).
 
 > **Decision 2.6:** Error-handling philosophy: **fail-open with loud, visible warning** for non-critical failures; **hard-deny** for load-bearing writes on locked files or with CRITICAL stale-read verdict; **Mediator invocation** for anomalies (stuck locks, corrupt state, consensus disputes, fork-bomb suspicion).
 > **Rationale:** Matches user direction. Fail-open on parse errors or log failures keeps sessions working; hard-deny on the two situations where corruption would be silent keeps the system honest; Mediator absorbs the gray-zone cases humans would otherwise debug by hand.
@@ -112,9 +121,9 @@ Claude Code allows multiple sessions to operate in the same repository without a
 > **Rationale:** User confirmed agent-type hook for validation subagent. Flag-file pattern makes the hook idempotent and guards against fork-bomb.
 > **Source:** User direction (Validation Subagent Choice); Phase 1 `03` §7.
 
-> **Decision 2.17:** Subagent session participation: sessions where `SessionStart` input includes a populated `agent_type` field are **filtered out** of coordination. They do not register, do not track read-sets, and do not acquire locks. Their tool calls inherit the parent's coordination implicitly (the parent holds locks for files the subagent touches, because the parent requested the work).
-> **Rationale:** Phase 1 research flagged fork-bomb risk and subagent session pollution. Filtering is the safe default.
-> **Source:** Phase 1 `02` A7, `04` Scenario 23, `05` assumption B.
+> **Decision 2.17:** Subagent session participation: Claude Code does **not** issue a separate `SessionStart` for subagents spawned via the Task tool; subagent tool calls carry the parent session's `session_id`. The coordination layer filters subagent activity at the **tool-call hook layer**: when any `PreToolUse`, `PostToolUse`, or `SubagentStop` input contains a non-empty `agent_type` field, coordination hooks exit 0 without mutating state AND **MUST** emit a single `events.jsonl` entry of `kind: "SUBAGENT_ACTIVITY_SKIPPED"` with payload `{parent_session, tool, agent_type, file: <file_path if applicable>}` so downstream tooling (e.g. the visualization-UI future-work deliverable) can reconstruct subagent activity even though coord does not coordinate it. Subagent tool calls therefore inherit the parent session's locks and read-set passively — the parent's lock covers the parent's turn, including any tool calls its subagents make.
+> **Rationale:** Phase 0 Experiment #5 (T0.07) proved `agent_type` never appears on `SessionStart`; the prior filter placement was unreachable. Tool-call-layer filtering is the actually-enforceable version. Mandatory logging preserves history for future UI work (logging is cheap; reconstructing without logs is impossible).
+> **Source:** Phase 0 Experiment #5 (see `.coord/phase0-verification.md`); Phase 1 `02` A7, `04` Scenario 23, `05` assumption B; plan-revisions PR-PHASE0-01.
 
 > **Decision 2.18:** Read-set validation scope: **all Read tool invocations** are tracked with sha256 hashes in `read_sets[session_id].reads[]`. Grep-with-content, Bash reads, and MCP-tool reads are **not** tracked in v1.
 > **Rationale:** Simplest reliable boundary. `Read` tool is the dominant path; Grep/Bash coverage increases complexity without proportional safety gain.
@@ -124,9 +133,15 @@ Claude Code allows multiple sessions to operate in the same repository without a
 > **Rationale:** Prevents false-positive eviction of legitimately slow sessions (Scenario 6) and catches PID recycling (Scenario 8).
 > **Source:** Phase 1 `04` scenarios 6 & 8, `05` assumption F.
 
-> **Decision 2.20:** Lock TTL default is **15 minutes** of no activity (lock-holder making any tool call on that file refreshes the TTL). Watchdog suspicion threshold: **20 minutes** with no activity. Confirmation (PID check): **25 minutes** with PID-absent/recycled. **Tunable bounds (enforced by installer + `coord health`):** `lock_ttl_seconds` minimum 300 (5 min); `watchdog_suspicion_seconds` must be `> lock_ttl_seconds`; `watchdog_confirm_seconds` must be `> watchdog_suspicion_seconds`. The installer validates `config.json` on load and refuses to start with invalid combinations; `coord health` surfaces the same check for ongoing installs.
-> **Rationale:** Balances Scenario 19 (too-long locks deadlock others) with Scenario 6 (legit long sessions not evicted). Tunable in `.coord/config.json`. Bounds prevent misconfigured installs from inverting the ordering (confirm < suspicion < TTL) which would cause spurious evictions.
-> **Source:** Phase 1 `04` Scenario 19, `05` assumption F; planner-selected defaults.
+> **Decision 2.20:** Lock TTL default is **15 minutes** of no activity (lock-holder making any tool call on that file refreshes the TTL). Watchdog suspicion threshold: **20 minutes** with no activity. Confirmation (PID check): **25 minutes** with PID-absent/recycled. **Tunable bounds (enforced by installer + `coord health`):**
+> - `lock_ttl_seconds` minimum 300 (5 min);
+> - `watchdog_suspicion_seconds` must be `> lock_ttl_seconds`;
+> - `watchdog_confirm_seconds` must be `> watchdog_suspicion_seconds`;
+> - `wait_max_seconds` must satisfy `30 ≤ wait_max_seconds < 600`. Upper bound: 600 s is the Claude Code Bash-tool configurable maximum (F-008). Lower bound: 30 s prevents accidental misconfiguration to near-zero values that would make passive wait unusable. Default `570` = 600 s Bash-tool ceiling − 30 s safety margin to avoid hitting the tool timeout before coord's own timeout fires and logs a clean `WAIT_TIMEOUT` event.
+>
+> The installer validates `config.json` on load and refuses to start with invalid combinations; `coord health` surfaces the same check for ongoing installs.
+> **Rationale:** Balances Scenario 19 (too-long locks deadlock others) with Scenario 6 (legit long sessions not evicted). Tunable in `.coord/config.json`. Bounds prevent misconfigured installs from inverting the ordering (confirm < suspicion < TTL) which would cause spurious evictions. `wait_max_seconds` bounds enforce the Bash-tool 10-min ceiling discovered in Phase 0 Experiment #9.
+> **Source:** Phase 1 `04` Scenario 19, `05` assumption F; Phase 0 Experiment #9 (T0.11) for `wait_max_seconds` bounds; plan-revisions PR-PHASE0-01; planner-selected defaults.
 
 > **Decision 2.21:** All coordination files (hook scripts, state, logs, config) live under `.coord/` at the **git toplevel** (`git rev-parse --show-toplevel`). Everything is gitignored. The installer appends `.coord/` to `.gitignore` if missing. The installer also writes hook entries to `.claude/settings.local.json`, which is also gitignored by convention.
 > **Rationale:** User direction (everything gitignored). Repo-root anchoring solves Scenario 17 (sessions in subdirectories still coordinate).
@@ -424,7 +439,7 @@ The source design had eight layers; this plan adds the **Mediator** as its own c
 {
   "ts":        "2026-04-24T09:14:22.481Z",
   "session":   "2d6a8f9e-...",
-  "kind":      "READ|WRITE|LOCK_ACQUIRE|LOCK_RELEASE|LOCK_DENY|TASK_OPEN|TASK_APPLY|TASK_OUTCOME|SELF_TASK_OPEN|SELF_TASK_TRIGGER|NOTIFICATION_EMIT|NOTIFICATION_DELIVER|WATCHDOG_CHECK|WATCHDOG_VOTE|MEDIATOR_INVOKE|MEDIATOR_VERDICT|VALIDATOR_INVOKE|VALIDATOR_VERDICT|ERROR|INFO|HEAD_CHANGE|PROMPT_SUBMIT|SESSION_REGISTER|SESSION_END",
+  "kind":      "READ|WRITE|LOCK_ACQUIRE|LOCK_RELEASE|LOCK_DENY|TASK_OPEN|TASK_APPLY|TASK_OUTCOME|SELF_TASK_OPEN|SELF_TASK_TRIGGER|NOTIFICATION_EMIT|NOTIFICATION_DELIVER|WATCHDOG_CHECK|WATCHDOG_VOTE|MEDIATOR_INVOKE|MEDIATOR_VERDICT|VALIDATOR_INVOKE|VALIDATOR_VERDICT|ERROR|INFO|HEAD_CHANGE|PROMPT_SUBMIT|SESSION_REGISTER|SESSION_RESUME|SESSION_CLEAR|SESSION_COMPACTED|SESSION_END|RESUME_ORPHAN_LOCK_DETECTED|SUBAGENT_ACTIVITY_SKIPPED|WAIT_CLAMPED|WAIT_TIMEOUT",
   "tool":      "Read|Write|Edit|Bash|...",
   "file":      "...",
   "hash":      "...",
@@ -445,7 +460,7 @@ Every hook appends exactly one event per meaningful action. The `log_event.sh` h
   "watchdog_confirm_seconds": 1500,
   "read_set_cap_per_session": 200,
   "wait_poll_schedule_seconds": [30, 60, 120],
-  "wait_max_seconds": 1800,
+  "wait_max_seconds": 570,
   "max_task_chain_depth": 3,
   "max_tasks_per_lock": 5,
   "max_anchor_window_lines": 10,
@@ -790,7 +805,7 @@ This pattern applies uniformly across the architecture: enforcement lives in the
 >   - `coord status` — print active sessions, locks, wait queue, pending tasks, self-tasks, pending validations.
 >   - `coord locks [--file <path>]` — list locks; optionally for one file.
 >   - `coord tasks [--session <id>] [--file <path>]` — list tasks with filters.
->   - `coord wait <file> [--timeout 1800]` — block until file unlocked or timeout.
+>   - `coord wait <file> [--timeout 570]` — block until file unlocked or timeout. The requested `--timeout` is clamped to `[30, 570]`; a clamped request logs a `WAIT_CLAMPED` event with `{requested, applied}`. On timeout, emits a `WAIT_TIMEOUT` event before exiting non-zero.
 >   - `coord task-open --file <path> --complexity <SIMPLE|MODERATE|COMPLEX> --anchor <json> --instruction <text> [--rationale <text>] [--parent <task_id>]` — open a delegated task on a locked file.
 >   - `coord self-delegate --file <path> --instruction <text>` — add a self-task.
 >   - `coord log [--tail N] [--kind K]` — print recent events.

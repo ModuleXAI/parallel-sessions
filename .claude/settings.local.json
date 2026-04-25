@@ -1,7 +1,32 @@
 {
-    "permissions": {
-      "defaultMode": "bypassPermissions",
-      "skipDangerousModePermissionPrompt": true
-    }
+  "permissions": {
+    "defaultMode": "bypassPermissions",
+    "skipDangerousModePermissionPrompt": true
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/suy/Desktop/ModuleX/repositories/session-synthesis/.coord/hooks/session_start.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/suy/Desktop/ModuleX/repositories/session-synthesis/.coord/hooks/session_end.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
   }
-  
+}

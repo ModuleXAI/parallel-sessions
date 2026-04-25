@@ -202,7 +202,7 @@ If this banner is absent, you are not in a coordinated session and none of the r
      > File `foo.ts` is locked by session `<holder_id>` since `<ts>` (~<mins> min). Options:
      > (a) Delegate a SIMPLE/MODERATE task: `Bash: coord task-open --file foo.ts --complexity SIMPLE --anchor '{"search":"...","window_lines":"..."}' --instruction '...' [--rationale '...']`.
      > (b) Self-delegate (do other work, return later): `Bash: coord self-delegate --file foo.ts --instruction '...'`.
-     > (c) Passively wait: `Bash: coord wait foo.ts --timeout 600` (blocks your Bash call until unlocked or timeout).
+     > (c) Passively wait: `Bash: coord wait foo.ts --timeout 570` (blocks your Bash call until unlocked or timeout; 570 s is the max — it sits just below Claude Code's 600 s Bash-tool ceiling).
      > Pick (a) for small, self-contained edits; (b) if you have other productive work; (c) only if the change is too complex to delegate AND you have no other work.
 
 3. **Lock held by yourself:**
@@ -324,6 +324,17 @@ If this banner is absent, you are not in a coordinated session and none of the r
 
 **Enforcement:** `[HOOK-ENFORCED]`.
 
+#### B.9.7 Session resumed, cleared, or compacted
+
+**Rule:** On a `SessionStart` event with `source ∈ {resume, clear, compact}`, the coordination layer preserves or selectively invalidates your read-set according to Decision 2.5's source-matrix (per PR-PHASE1-01):
+- `resume`: your prior read-set is **preserved intact**. If git HEAD drifted during the gap, read-set entries are automatically marked `superseded_by_head_change: true` and the relevant files will trigger stale-read warnings when you next read or write them.
+- `clear`: read-set entries are marked `superseded_by: "new_prompt"` — treated as a fresh-start boundary.
+- `compact`: read-set is **preserved intact** (context compression preserves read history semantically; the stored hashes are still the truth about what the session last observed on disk).
+
+You do **not** need to re-read files prophylactically after any of these events. The hooks will flag staleness when it actually matters (on the next write, or via `additionalContext` on HEAD drift). Prophylactic re-reads waste tokens and reset the read-set to state the coord layer has already carefully curated.
+
+**Enforcement:** `[HOOK-ENFORCED]` for the state-preservation and invalidation-marking actions. `[BEST-EFFORT]` for the "do not re-read prophylactically" guidance — Claude is expected to cooperate; if it re-reads anyway, the system still works correctly (just slightly more expensively).
+
 ### B.10 What NOT to do (anti-patterns)
 
 These are cases where Claude sometimes tries to "help" in ways that undermine coordination:
@@ -334,6 +345,7 @@ These are cases where Claude sometimes tries to "help" in ways that undermine co
 - **Do not invoke `coord reset` reflexively** when a coordination message is confusing. `coord reset` is destructive (clears locks, read-sets). The right response to confusion is `coord status` first, then `coord mediate` if the situation truly is anomalous.
 - **Do not spawn your own validation subagent via the Agent tool to bypass the validator agent hook.** The validator hook runs automatically on hash mismatch; calling your own subagent duplicates cost.
 - **Do not store session state in your own memory across turns as a substitute for `sessions.json`.** Your memory is advisory; `sessions.json` is authoritative.
+- **Do not spawn a subagent as a workaround to evade coordination.** Subagent tool calls are invisible to the coord layer by design (Decision 2.17: the `agent_type` filter in `pre_tool_use_*`, `post_tool_use_*`, and `stop.sh` causes those hooks to exit 0 without mutating state, emitting only a `SUBAGENT_ACTIVITY_SKIPPED` observability event). A subagent writing a file not locked by its parent can race silently with another session. If you need a bounded deferral, prefer `coord self-delegate` (which IS tracked) over a subagent.
 
 ### B.11 Quick-reference table
 
@@ -349,6 +361,7 @@ These are cases where Claude sometimes tries to "help" in ways that undermine co
 | Anomaly | Report to user if Mediator escalates | Mediator remediates or escalates | [HOOK-ENFORCED] + [BEST-EFFORT] on escalation acknowledgment |
 | Self-task reminder | Consider returning to the file | Inject reminder | [BEST-EFFORT] |
 | Stop with self-tasks | Address or ignore | Block once, allow on second Stop | [HOOK-ENFORCED] on block; [BEST-EFFORT] on your action |
+| Session resumed / cleared / compacted | Continue your work normally; do NOT re-read files prophylactically | Preserve or selectively invalidate read-set per Decision 2.5 source-matrix; flag HEAD drift automatically | [HOOK-ENFORCED] on invalidation; [BEST-EFFORT] on "do not re-read prophylactically" |
 
 ---
 

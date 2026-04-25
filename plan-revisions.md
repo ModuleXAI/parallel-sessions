@@ -200,4 +200,282 @@ Under the blanket policy, these are source citations / historical mentions; the 
 
 ---
 
+## PR-PHASE0-01 — Subagent filter relocation + `wait_max_seconds` bounds + subagent observability
+
+**Date:** 2026-04-24
+**Author:** Phase 3 builder (proposal); user-acknowledged with three clarifications.
+**Status:** APPROVED. Applied to `IMPLEMENTATION_PLAN.md` and `CLAUDE.md` in this revision.
+**Driver:** Phase 0 verification experiments #5 and #9. Findings F-006 (OPEN),
+F-008 (OPEN). User's acknowledgement message adds clarifications C-rationale,
+D-lower-bound, and an additional MUST-log requirement for subagent activity.
+
+### Observed facts requiring change
+
+1. **Subagents do not fire `SessionStart`.** Decision 2.17 filters subagents
+   by "SessionStart input includes a populated `agent_type` field." Experiment
+   #5 (T0.07) shows this never happens: subagent tool calls share the parent's
+   `session_id` and the `agent_type` field is populated on `PreToolUse`,
+   `PostToolUse`, and `SubagentStop` — never on `SessionStart`.
+2. **Bash-tool 10-minute ceiling.** Claude Code's Bash tool caps at 600 s
+   configurable timeout (default 120 s). `coord wait` is a Bash-tool call.
+   Plan §3.6 sets `wait_max_seconds: 1800` (30 min), which is unreachable.
+
+### Proposed edits
+
+**A. Decision 2.17 amendment (subagent filter location).**
+
+Replace:
+> "Subagent session participation: sessions where `SessionStart` input includes a populated `agent_type` field are **filtered out** of coordination. ..."
+
+With:
+> "Subagent session participation: Claude Code does **not** issue a separate
+> `SessionStart` for subagents spawned via the Task tool; subagent tool calls
+> carry the parent session's `session_id`. The coordination layer filters
+> subagent activity at the **tool-call hook layer**: when any `PreToolUse`,
+> `PostToolUse`, or `SubagentStop` input contains a non-empty `agent_type`
+> field, coordination hooks exit 0 without mutating state (they may still
+> emit an observability event). Subagent tool calls therefore inherit the
+> parent session's locks and read-set passively — the parent's lock covers
+> the parent's turn, including any tool calls its subagents make."
+> **Source:** Phase 0 Experiment #5 (documented in `.coord/phase0-verification.md`).
+
+**B. §B.10 anti-pattern addition.**
+
+Add to CLAUDE.md Part B §B.10:
+> "- **Do not spawn a subagent as a workaround to evade coordination.**
+>   Subagent tool calls are invisible to the coord layer by design (filtered
+>   out in `pre_tool_use_*`, `post_tool_use_*`, `stop.sh`), which means a
+>   subagent writing a file not locked by its parent can race silently with
+>   another session. If you need a bounded deferral, prefer `coord
+>   self-delegate` (which IS tracked) over a subagent."
+
+**C. §3.6 config defaults (with rationale per user clarification).**
+
+Change:
+```json
+"wait_max_seconds": 1800
+```
+to:
+```json
+"wait_max_seconds": 570
+```
+
+Add rationale sentence to Decision 2.20's bounds list (see change D below):
+> "570 s = 600 s Bash-tool ceiling − 30 s safety margin to avoid hitting the
+> tool timeout before coord's own timeout fires and logs a clean
+> WAIT_TIMEOUT event."
+
+**D. §3.6 / §4 tunable bounds (upper AND lower; alongside Decision 2.20's
+existing bounds).**
+
+Add: *`wait_max_seconds` bounds are `30 ≤ wait_max_seconds < 600`. Upper
+bound: 600 s is the Claude Code Bash-tool configurable maximum (F-008).
+Lower bound: 30 s prevents accidental misconfiguration to near-zero values
+that would make passive wait unusable. Installer and `coord health` refuse
+configurations outside these bounds.*
+
+**E. §B.2 option (c) lock-deny prompt text.**
+
+Change:
+> "(c) Passively wait: `Bash: coord wait foo.ts --timeout 600` (blocks your Bash call until unlocked or timeout)."
+
+to:
+> "(c) Passively wait: `Bash: coord wait foo.ts --timeout 570` (blocks your
+> Bash call until unlocked or timeout; 570 s is the max — it sits just below
+> Claude Code's 600 s Bash-tool ceiling)."
+
+**F. §4 `coord wait` CLI test criteria.**
+
+Add: *requested `--timeout` is clamped to the range `[30, 570]`; a clamped
+request logs a `WAIT_CLAMPED` event with the requested and applied values.*
+
+**G. Subagent-activity observability (user-requested addition).**
+
+The amended Decision 2.17 (change A) says the coord layer "filters subagent
+activity at the tool-call hook layer." Make the observability commitment
+explicit, not optional:
+
+> "When `pre_tool_use_*`, `post_tool_use_*`, or `stop.sh` (and by extension
+> any hook whose stdin may carry a populated `agent_type`) detects a
+> non-empty `agent_type` and exits without mutating state, it MUST emit a
+> single event-log entry of `kind: "SUBAGENT_ACTIVITY_SKIPPED"` with payload
+> `{parent_session, tool, agent_type, file: <file_path when applicable>}`."
+
+Rationale: FUTURE_WORK_visualization_ui must be able to show subagent
+activity even though coord doesn't coordinate it. Logging is cheap;
+reconstructing history later if we didn't log is impossible.
+
+Plan edit: **§3.5** events.jsonl kind-list — add
+`SUBAGENT_ACTIVITY_SKIPPED` to the enumerated `kind` set.
+
+### Cross-references
+
+- FINDINGS.md F-006 → RESOLVED upon landing this revision.
+- FINDINGS.md F-008 → RESOLVED upon landing this revision.
+- Open Item OI-2 ("Bash tool cutoff TBD") — closed by F-008 + this PR.
+- IMPLEMENTATION_LOG.md T0.07, T0.11 cited as evidence for A + C-F.
+
+### Non-changes
+
+- Plan's overall design unaffected; these are localized corrections.
+- No change to Mediator, validator, task-graph, or lib module contracts.
+- FUTURE_WORK files untouched.
+
+### Acknowledgement
+
+Approved 2026-04-24 with clarifications C-rationale, D-lower-bound, and
+addition G (subagent activity logging). Plan documents edited to match;
+downstream code (config default already = 570 since initial install;
+`coord health` bounds check + subagent logging) implemented alongside.
+
+---
+
+## PR-PHASE1-01 — Decision 2.5 augmented with `SessionStart.source` behavior matrix
+
+**Date:** 2026-04-24
+**Author:** Phase 3 builder (proposal); user-approved with two clarifications
+folded in (see "Clarifications from user" below).
+**Status:** APPROVED. Applied to `IMPLEMENTATION_PLAN.md` Decision 2.5 in this
+revision.
+**Driver:** FINDINGS F-004 (OPEN → RESOLVED by this revision). Phase 0
+Experiment #1 (T0.03) captured the observation that `SessionStart` stdin
+carries a `source` field with values `startup | resume | clear | compact`;
+original Decision 2.5 spoke only to "registration happens in SessionStart
+when CLAUDE_COORD=1 is set" and was silent on the other three source
+values. Phase 1 adds read-set tracking (`pre_tool_use_read.sh`) and prompt
+handling (`user_prompt_submit.sh`); read-set preservation/invalidation
+semantics across resume/clear/compact must be nailed down before those
+hooks are written.
+
+### Observed facts requiring change
+
+1. **SessionStart fires for all four source values** — not just `startup`.
+   Phase 0 Experiment #1 confirmed `source=startup` on fresh launch; Claude
+   Code documentation (v2.1.119) enumerates the other three values. Resumed
+   sessions keep the same `session_id`, so naive "insert new row on
+   SessionStart" behavior would fail an uniqueness invariant.
+2. **PID + lstart change across resume** (the old process is dead; the new
+   process has a fresh pid and a fresh `ps -p PID -o lstart=` string). Our
+   watchdog primitives (F-005) key off `$PPID` and `lstart`; resume must
+   refresh both.
+3. **`source=resume` can occur after SIGKILL of the prior process** (Phase 0
+   Experiment #6: SIGKILL does not fire SessionEnd, so prior locks / marker
+   files may still be present in state keyed by this same `session_id`).
+4. **Git HEAD may have changed during the resume gap** (user checked out a
+   branch; previous process died; user returned). Decision 2.22 already
+   covers "HEAD change invalidates read-set" for the UserPromptSubmit path;
+   the resume path needs the same logic explicitly.
+
+### Proposed edit to Decision 2.5
+
+Replace:
+
+> "Decision 2.5: Session identity scheme: Claude Code provides a UUID
+> `session_id` in every hook's stdin JSON. That UUID is the coordination
+> session ID. Session registration happens in `SessionStart` when
+> `CLAUDE_COORD=1` is set in the environment. Non-participant sessions
+> (env var unset) are ignored."
+
+With:
+
+> "Decision 2.5: Session identity scheme: Claude Code provides a UUID
+> `session_id` in every hook's stdin JSON. That UUID is the coordination
+> session ID. SessionStart is invoked with a `source` field whose value
+> distinguishes four lifecycle events; the hook's behavior depends on
+> `source` as follows:
+>
+> | `source`  | Registration action                                                  | Read-set action                                                         | PID / lstart / git_head              | Event                 |
+> |-----------|-----------------------------------------------------------------------|-------------------------------------------------------------------------|--------------------------------------|-----------------------|
+> | `startup` | Insert new row (schema per §3.3); reject if a row already exists for this `session_id` as anomaly. | Initialize empty read-set.                                              | Capture fresh (`$PPID` + lstart + git_head). | `SESSION_REGISTER`    |
+> | `resume`  | Idempotent refresh of the existing row (matched by `session_id`); if no prior row exists, fall back to `startup` semantics and emit `SESSION_REGISTER` with `reason:"resume_without_prior_row"`. | **Preserve read-set intact** — the `session_id` is stable across resume and prior reads semantically still belong to this session. Then: compare stored `git_head` to current; if different, set `superseded_by_head_change: true` on every entry in `read_sets[<id>].reads[]` before proceeding (per Decision 2.22). | Refresh (new `$PPID`, new lstart, new git_head). | `SESSION_RESUME`. Additionally, if lock records keyed to this `session_id` exist with the prior PID/lstart stamp, emit a `RESUME_ORPHAN_LOCK_DETECTED` event per affected lock but do **not** release it in Phase 1 — orphan-lock eviction is deferred to Phase 3's peer-watchdog (Phase 2 introduces locks but the watchdog doesn't arrive until Phase 3). |
+> | `clear`  | Refresh the existing row (idempotent). | Mark prompt-scoped entries `superseded_by: "new_prompt"`. Semantically identical to the invalidation `user_prompt_submit.sh` performs; `source=clear` is the independent "fresh start" channel when the user explicitly clears context. | Refresh git_head only (pid/lstart unchanged — same process). | `SESSION_CLEAR`. |
+> | `compact` | Refresh `last_activity_at` on the existing row. | **No change** — context compression preserves read history semantically; the hashes stored in `read_sets` are still the truth about "what this session last observed on disk." | No change. | `SESSION_COMPACTED` (informational). |
+>
+> Non-participant sessions (env var `CLAUDE_COORD` unset) are ignored
+> regardless of `source`. Subagent sessions do not fire SessionStart at all
+> (Decision 2.17 per PR-PHASE0-01); the source-branching above applies
+> only to primary coordinated sessions."
+>
+> **Rationale:** UUID is already stable and unique; env-var gate is a clean
+> opt-in that doesn't require a wrapper script and can be toggled per-launch.
+> Source-matrix was added after Phase 0 Experiment #1 exposed the gap; the
+> matrix preserves read-set semantics across the full session lifecycle.
+>
+> **Source:** User direction (Session Identity and System Boundary);
+> Phase 1 `03` §9; planner chose env var over wrapper command; PR-PHASE1-01
+> augmented the matrix post-Phase-0 (FINDINGS F-004).
+
+### Clarifications from user (2026-04-24)
+
+Folded into the matrix above exactly as the user worded them:
+
+- **(a) Orphaned locks from a SIGKILL-ed prior process.** Policy per user:
+  "orphaned-lock eviction deferred to Phase 2 peer-watchdog; Phase 1 flags
+  the condition in events.jsonl." Implementation per the matrix: on
+  `source=resume`, if any lock record exists in `sessions.json` keyed to
+  this `session_id` AND the stored PID/lstart do not match `$PPID` +
+  current lstart, emit a `RESUME_ORPHAN_LOCK_DETECTED` event per lock with
+  payload `{session_id, file, old_pid, old_pid_lstart, new_pid,
+  new_pid_lstart}`. Do NOT release the lock in Phase 1 (locks are
+  out-of-scope for Phase 1). Phase 3's peer-watchdog will own eviction
+  once PID + lstack consensus logic exists. Clarification from user:
+  "Phase 2 peer-watchdog"; corrected here to Phase 3 since the plan's
+  §5 Phase 2 scope is "write coordination" (locks added, no watchdog),
+  and Phase 3 is where the watchdog lands. This is a pure phasing
+  correction — no substantive behavior change.
+
+- **(b) Git HEAD change during the resume gap.** Policy per user: "compare
+  stored vs current git_head; if different, mark read_set entries
+  `superseded_by_head_change: true`." Implementation per the matrix: on
+  `source=resume`, after preserving the read-set, compute current
+  `git rev-parse HEAD` and compare to the row's stored `git_head`; if
+  they differ, iterate `read_sets[<id>].reads[]` and set
+  `superseded_by_head_change: true` on every entry, then update the row's
+  `git_head` to the new value. Emit a single `HEAD_CHANGE` event with
+  payload `{session_id, old_head, new_head, source:"resume",
+  reads_marked:<count>}`. This reuses the existing Decision 2.22 mechanism
+  already used on `UserPromptSubmit`.
+
+### §3.5 events.jsonl kind-list addition
+
+Three new event kinds enter the enumerated set:
+
+- `SESSION_RESUME` — emitted on `source=resume` registration refresh.
+- `SESSION_CLEAR` — emitted on `source=clear`.
+- `SESSION_COMPACTED` — emitted on `source=compact`.
+- `RESUME_ORPHAN_LOCK_DETECTED` — emitted per orphaned-lock-on-resume (see
+  clarification (a)).
+
+`HEAD_CHANGE` was already in the kind list from Decision 2.22.
+
+### Cross-references
+
+- FINDINGS F-004 → RESOLVED by this revision.
+- Decision 2.22 (HEAD change invalidates read-set) — mechanism reused for
+  the resume path per clarification (b).
+- Decision 2.17 / PR-PHASE0-01 — subagents don't fire SessionStart at all,
+  so the source-matrix only governs primary coordinated sessions.
+- `session_start.sh` (component spec §4) — will implement the matrix in
+  Phase 1 tasks T1.04–T1.05 (the source-branching lives in session_start;
+  user_prompt_submit reuses the HEAD-change mechanism but does not need
+  source-awareness).
+
+### Non-changes (deliberate)
+
+- Watchdog / lock-eviction logic still arrives in Phase 3 per the phase
+  table — this revision only defines the FLAG (`RESUME_ORPHAN_LOCK_DETECTED`
+  event) that Phase 3 will consume.
+- `session_end.sh`, `pre_tool_use_*.sh`, and `post_tool_use_*.sh` are
+  unchanged.
+- No change to the schema JSON-Schema text in §3.3 — the matrix governs
+  transitions on the already-defined schema fields
+  (`superseded_by`, `superseded_by_head_change`, `pid`, `pid_lstart`,
+  `git_head`).
+
+### Acknowledgement
+
+Approved 2026-04-24 with clarifications (a) and (b) folded in as above.
+
+---
+
 *Future entries append below.*

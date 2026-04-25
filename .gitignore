@@ -1,0 +1,24 @@
+# Phase 3 construction artifacts — NEVER commit.
+# See CLAUDE.md §A.10, §A.11, §A.12; Decisions 2.21, 2.23, 2.24; PR-REV-01.
+
+# Coordination runtime state (created by installer, owned by the system).
+.coord/
+
+# Hook registrations and local overrides.
+.claude/settings.local.json
+
+# Construction-time logs and findings.
+IMPLEMENTATION_LOG.md
+FINDINGS.md
+
+# Phase sign-offs (one per phase, gitignored per A.10).
+phase-*-signoff.md
+
+# Phase 0 verification artifact (gitignored per plan §5 Phase 0).
+phase0-verification.md
+
+# OS / editor cruft that has no place in VCS.
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
