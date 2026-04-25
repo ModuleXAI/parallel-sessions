@@ -132,15 +132,44 @@ coord_atomic_reset() {
   ) 9>"$lock_file"
 }
 
+# coord_consume_corrupt_state_flag
+#   Implements §B.9.2 step 4: if a corrupt_state Mediator-pending flag is
+#   present at $COORD_DIR/mediator/pending.json AND has not yet been
+#   delivered (no .delivered.* counterpart), print the user-facing banner
+#   text on stdout AND rename the flag to pending.delivered.<ts>.json so
+#   the same banner is not emitted twice.
+#
+#   Returns 0 if a banner was emitted (caller should compose into
+#   additionalContext); 1 if no flag was found / not corrupt_state.
+#
+#   This function does NOT format the JSON envelope — it just prints the
+#   banner text. Callers wrap it with their own jq -nc shape.
+coord_consume_corrupt_state_flag() {
+  local pending="${COORD_DIR:-}/mediator/pending.json"
+  [ -f "$pending" ] || return 1
+  local kind
+  kind=$(jq -r '.kind // ""' "$pending" 2>/dev/null || printf '')
+  if [ "$kind" != "corrupt_state" ]; then
+    return 1
+  fi
+  printf 'Coord: coordination state was reset due to corruption. Mediator will diagnose; prior locks are lost. Retry your operation.'
+  local ts
+  ts=$(date -u +%Y-%m-%dT%H-%M-%SZ)
+  mv "$pending" "${COORD_DIR}/mediator/pending.delivered.${ts}.json" 2>/dev/null || rm -f "$pending" 2>/dev/null || true
+  return 0
+}
+
 # CLI shim for tests and ad-hoc use:
 #   atomic_write.sh edit  <state_file> <jq_filter> [<jq_args> ...]
 #   atomic_write.sh reset <state_file>
 #   atomic_write.sh template          (prints empty template)
+#   atomic_write.sh consume-corrupt-banner  (prints + clears pending flag)
 if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
   case "${1:-}" in
     edit)      shift; coord_atomic_edit "$@" ;;
     reset)     shift; coord_atomic_reset "$@" ;;
     template)  coord_state_empty_template ;;
-    *) printf 'usage: atomic_write.sh {edit|reset|template} ...\n' >&2; exit 2 ;;
+    consume-corrupt-banner) coord_consume_corrupt_state_flag ;;
+    *) printf 'usage: atomic_write.sh {edit|reset|template|consume-corrupt-banner} ...\n' >&2; exit 2 ;;
   esac
 fi

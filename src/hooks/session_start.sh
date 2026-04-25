@@ -251,6 +251,11 @@ if [ "$OTHER_COUNT" -lt 0 ]; then OTHER_COUNT=0; fi
 BANNER="Coord v1.0 active. Your coordination session ID is $SESSION_ID. "
 BANNER="$BANNER""There are currently $OTHER_COUNT other coordinated session(s) in this repository. "
 BANNER="$BANNER""See 'coord status' for live state."
+# Compose any pending corruption-recovery banner per §B.9.2 step 4.
+CORRUPT_BANNER=$(coord_consume_corrupt_state_flag || printf '')
+if [ -n "$CORRUPT_BANNER" ]; then
+  BANNER="$CORRUPT_BANNER"$'\n\n'"$BANNER"
+fi
 emit_additional_context "$BANNER"
 
 # --- Event log per source ---

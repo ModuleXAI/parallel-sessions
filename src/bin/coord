@@ -32,6 +32,14 @@ config_file() { printf '%s/config.json\n' "$COORD_DIR"; }
 
 cmd_status() {
   if [ ! -f "$(state_file)" ]; then die "no .coord/sessions.json found; run install"; fi
+  local reads_detail=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --reads) reads_detail=1; shift ;;
+      *) die "unknown flag: $1" ;;
+    esac
+  done
+
   local schema active_count locks wait_q pending_self pending_valid
   schema=$(jq -r '.schema_version' "$(state_file)" 2>/dev/null || printf '?')
   active_count=$(jq -r '[.sessions[]|select(.state=="ACTIVE")]|length' "$(state_file)" 2>/dev/null || printf '0')
@@ -52,6 +60,40 @@ cmd_status() {
   info "  wait_queue:  $wait_q waiter(s)"
   info "  self_tasks:  $pending_self pending"
   info "  validation:  $pending_valid pending"
+
+  # Per-session read-set summary (Phase 1).
+  local rs_count
+  rs_count=$(jq -r '(.read_sets // {}) | length' "$(state_file)" 2>/dev/null || printf '0')
+  if [ "$rs_count" -gt 0 ]; then
+    info "  read_sets:"
+    jq -r '
+      .read_sets
+      | to_entries[]
+      | (.value.reads // []) as $r
+      | "    \(.key|.[0:8])  total=\($r|length)  is_latest=\($r|map(select((.is_latest // false) == true))|length)  head_invalidated=\($r|map(select((.superseded_by_head_change // false) == true))|length)  prompt_invalidated=\($r|map(select((.superseded_by // null) == "new_prompt"))|length)"
+    ' "$(state_file)" 2>/dev/null
+    if [ "$reads_detail" = "1" ]; then
+      info "  read_sets (detail):"
+      jq -r '
+        .read_sets
+        | to_entries[]
+        | (.key|.[0:8]) as $sid
+        | (.value.reads // [])
+        | sort_by(.at // "")
+        | reverse
+        | .[0:20]
+        | map("    " + $sid + "  " + .path
+              + "  hash=" + ((.hash // "")[0:12])
+              + "  is_latest=" + ((.is_latest // false) | tostring)
+              + (if (.superseded_by_head_change // false) then "  HEAD!" else "" end)
+              + (if (.superseded_by // null) == "new_prompt" then "  NEW_PROMPT!" else "" end))
+        | .[]
+      ' "$(state_file)" 2>/dev/null
+    fi
+  else
+    info "  read_sets: (none)"
+  fi
+
   info "  events.jsonl lines: $(wc -l < "$(events_file)" 2>/dev/null | tr -d ' ')"
 }
 
@@ -150,10 +192,14 @@ cmd_uninstall() {
     settings="$repo/.claude/settings.local.json"
     if [ -f "$settings" ]; then
       local tmp; tmp=$(mktemp)
+      # Strip coord-owned entries across ALL events; preserve user entries.
       jq '
         if has("hooks") then
-          .hooks.SessionStart |= ((. // []) | map(select((.hooks // []) | all(.command // "" | contains(".coord/hooks/") | not))))
-          | .hooks.SessionEnd   |= ((. // []) | map(select((.hooks // []) | all(.command // "" | contains(".coord/hooks/") | not))))
+          .hooks |= with_entries(
+            .value |= ((. // []) | map(
+              .hooks = ((.hooks // []) | map(select(((.command // "") | contains("/.coord/hooks/")) | not)))
+            ) | map(select((.hooks // []) | length > 0)))
+          )
         else . end' "$settings" >"$tmp" && mv "$tmp" "$settings"
     fi
     info "hook entries removed from $settings"
@@ -182,7 +228,8 @@ usage() {
 usage: coord <subcommand> [args]
 
 Phase 0 subcommands:
-  status             print active sessions, locks, wait queue, self-tasks
+  status [--reads]   print active sessions, locks, wait queue, self-tasks,
+                     and per-session read-set summary; --reads adds detail
   health             validate deps, fs, config bounds
   log [--tail N] [--kind K]   print recent events.jsonl
   events --since <iso8601>    dump events after a timestamp

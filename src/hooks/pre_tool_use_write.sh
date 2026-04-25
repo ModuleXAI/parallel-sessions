@@ -166,11 +166,28 @@ if [ "$STALE_COUNT" -gt 0 ]; then
   coord_log_event kind=STALE_READ_WARNED tool="$TOOL_NAME" file="$TARGET" stale_count="$STALE_COUNT"
 fi
 
-# PHASE-2: When Phase 2 lands, replace the warning-only block above with:
-#   - acquire lock (coord_atomic_edit on .locks[$target]) when read-set OK
-#   - emit permissionDecision:"deny" when locked-by-other or stale-read-detected
-# PHASE-4: When Phase 4 lands, add:
-#   - write .coord/validation/<sid>.json on stale-read-detected so the
-#     validator agent can classify SAFE/MINOR/CRITICAL.
+# PHASE-2 UPGRADE POINT:
+#   When lock enforcement lands, replace the warning-only block above with:
+#     (a) acquire lock atomically — coord_atomic_edit setting
+#         .locks[$target] = {session, pid, pid_lstart, acquired_at,
+#                            last_refresh_at, tasks: []} when read-set
+#         validation succeeds AND no other session holds the lock.
+#     (b) emit hookSpecificOutput.permissionDecision: "deny" with the
+#         three-options reason text (delegate / self-delegate / passive
+#         wait) when another session holds the lock, OR when the read-set
+#         contains stale entries (replacing today's allow-with-warning).
+#   See IMPLEMENTATION_PLAN.md §5 Phase 2 "Done when" criteria and
+#   CLAUDE.md §B.2 runtime rule for the full deny-message format.
+#
+# PHASE-4 UPGRADE POINT:
+#   When the validation subagent lands, on stale-read-detected:
+#     (a) write .coord/validation/<session_id>.json with payload
+#         {tool, file, old_hash, current_hash, prompt_text} so the
+#         validator agent hook can classify the diff as SAFE / MINOR /
+#         CRITICAL on the next PreToolUse(Write|Edit) cycle.
+#     (b) read back the verdict (written by validator_agent.md) and
+#         escalate Phase-2's deny only when verdict == CRITICAL.
+#   See IMPLEMENTATION_PLAN.md §2 Decision 2.16 (validation subagent
+#   architecture) and §5 Phase 4 "Done when" criteria.
 
 exit 0

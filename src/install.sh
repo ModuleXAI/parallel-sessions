@@ -227,29 +227,50 @@ JSON
 # --- Step 7: hook registrations in .claude/settings.local.json ---
 register_hooks() {
   mkdir -p "$REPO_ROOT/.claude"
-  # Build the hooks fragment for our two Phase 0 events.
-  local frag
-  frag=$(jq -n --arg hdir "$COORD_DIR/hooks" '
-    {
-      hooks: {
-        SessionStart: [ { matcher: "*",
-                          hooks: [ { type: "command",
-                                     command: ($hdir + "/session_start.sh"),
-                                     timeout: 10 } ] } ],
-        SessionEnd:   [ { matcher: "*",
-                          hooks: [ { type: "command",
-                                     command: ($hdir + "/session_end.sh"),
-                                     timeout: 10 } ] } ]
-      }
-    }')
-  # Merge with existing settings.local.json (don't clobber user additions).
-  local tmp
+  local tmp current
   tmp=$(mktemp)
   if [ -s "$CLAUDE_SETTINGS" ]; then
-    jq --argjson add "$frag" '. * $add' "$CLAUDE_SETTINGS" >"$tmp"
+    current=$(cat "$CLAUDE_SETTINGS")
+    # Validate it parses; if not, fail loudly — we won't silently overwrite.
+    if ! printf '%s' "$current" | jq -e . >/dev/null 2>&1; then
+      die "$CLAUDE_SETTINGS is not valid JSON; refusing to overwrite. Fix or remove it and re-run."
+    fi
   else
-    printf '%s\n' "$frag" >"$tmp"
+    current='{}'
   fi
+
+  # Strategy:
+  #   1. Remove any prior coord-owned entries (commands under .coord/hooks/)
+  #      from EVERY event's hook list. This preserves user-authored entries
+  #      sitting alongside ours.
+  #   2. Append our Phase-1 hook set:
+  #        SessionStart       → session_start.sh         (matcher *)
+  #        SessionEnd         → session_end.sh           (matcher *)
+  #        UserPromptSubmit   → user_prompt_submit.sh    (matcher *)
+  #        PreToolUse         → pre_tool_use_any.sh      (matcher *)
+  #                             pre_tool_use_read.sh     (matcher Read)
+  #                             pre_tool_use_write.sh    (matcher Write|Edit|NotebookEdit)
+  #
+  # Idempotent: re-running install/--repair strips the prior entries and
+  # re-adds the current set, so changes to commands/timeouts roll forward.
+  printf '%s' "$current" | jq --arg hdir "$COORD_DIR/hooks" '
+    .hooks //= {}
+    | .hooks |= with_entries(
+        .value |= ((. // []) | map(
+          .hooks = ((.hooks // []) | map(select(((.command // "") | contains("/.coord/hooks/")) | not)))
+        ) | map(select((.hooks // []) | length > 0)))
+      )
+    | .hooks.SessionStart      = ((.hooks.SessionStart // [])
+        + [{matcher:"*", hooks:[{type:"command", command:($hdir+"/session_start.sh"),     timeout:10}]}])
+    | .hooks.SessionEnd        = ((.hooks.SessionEnd // [])
+        + [{matcher:"*", hooks:[{type:"command", command:($hdir+"/session_end.sh"),       timeout:10}]}])
+    | .hooks.UserPromptSubmit  = ((.hooks.UserPromptSubmit // [])
+        + [{matcher:"*", hooks:[{type:"command", command:($hdir+"/user_prompt_submit.sh"),timeout:10}]}])
+    | .hooks.PreToolUse        = ((.hooks.PreToolUse // [])
+        + [{matcher:"*",                       hooks:[{type:"command", command:($hdir+"/pre_tool_use_any.sh"),   timeout:10}]},
+           {matcher:"Read",                    hooks:[{type:"command", command:($hdir+"/pre_tool_use_read.sh"),  timeout:10}]},
+           {matcher:"Write|Edit|NotebookEdit", hooks:[{type:"command", command:($hdir+"/pre_tool_use_write.sh"), timeout:10}]}])
+  ' >"$tmp"
   mv "$tmp" "$CLAUDE_SETTINGS"
 }
 
@@ -296,10 +317,17 @@ if [ "$MODE" = uninstall ]; then
   say "uninstall: removing hook entries from $CLAUDE_SETTINGS (leaving .coord/ in place)"
   if [ -s "$CLAUDE_SETTINGS" ]; then
     tmp=$(mktemp)
-    jq 'if has("hooks") then
-          .hooks.SessionStart |= ((. // []) | map(select((.hooks // []) | all(.command // "" | contains(".coord/hooks/") | not))))
-          | .hooks.SessionEnd   |= ((. // []) | map(select((.hooks // []) | all(.command // "" | contains(".coord/hooks/") | not))))
-        else . end' "$CLAUDE_SETTINGS" >"$tmp" && mv "$tmp" "$CLAUDE_SETTINGS"
+    # Strip any coord-owned entries (commands under .coord/hooks/) across
+    # ALL events; preserves user-authored entries alongside ours.
+    jq '
+      if has("hooks") then
+        .hooks |= with_entries(
+          .value |= ((. // []) | map(
+            .hooks = ((.hooks // []) | map(select(((.command // "") | contains("/.coord/hooks/")) | not)))
+          ) | map(select((.hooks // []) | length > 0)))
+        )
+      else . end
+    ' "$CLAUDE_SETTINGS" >"$tmp" && mv "$tmp" "$CLAUDE_SETTINGS"
     say "hooks entries removed from settings.local.json"
   fi
   say "uninstall complete; .coord/ directory, IMPLEMENTATION_LOG.md, FINDINGS.md left untouched"
