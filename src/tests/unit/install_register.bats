@@ -1,7 +1,8 @@
 #!/usr/bin/env bats
 # Tests for install.sh hook registration (Phase 2 expanded set).
-# Phase 1 had 6 hooks; Phase 2 adds post_tool_use_write.sh on the
-# PostToolUse event with matcher "Write|Edit|NotebookEdit". Total: 7 hooks.
+# Phase 1 had 6 hooks; Phase 2 adds post_tool_use_write.sh (PostToolUse
+# matcher Write|Edit|NotebookEdit, T2.01) AND stop.sh (Stop matcher *,
+# T2.02). Total: 8 hooks.
 
 load "../helpers/common"
 
@@ -31,7 +32,7 @@ _install() {
   ( cd "$TMP" && "$I" --yes "$@" )
 }
 
-@test "install: --repair (clean) registers all 7 Phase-2 hooks" {
+@test "install: --repair (clean) registers all 8 Phase-2 hooks" {
   _install --repair >/dev/null
   [ -f "$SETTINGS" ]
   # SessionStart
@@ -40,6 +41,9 @@ _install() {
   # SessionEnd
   run jq -r '[.hooks.SessionEnd[].hooks[].command] | join(",")' "$SETTINGS"
   echo "$output" | grep -q "session_end.sh"
+  # Stop — Phase 2 T2.02 graceful release hook.
+  run jq -r '[.hooks.Stop[].hooks[].command] | join(",")' "$SETTINGS"
+  echo "$output" | grep -q "stop.sh"
   # UserPromptSubmit
   run jq -r '[.hooks.UserPromptSubmit[].hooks[].command] | join(",")' "$SETTINGS"
   echo "$output" | grep -q "user_prompt_submit.sh"
@@ -48,15 +52,21 @@ _install() {
   echo "$output" | grep -q "pre_tool_use_any.sh"
   echo "$output" | grep -q "pre_tool_use_read.sh"
   echo "$output" | grep -q "pre_tool_use_write.sh"
-  # PostToolUse — Phase 2 lock release hook.
+  # PostToolUse — Phase 2 T2.01 lock release hook.
   run jq -r '[.hooks.PostToolUse[].hooks[].command] | join(",")' "$SETTINGS"
   echo "$output" | grep -q "post_tool_use_write.sh"
 }
 
-@test "install: PostToolUse matcher is Write|Edit|NotebookEdit (Phase 2)" {
+@test "install: PostToolUse matcher is Write|Edit|NotebookEdit (Phase 2 T2.01)" {
   _install --repair >/dev/null
   run jq -r '.hooks.PostToolUse[0].matcher' "$SETTINGS"
   [ "$output" = "Write|Edit|NotebookEdit" ]
+}
+
+@test "install: Stop matcher is * (Phase 2 T2.02)" {
+  _install --repair >/dev/null
+  run jq -r '.hooks.Stop[0].matcher' "$SETTINGS"
+  [ "$output" = "*" ]
 }
 
 @test "install: PreToolUse matchers are correct (any=*, read=Read, write=Write|Edit|NotebookEdit)" {
@@ -78,6 +88,10 @@ _install() {
   run jq -r '[.hooks.PostToolUse[] | select(.hooks[].command | contains(".coord/hooks/"))] | length' "$SETTINGS"
   [ "$output" = "1" ]
   run jq -r '[.hooks.SessionStart[] | select(.hooks[].command | contains(".coord/hooks/"))] | length' "$SETTINGS"
+  [ "$output" = "1" ]
+  run jq -r '[.hooks.SessionEnd[] | select(.hooks[].command | contains(".coord/hooks/"))] | length' "$SETTINGS"
+  [ "$output" = "1" ]
+  run jq -r '[.hooks.Stop[] | select(.hooks[].command | contains(".coord/hooks/"))] | length' "$SETTINGS"
   [ "$output" = "1" ]
   run jq -r '[.hooks.UserPromptSubmit[] | select(.hooks[].command | contains(".coord/hooks/"))] | length' "$SETTINGS"
   [ "$output" = "1" ]
@@ -128,10 +142,10 @@ JSON
 
 @test "install: hook scripts are copied + executable in .coord/hooks/" {
   _install --repair >/dev/null
-  for h in session_start session_end user_prompt_submit pre_tool_use_any pre_tool_use_read pre_tool_use_write post_tool_use_write; do
+  for h in session_start session_end stop user_prompt_submit pre_tool_use_any pre_tool_use_read pre_tool_use_write post_tool_use_write; do
     [ -x "$TMP/.coord/hooks/$h.sh" ] || { echo "missing: $h.sh"; return 1; }
   done
-  for l in atomic_write log_event participant state_query subagent_filter head_tracking hash; do
+  for l in atomic_write log_event participant state_query subagent_filter head_tracking hash notify_waiters; do
     [ -f "$TMP/.coord/lib/$l.sh" ] || { echo "missing lib: $l.sh"; return 1; }
   done
 }

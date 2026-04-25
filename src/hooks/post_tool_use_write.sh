@@ -36,6 +36,8 @@ LIB_DIR="$(cd "$HOOK_DIR/../lib" && pwd)"
 . "$LIB_DIR/subagent_filter.sh"
 # shellcheck disable=SC1091
 . "$LIB_DIR/participant.sh"
+# shellcheck disable=SC1091
+. "$LIB_DIR/notify_waiters.sh"
 
 coord_resolve_root() {
   if [ -n "${COORD_DIR:-}" ] && [ -d "$COORD_DIR" ]; then
@@ -90,8 +92,15 @@ STATE="$COORD_DIR/sessions.json"
 [ ! -f "$STATE" ] && exit 0
 [ -z "$TARGET" ] && exit 0
 
-# Identify the lock holder for $TARGET, if any.
-LOCK_HOLDER=$(jq -r --arg f "$TARGET" '.locks[$f].session // ""' "$STATE" 2>/dev/null || printf '')
+# Identify the lock holder + acquired_at for $TARGET, if any. Capture
+# acquired_at BEFORE deletion so the notification scan window is correct.
+LOCK_TSV=$(jq -r --arg f "$TARGET" '
+  (.locks[$f] // {}) as $L
+  | [($L.session // ""), ($L.acquired_at // "")]
+  | @tsv
+' "$STATE" 2>/dev/null || printf '')
+LOCK_HOLDER=$(printf '%s' "$LOCK_TSV" | awk -F'\t' '{print $1}')
+LOCK_ACQUIRED=$(printf '%s' "$LOCK_TSV" | awk -F'\t' '{print $2}')
 
 if [ -z "$LOCK_HOLDER" ]; then
   # No lock to release — pre-hook may have failed atomic acquire; silent allow.
@@ -125,9 +134,18 @@ if ! coord_atomic_edit "$STATE" \
   exit 0
 fi
 
-coord_log_event kind=LOCK_RELEASED tool="$TOOL_NAME" file="$TARGET" released_at="$NOW"
+coord_log_event kind=LOCK_RELEASED source=post_tool_use_write \
+  tool="$TOOL_NAME" file="$TARGET" \
+  released_at="$NOW" acquired_at="$LOCK_ACQUIRED"
 
-# Phase 5 will populate wait_queue + emit lock_released notifications here.
-# Phase 2 has no wait-queue producer (single-waiter via `coord wait` polls).
+# Notification activation — Phase 1's dormant per-file notification
+# consumer (in pre_tool_use_read.sh + pre_tool_use_any.sh) is now wired
+# to a real producer. Any session that was denied on $TARGET during the
+# hold window will see a "lock_released: ..." entry on its next read or
+# any tool call.
+coord_notify_lock_release_waiters "$SESSION_ID" "$TARGET" "$LOCK_ACQUIRED" "$NOW"
+
+# Phase 5 will replace this best-effort scan with an explicit wait_queue
+# FIFO + diff-summary content; Phase 2's notification has no diff yet.
 
 exit 0

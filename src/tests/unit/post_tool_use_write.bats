@@ -122,6 +122,52 @@ _acquire_lock() {
   [ "$output" = "$SID" ]
 }
 
+@test "post_tool_use_write (Phase 2 T2.02): notification populated for prior denied waiter" {
+  # Acquire on $TARGET as $SID.
+  _acquire_lock
+  # Pre-seed a LOCK_DENIED event for OTHER on $TARGET, dated AFTER our
+  # acquired_at. Mirrors what pre_tool_use_write would have written if
+  # OTHER had attempted while SID held the lock.
+  acq=$(jq -r --arg f "$TARGET" '.locks[$f].acquired_at' "$COORD_DIR/sessions.json")
+  OTHER="sid-postw-waiter"
+  touch "$COORD_DIR/sessions/${OTHER}.active"
+  jq --arg sid "$OTHER" '.sessions[$sid] = {state:"ACTIVE",pid:9,pid_lstart:"x",registered_at:"y",last_activity_at:"z",git_head:"",prompt_id:null,script_version:"1.0"}' \
+    "$COORD_DIR/sessions.json" >"$COORD_DIR/sessions.json.new"
+  mv "$COORD_DIR/sessions.json.new" "$COORD_DIR/sessions.json"
+  # Append a fake LOCK_DENIED event whose ts falls inside [acquired_at, now).
+  # Reusing acquired_at exactly satisfies both bounds and is timezone-stable.
+  printf '{"ts":"%s","session":"%s","kind":"LOCK_DENIED","tool":"Edit","file":"%s","payload":{"holder":"%s","acquired_at":"%s"}}\n' \
+    "$acq" "$OTHER" "$TARGET" "$SID" "$acq" >>"$COORD_DIR/events.jsonl"
+
+  CLAUDE_COORD=1 run bash -c "echo '$POST_TARGET' | '$H'"
+  [ "$status" -eq 0 ]
+  sleep 0.3
+  # notifications[OTHER][TARGET] populated with one entry.
+  run jq -r --arg b "$OTHER" --arg f "$TARGET" '.notifications[$b][$f] | length' "$COORD_DIR/sessions.json"
+  [ "$output" = "1" ]
+  # Action-hint format: "Lock released on <path> (held by <prefix>... for N sec).
+  # You may now retry your write or `coord wait <path>` if you've moved on."
+  run jq -r --arg b "$OTHER" --arg f "$TARGET" '.notifications[$b][$f][0]' "$COORD_DIR/sessions.json"
+  echo "$output" | grep -q "Lock released on"
+  echo "$output" | grep -qE "held by ${SID:0:8}\\.\\.\\."
+  echo "$output" | grep -q "You may now retry your write"
+  echo "$output" | grep -q "coord wait $TARGET"
+  # NOTIFICATION_PRODUCED event emitted.
+  run jq -rs '[.[] | select(.kind == "NOTIFICATION_PRODUCED")] | length' "$COORD_DIR/events.jsonl"
+  [ "$output" = "1" ]
+}
+
+@test "post_tool_use_write (Phase 2 T2.02): no waiters during hold → no notifications populated" {
+  _acquire_lock
+  CLAUDE_COORD=1 run bash -c "echo '$POST_TARGET' | '$H'"
+  [ "$status" -eq 0 ]
+  sleep 0.3
+  run jq -r '.notifications | length' "$COORD_DIR/sessions.json"
+  [ "$output" = "0" ]
+  run jq -rs '[.[] | select(.kind == "NOTIFICATION_PRODUCED")] | length' "$COORD_DIR/events.jsonl"
+  [ "$output" = "0" ]
+}
+
 @test "post_tool_use_write: ship gate — never sets permissionDecision in any branch" {
   # Branch 1: own lock → release.
   _acquire_lock
