@@ -131,6 +131,30 @@ cmd_health() {
     info "WARN: $(config_file) missing; run install --repair"
     rc=1
   fi
+
+  # F-003 / F-012 hygiene: refuse stray digit-named files at repo root.
+  # A bare `9` (instead of `9>"<lock>"`) in a flock invocation creates a
+  # 0-byte file named `9` at the working directory. This check makes
+  # accidental commits of such artefacts impossible to miss.
+  local repo_root stray
+  repo_root=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+  stray=""
+  if [ -d "$repo_root" ]; then
+    local f base
+    for f in "$repo_root"/*; do
+      [ -f "$f" ] || continue
+      base=$(basename "$f")
+      case "$base" in
+        ''|*[!0-9]*) ;;
+        *) stray="${stray:+$stray }$base" ;;
+      esac
+    done
+  fi
+  if [ -n "$stray" ]; then
+    info "BAD: stray digit-named file(s) at repo root: $stray (F-003 anti-pattern; see FINDINGS F-012)"
+    rc=1
+  fi
+
   return "$rc"
 }
 
