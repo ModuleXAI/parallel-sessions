@@ -278,11 +278,46 @@ case "$sub" in
   install)     cmd_install "$@" ;;
   uninstall)   cmd_uninstall "$@" ;;
   help|-h|--help) usage ;;
+  task-open|self-delegate)
+    # Phase 6 deliverables — currently disabled but emit *educational*
+    # guidance so a Claude session that tried option (a) or (b) from the
+    # §B.2 deny prompt loses minimum context. Point them at option (c)
+    # explicitly with concrete syntax.
+    target=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --file) target="${2:-}"; shift 2 ;;
+        --file=*) target="${1#--file=}"; shift ;;
+        *) shift ;;
+      esac
+    done
+    cat >&2 <<EOF
+coord $sub: not yet enabled.
+
+This subcommand is a Phase 6 deliverable (task delegation / self-delegation)
+and is intentionally disabled in Phase 2.
+
+Currently-available alternatives:
+  (c) Passively wait for the lock to release:
+        coord wait${target:+ $target} --timeout 570
+
+  Or, if waiting is too long for this turn:
+    - Re-read the file on your next read-set boundary; the lock holder
+      may already have released.
+    - Switch to editing a different file you are not blocked on.
+    - Surface the contention to the user explicitly so they can decide
+      whether to pause one of the sessions.
+
+Phase 2 enables only option (c). Options (a) and (b) become available
+when Phase 6 lands.
+EOF
+    exit 1
+    ;;
   *)
-    # Stubs for Phase 1+ subcommands.
+    # Stubs for Phase N+ subcommands not yet implemented.
     case "$sub" in
-      wait|task-open|self-delegate|tasks|locks|mediate)
-        die "subcommand '$sub' is not implemented in Phase 0; wait for the corresponding phase"
+      wait|tasks|locks|mediate)
+        die "subcommand '$sub' is not implemented in Phase 2; wait for the corresponding phase"
         ;;
       *) die "unknown subcommand: $sub" ;;
     esac

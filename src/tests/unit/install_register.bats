@@ -1,6 +1,7 @@
 #!/usr/bin/env bats
-# Tests for install.sh hook registration (Phase 1 expanded set).
-# Verifies all 6 Phase-1 hooks are registered + idempotent --repair behavior.
+# Tests for install.sh hook registration (Phase 2 expanded set).
+# Phase 1 had 6 hooks; Phase 2 adds post_tool_use_write.sh on the
+# PostToolUse event with matcher "Write|Edit|NotebookEdit". Total: 7 hooks.
 
 load "../helpers/common"
 
@@ -30,7 +31,7 @@ _install() {
   ( cd "$TMP" && "$I" --yes "$@" )
 }
 
-@test "install: --repair (clean) registers all 6 Phase-1 hooks" {
+@test "install: --repair (clean) registers all 7 Phase-2 hooks" {
   _install --repair >/dev/null
   [ -f "$SETTINGS" ]
   # SessionStart
@@ -47,6 +48,15 @@ _install() {
   echo "$output" | grep -q "pre_tool_use_any.sh"
   echo "$output" | grep -q "pre_tool_use_read.sh"
   echo "$output" | grep -q "pre_tool_use_write.sh"
+  # PostToolUse — Phase 2 lock release hook.
+  run jq -r '[.hooks.PostToolUse[].hooks[].command] | join(",")' "$SETTINGS"
+  echo "$output" | grep -q "post_tool_use_write.sh"
+}
+
+@test "install: PostToolUse matcher is Write|Edit|NotebookEdit (Phase 2)" {
+  _install --repair >/dev/null
+  run jq -r '.hooks.PostToolUse[0].matcher' "$SETTINGS"
+  [ "$output" = "Write|Edit|NotebookEdit" ]
 }
 
 @test "install: PreToolUse matchers are correct (any=*, read=Read, write=Write|Edit|NotebookEdit)" {
@@ -65,6 +75,8 @@ _install() {
   # Each event should still have exactly the expected number of OUR entries.
   run jq -r '[.hooks.PreToolUse[] | select(.hooks[].command | contains(".coord/hooks/"))] | length' "$SETTINGS"
   [ "$output" = "3" ]
+  run jq -r '[.hooks.PostToolUse[] | select(.hooks[].command | contains(".coord/hooks/"))] | length' "$SETTINGS"
+  [ "$output" = "1" ]
   run jq -r '[.hooks.SessionStart[] | select(.hooks[].command | contains(".coord/hooks/"))] | length' "$SETTINGS"
   [ "$output" = "1" ]
   run jq -r '[.hooks.UserPromptSubmit[] | select(.hooks[].command | contains(".coord/hooks/"))] | length' "$SETTINGS"
@@ -116,7 +128,7 @@ JSON
 
 @test "install: hook scripts are copied + executable in .coord/hooks/" {
   _install --repair >/dev/null
-  for h in session_start session_end user_prompt_submit pre_tool_use_any pre_tool_use_read pre_tool_use_write; do
+  for h in session_start session_end user_prompt_submit pre_tool_use_any pre_tool_use_read pre_tool_use_write post_tool_use_write; do
     [ -x "$TMP/.coord/hooks/$h.sh" ] || { echo "missing: $h.sh"; return 1; }
   done
   for l in atomic_write log_event participant state_query subagent_filter head_tracking hash; do

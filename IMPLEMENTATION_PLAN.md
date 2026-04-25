@@ -324,9 +324,9 @@ The source design had eight layers; this plan adds the **Mediator** as its own c
             "type": "array",
             "items": {
               "type": "object",
-              "required": ["file","ts","hash","is_latest"],
+              "required": ["path","ts","hash","is_latest"],
               "properties": {
-                "file":                       { "type": "string" },
+                "path":                       { "type": "string" },
                 "ts":                         { "type": "string", "format": "date-time" },
                 "hash":                       { "type": "string", "pattern": "^[0-9a-f]{64}$" },
                 "is_latest":                  { "type": "boolean" },
