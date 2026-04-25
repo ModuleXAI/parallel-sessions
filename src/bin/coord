@@ -18,7 +18,12 @@ set -euo pipefail
 
 COORD_BIN="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 COORD_DIR="${COORD_DIR:-$(cd "$COORD_BIN/.." && pwd)}"
-LIB_DIR="$COORD_DIR/lib"
+# LIB_DIR resolves relative to the bin script's location, not COORD_DIR.
+# This lets the CLI work both installed (`.coord/bin/coord` → `.coord/lib/`)
+# and from the source tree under tests (`src/bin/coord` → `src/lib/`),
+# even when COORD_DIR is overridden to a per-test `.coord/` workspace
+# whose `lib/` directory is empty.
+LIB_DIR="$(cd "$COORD_BIN/../lib" && pwd)"
 export COORD_DIR
 
 # Utilities -----------------------------------------------------------------
@@ -247,11 +252,124 @@ cmd_install() {
   exec "$src_install" "$@"
 }
 
+# Phase 2 T2.03: passive wait for a lock to release.
+#   coord wait <path> [--timeout N]
+# Behavior:
+#   - Clamps --timeout to [30, 570] per Decision 2.20 / PR-PHASE0-01;
+#     a clamped request emits a WAIT_CLAMPED event with requested + applied.
+#   - Polls every 250 ms (4 polls/sec) until either: (a) the lock on
+#     <path> is gone or held by THIS session → exit 0, emit WAIT_RELEASED;
+#     (b) the timeout deadline is reached → exit 1, emit WAIT_TIMEOUT.
+#   - Instant exits without waiting:
+#       * file is not locked → exit 0 silently (stdout: "lock free")
+#       * file is locked by THIS session → exit 0 silently
+#         (you cannot wait on yourself)
+#   - SIGINT / SIGTERM trap: emit WAIT_TIMEOUT with reason=interrupted,
+#     exit 130 (standard SIGINT exit code) without state corruption.
+#   - Subagent policy (A): coord wait works for any caller. The CLI runs
+#     in the caller's process and reads sessions.json directly; there is
+#     no parent-vs-subagent enforcement here. F-015 captures the
+#     alternative (B) for future-Phase-6 review.
+cmd_wait() {
+  local path="" timeout_req=570
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --timeout)   timeout_req="$2"; shift 2 ;;
+      --timeout=*) timeout_req="${1#--timeout=}"; shift ;;
+      -*)          die "unknown flag: $1" ;;
+      *)           if [ -z "$path" ]; then path="$1"; else die "unexpected arg: $1"; fi; shift ;;
+    esac
+  done
+  [ -z "$path" ] && die 'usage: coord wait <path> [--timeout <30..570>]'
+
+  case "$timeout_req" in
+    ''|*[!0-9]*) die "--timeout must be a non-negative integer; got: $timeout_req" ;;
+  esac
+
+  # Clamp per Decision 2.20 + PR-PHASE0-01.
+  local timeout_applied="$timeout_req" clamped=0
+  if [ "$timeout_req" -lt 30 ]; then
+    timeout_applied=30; clamped=1
+  elif [ "$timeout_req" -gt 570 ]; then
+    timeout_applied=570; clamped=1
+  fi
+
+  # Resolve session_id for event logging best-effort. The CLI may run
+  # outside a hook context, in which case SESSION_ID is unset and
+  # log_event will tag events as session=unknown.
+  # shellcheck disable=SC1091
+  . "$LIB_DIR/log_event.sh"
+  # shellcheck disable=SC1091
+  . "$LIB_DIR/state_query.sh"
+  : "${SESSION_ID:=unknown}"
+  export SESSION_ID
+
+  if [ "$clamped" -eq 1 ]; then
+    coord_log_event kind=WAIT_CLAMPED file="$path" \
+      requested="$timeout_req" applied="$timeout_applied"
+  fi
+
+  # Trap SIGINT/SIGTERM for clean exit.
+  local started_iso started_epoch interrupted=0
+  started_iso=$(coord_now_iso8601)
+  started_epoch=$(date -u +%s)
+  cleanup_interrupt() {
+    interrupted=1
+    coord_log_event kind=WAIT_TIMEOUT file="$path" \
+      requested="$timeout_req" applied="$timeout_applied" \
+      reason=interrupted \
+      waited_for=$(( $(date -u +%s) - started_epoch ))
+    info "coord wait: interrupted"
+    exit 130
+  }
+  trap cleanup_interrupt INT TERM
+
+  # Instant-exit branches (before any sleep).
+  local holder
+  holder=$(coord_lock_holder "$path")
+  if [ -z "$holder" ]; then
+    info "coord wait: lock free on $path"
+    return 0
+  fi
+  if [ "$holder" = "${SESSION_ID}" ]; then
+    info "coord wait: lock on $path is held by you (no wait needed)"
+    return 0
+  fi
+
+  # Poll loop. 250 ms interval = 4 polls/sec; bounded by timeout_applied.
+  local deadline=$(( started_epoch + timeout_applied ))
+  while :; do
+    local now
+    now=$(date -u +%s)
+    if [ "$now" -ge "$deadline" ]; then
+      coord_log_event kind=WAIT_TIMEOUT file="$path" \
+        requested="$timeout_req" applied="$timeout_applied" \
+        reason=deadline waited_for="$timeout_applied"
+      info "coord wait: timeout after ${timeout_applied}s on $path"
+      return 1
+    fi
+
+    holder=$(coord_lock_holder "$path")
+    if [ -z "$holder" ] || [ "$holder" = "${SESSION_ID}" ]; then
+      local now_iso waited
+      now_iso=$(coord_now_iso8601)
+      waited=$(( now - started_epoch ))
+      coord_log_event kind=WAIT_RELEASED file="$path" \
+        waited_for="$waited" applied="$timeout_applied" \
+        started_at="$started_iso" released_at="$now_iso"
+      info "coord wait: released after ${waited}s on $path"
+      return 0
+    fi
+
+    sleep 0.25
+  done
+}
+
 usage() {
   cat <<'USAGE'
 usage: coord <subcommand> [args]
 
-Phase 0 subcommands:
+Available subcommands:
   status [--reads]   print active sessions, locks, wait queue, self-tasks,
                      and per-session read-set summary; --reads adds detail
   health             validate deps, fs, config bounds
@@ -260,9 +378,11 @@ Phase 0 subcommands:
   reset --confirm    destructive: reset sessions.json (archives prior state)
   install [flags]    delegate to src/install.sh
   uninstall [--purge]  remove hook entries (and optionally .coord/)
+  wait <path> [--timeout N]   block until lock on <path> is released or
+                              timeout (clamped to [30, 570] seconds)
 
 Subcommands coming in later phases:
-  wait, task-open, self-delegate, tasks, locks, mediate, mediate --retry
+  task-open, self-delegate, tasks, locks, mediate, mediate --retry
 USAGE
 }
 
@@ -277,6 +397,7 @@ case "$sub" in
   reset)       cmd_reset "$@" ;;
   install)     cmd_install "$@" ;;
   uninstall)   cmd_uninstall "$@" ;;
+  wait)        cmd_wait "$@" ;;
   help|-h|--help) usage ;;
   task-open|self-delegate)
     # Phase 6 deliverables — currently disabled but emit *educational*
@@ -316,7 +437,7 @@ EOF
   *)
     # Stubs for Phase N+ subcommands not yet implemented.
     case "$sub" in
-      wait|tasks|locks|mediate)
+      tasks|locks|mediate)
         die "subcommand '$sub' is not implemented in Phase 2; wait for the corresponding phase"
         ;;
       *) die "unknown subcommand: $sub" ;;
