@@ -324,6 +324,17 @@ If this banner is absent, you are not in a coordinated session and none of the r
 
 **Enforcement:** `[HOOK-ENFORCED]`.
 
+#### B.9.7 Session resumed, cleared, or compacted
+
+**Rule:** On a `SessionStart` event with `source ∈ {resume, clear, compact}`, the coordination layer preserves or selectively invalidates your read-set according to Decision 2.5's source-matrix (per PR-PHASE1-01):
+- `resume`: your prior read-set is **preserved intact**. If git HEAD drifted during the gap, read-set entries are automatically marked `superseded_by_head_change: true` and the relevant files will trigger stale-read warnings when you next read or write them.
+- `clear`: read-set entries are marked `superseded_by: "new_prompt"` — treated as a fresh-start boundary.
+- `compact`: read-set is **preserved intact** (context compression preserves read history semantically; the stored hashes are still the truth about what the session last observed on disk).
+
+You do **not** need to re-read files prophylactically after any of these events. The hooks will flag staleness when it actually matters (on the next write, or via `additionalContext` on HEAD drift). Prophylactic re-reads waste tokens and reset the read-set to state the coord layer has already carefully curated.
+
+**Enforcement:** `[HOOK-ENFORCED]` for the state-preservation and invalidation-marking actions. `[BEST-EFFORT]` for the "do not re-read prophylactically" guidance — Claude is expected to cooperate; if it re-reads anyway, the system still works correctly (just slightly more expensively).
+
 ### B.10 What NOT to do (anti-patterns)
 
 These are cases where Claude sometimes tries to "help" in ways that undermine coordination:
@@ -350,6 +361,7 @@ These are cases where Claude sometimes tries to "help" in ways that undermine co
 | Anomaly | Report to user if Mediator escalates | Mediator remediates or escalates | [HOOK-ENFORCED] + [BEST-EFFORT] on escalation acknowledgment |
 | Self-task reminder | Consider returning to the file | Inject reminder | [BEST-EFFORT] |
 | Stop with self-tasks | Address or ignore | Block once, allow on second Stop | [HOOK-ENFORCED] on block; [BEST-EFFORT] on your action |
+| Session resumed / cleared / compacted | Continue your work normally; do NOT re-read files prophylactically | Preserve or selectively invalidate read-set per Decision 2.5 source-matrix; flag HEAD drift automatically | [HOOK-ENFORCED] on invalidation; [BEST-EFFORT] on "do not re-read prophylactically" |
 
 ---
 

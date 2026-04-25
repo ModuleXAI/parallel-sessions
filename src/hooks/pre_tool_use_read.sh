@@ -1,0 +1,171 @@
+#!/usr/bin/env bash
+# pre_tool_use_read.sh — Claude Code PreToolUse hook for the Read tool.
+#
+# Behavior (plan §4 + runtime rule §B.1):
+#   1. If CLAUDE_COORD != "1" → exit 0 silently (non-participant).
+#   2. Subagent defensive filter via lib/subagent_filter.sh — exit 0
+#      silently with SUBAGENT_ACTIVITY_SKIPPED event when agent_type set.
+#   3. If the session is not a registered participant (.active marker
+#      missing) → exit 0 silently (plan §4 non-participant failure mode).
+#   4. Compute sha256 of tool_input.file_path via lib/hash.sh.
+#      - File missing → log ERROR, exit 0 (Read itself will surface the
+#        missing-file error; we never deny the Read).
+#      - File > cap → hash is "SKIPPED_LARGE"; recorded as-is.
+#   5. Under atomic_edit:
+#      a. Supersede any prior entry in read_sets[$sid].reads with the same
+#         path and is_latest == true (set is_latest:false, superseded_by:
+#         <new_hash>).
+#      b. Append new entry {path, hash, at: now, is_latest: true}.
+#   6. Consume any pending notifications for this session + file:
+#      notifications[$sid][$path] is an array of strings. If non-empty,
+#      emit them as additionalContext, then clear the array inside the
+#      same atomic edit (single round-trip).
+#   7. Log READ event (non-blocking).
+#   8. Exit 0 (allow). Phase 1 NEVER denies a Read — the hook is
+#      observational only per ship-gate "never worse than no coord."
+#
+# Stdin: PreToolUse event JSON for tool_name=Read.
+# Stdout: empty (allow) or hookSpecificOutput with additionalContext.
+
+set -euo pipefail
+
+HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LIB_DIR="$(cd "$HOOK_DIR/../lib" && pwd)"
+# shellcheck disable=SC1091
+. "$LIB_DIR/atomic_write.sh"
+# shellcheck disable=SC1091
+. "$LIB_DIR/log_event.sh"
+# shellcheck disable=SC1091
+. "$LIB_DIR/subagent_filter.sh"
+# shellcheck disable=SC1091
+. "$LIB_DIR/participant.sh"
+# shellcheck disable=SC1091
+. "$LIB_DIR/hash.sh"
+
+coord_resolve_root() {
+  if [ -n "${COORD_DIR:-}" ] && [ -d "$COORD_DIR" ]; then
+    printf '%s\n' "$COORD_DIR"; return 0
+  fi
+  local base="${CLAUDE_PROJECT_DIR:-}"
+  if [ -z "$base" ]; then
+    base=$(git rev-parse --show-toplevel 2>/dev/null || printf '')
+  fi
+  if [ -z "$base" ]; then return 1; fi
+  if [ -d "$base/.coord" ]; then printf '%s/.coord\n' "$base"; return 0; fi
+  return 1
+}
+
+emit_additional_context() {
+  local text="$1"
+  jq -nc --arg t "$text" \
+    '{hookSpecificOutput: {hookEventName: "PreToolUse", additionalContext: $t}}'
+}
+
+warn_stderr() { printf 'coord pre_tool_use_read: %s\n' "$*" >&2; }
+
+# --- main ---
+[ "${CLAUDE_COORD:-}" != "1" ] && exit 0
+
+INPUT="$(cat)"
+
+if COORD_DIR=$(coord_resolve_root 2>/dev/null); then
+  export COORD_DIR
+fi
+if coord_subagent_filter "PreToolUse" "$INPUT"; then
+  exit 0
+fi
+
+SESSION_ID=$(printf '%s' "$INPUT" | jq -r '.session_id // ""' 2>/dev/null || printf '')
+FILE_PATH=$(printf '%s' "$INPUT" | jq -r '.tool_input.file_path // ""' 2>/dev/null || printf '')
+
+if [ -z "$SESSION_ID" ] || [ -z "$FILE_PATH" ]; then
+  exit 0
+fi
+
+if ! COORD_DIR=$(coord_resolve_root); then
+  exit 0
+fi
+export COORD_DIR SESSION_ID
+
+if ! coord_is_participant "$SESSION_ID"; then
+  exit 0
+fi
+
+# Compute the hash (or log ERROR on missing file and allow).
+HASH=""
+if [ -e "$FILE_PATH" ]; then
+  if HASH=$(coord_hash_file "$FILE_PATH" 2>/dev/null); then
+    :
+  else
+    HASH=""
+    warn_stderr "hash failed for $FILE_PATH; recording no entry"
+  fi
+fi
+if [ -z "$HASH" ]; then
+  coord_log_event kind=ERROR source=pre_tool_use_read file="$FILE_PATH" \
+    reason=file_missing_or_unhashable
+  exit 0
+fi
+
+NOW=$(coord_now_iso8601)
+STATE="$COORD_DIR/sessions.json"
+
+# --- Atomic supersede + append + notifications-consume ----------------
+# All three actions in one jq filter so the hook makes exactly one atomic
+# write regardless of how many read-set entries it updates.
+#
+# Filter semantics:
+#   1. For every existing entry in read_sets[sid].reads[] where path == $path
+#      and is_latest is true, set is_latest:false, superseded_by:$hash.
+#   2. Append the new entry {path, hash, at, is_latest: true}.
+#   3. Save notifications[sid][path] (if any) to a temporary .delivered slot
+#      on the new entry and clear the array so future reads won't re-emit.
+#
+# The saved-to-temp-slot is a Phase-1 trick: we want to emit the
+# notifications as additionalContext, but we've already committed the
+# atomic write. So we read notifications[sid][path] BEFORE the atomic
+# write (immediately below), then clear them INSIDE the atomic write.
+
+PENDING_NOTIFS=""
+if [ -f "$STATE" ]; then
+  PENDING_NOTIFS=$(jq -r --arg sid "$SESSION_ID" --arg path "$FILE_PATH" '
+    (.notifications[$sid][$path] // []) | if length == 0 then "" else (map("- " + .) | join("\n")) end
+  ' "$STATE" 2>/dev/null || printf '')
+fi
+
+if ! coord_atomic_edit "$STATE" '
+    .read_sets[$sid].reads |= (
+      ((. // []) | map(
+        if .path == $path and ((.is_latest // true) == true) then
+          . + {is_latest: false, superseded_by: $hash}
+        else . end
+      ))
+      + [{path: $path, hash: $hash, at: $now, is_latest: true}]
+    )
+  | (if (.notifications[$sid][$path] // []) | length > 0 then
+       .notifications[$sid][$path] = []
+     else . end)
+  ' \
+  --arg sid  "$SESSION_ID" \
+  --arg path "$FILE_PATH" \
+  --arg hash "$HASH" \
+  --arg now  "$NOW"
+then
+  warn_stderr "atomic_edit failed recording read of $FILE_PATH"
+  # Fail-open: still allow the Read. Log and exit.
+  coord_log_event kind=ERROR source=pre_tool_use_read file="$FILE_PATH" \
+    reason=atomic_edit_failed
+  exit 0
+fi
+
+# Log READ event (non-blocking).
+coord_log_event kind=READ tool=Read file="$FILE_PATH" hash="$HASH"
+
+# Deliver any pending notifications we captured BEFORE the clear.
+if [ -n "$PENDING_NOTIFS" ]; then
+  BANNER="Coord notifications for $FILE_PATH:"$'\n'"$PENDING_NOTIFS"
+  emit_additional_context "$BANNER"
+  coord_log_event kind=NOTIFICATION_DELIVER file="$FILE_PATH"
+fi
+
+exit 0
