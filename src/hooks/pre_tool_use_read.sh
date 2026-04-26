@@ -41,6 +41,8 @@ LIB_DIR="$(cd "$HOOK_DIR/../lib" && pwd)"
 . "$LIB_DIR/participant.sh"
 # shellcheck disable=SC1091
 . "$LIB_DIR/hash.sh"
+# shellcheck disable=SC1091
+. "$LIB_DIR/lockdown.sh"
 
 coord_resolve_root() {
   if [ -n "${COORD_DIR:-}" ] && [ -d "$COORD_DIR" ]; then
@@ -88,6 +90,14 @@ fi
 export COORD_DIR SESSION_ID
 
 if ! coord_is_participant "$SESSION_ID"; then
+  exit 0
+fi
+
+# Lockdown gate (Phase 3 / T3.03 per PR-PHASE3-01): if Mediator has
+# activated lockdown, every hook emits a stop signal and skips its
+# main work. Fail-open on parse error (coord_lockdown_check returns 1
+# on parse fail with a stderr warning + ERROR event).
+if coord_lockdown_check && coord_lockdown_emit_deny "PreToolUse"; then
   exit 0
 fi
 

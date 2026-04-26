@@ -40,6 +40,8 @@ LIB_DIR="$(cd "$HOOK_DIR/../lib" && pwd)"
 . "$LIB_DIR/subagent_filter.sh"
 # shellcheck disable=SC1091
 . "$LIB_DIR/head_tracking.sh"
+# shellcheck disable=SC1091
+. "$LIB_DIR/lockdown.sh"
 
 # --- locate coord root (written by installer) ---
 coord_resolve_root() {
@@ -107,6 +109,15 @@ for dep in jq flock; do
     exit 0
   fi
 done
+
+# Lockdown gate (Phase 3 / T3.03 per PR-PHASE3-01): if Mediator has
+# activated system-wide lockdown, do NOT register this session — the
+# session does not enter ACTIVE state and does not get a .active marker.
+# A subsequent SessionStart after lockdown clears will register fresh.
+# Fail-open on parse fail.
+if coord_lockdown_check && coord_lockdown_emit_deny "SessionStart"; then
+  exit 0
+fi
 
 # Collect post-state values (new pid / pid_lstart / git_head / now).
 PID="$PPID"

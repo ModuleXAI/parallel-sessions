@@ -37,6 +37,8 @@ LIB_DIR="$(cd "$HOOK_DIR/../lib" && pwd)"
 . "$LIB_DIR/participant.sh"
 # shellcheck disable=SC1091
 . "$LIB_DIR/head_tracking.sh"
+# shellcheck disable=SC1091
+. "$LIB_DIR/lockdown.sh"
 
 coord_resolve_root() {
   if [ -n "${COORD_DIR:-}" ] && [ -d "$COORD_DIR" ]; then
@@ -95,6 +97,13 @@ done
 
 STATE="$COORD_DIR/sessions.json"
 [ ! -f "$STATE" ] && exit 0
+
+# Lockdown gate (Phase 3 / T3.03 per PR-PHASE3-01): emit deny + skip
+# all cross-cutting consumers (notifications / mediator-pending /
+# corruption banners) when lockdown is active. Fail-open on parse fail.
+if coord_lockdown_check && coord_lockdown_emit_deny "PreToolUse"; then
+  exit 0
+fi
 
 # --- 1. Notification scan + atomic clear ---------------------------------
 # Capture pending notifications first (read-only), then clear them in a

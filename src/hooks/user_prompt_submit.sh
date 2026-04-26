@@ -36,6 +36,8 @@ LIB_DIR="$(cd "$HOOK_DIR/../lib" && pwd)"
 . "$LIB_DIR/participant.sh"
 # shellcheck disable=SC1091
 . "$LIB_DIR/hash.sh"
+# shellcheck disable=SC1091
+. "$LIB_DIR/lockdown.sh"
 
 coord_resolve_root() {
   if [ -n "${COORD_DIR:-}" ] && [ -d "$COORD_DIR" ]; then
@@ -96,6 +98,14 @@ for dep in jq flock; do
     exit 0
   fi
 done
+
+# Lockdown gate (Phase 3 / T3.03 per PR-PHASE3-01): emit stop signal
+# and skip prompt capture under lockdown. The session's prompt_id +
+# read-set invalidation will happen on the next UserPromptSubmit
+# after lockdown clears. Fail-open on parse fail.
+if coord_lockdown_check && coord_lockdown_emit_deny "UserPromptSubmit"; then
+  exit 0
+fi
 
 STATE="$COORD_DIR/sessions.json"
 NOW=$(coord_now_iso8601)
