@@ -39,6 +39,12 @@ LIB_DIR="$(cd "$HOOK_DIR/../lib" && pwd)"
 . "$LIB_DIR/head_tracking.sh"
 # shellcheck disable=SC1091
 . "$LIB_DIR/lockdown.sh"
+# shellcheck disable=SC1091
+. "$LIB_DIR/watchdog_cache.sh"
+# shellcheck disable=SC1091
+. "$LIB_DIR/mediator_pending.sh"
+# shellcheck disable=SC1091
+. "$LIB_DIR/watchdog.sh"
 
 coord_resolve_root() {
   if [ -n "${COORD_DIR:-}" ] && [ -d "$COORD_DIR" ]; then
@@ -183,6 +189,40 @@ fi
 
 if [ -n "$BANNER" ]; then
   emit_additional_context "$BANNER"
+fi
+
+# --- 5. Ambient-suspicion watchdog probes (Phase 3 / T3.05) -----------
+# Scan sessions.json for OTHER-session anomalies. For each suspect,
+# fire-and-forget a watchdog probe. Caller (this hook) does NOT block
+# on probe execution — the probe runs in the background and writes its
+# verdict to recent_checks.jsonl + (on dead/uncertain) emits a Mediator
+# pending entry that a future pre_tool_use_any.sh consumer-pass surfaces.
+#
+# The dedupe lock (.coord/watchdog/checking/<target>.lock) guarantees
+# only ONE probe per target runs even if 5+ sessions notice the same
+# anomaly simultaneously. The recent_checks cache (TTL alive=60s,
+# uncertain=30s, dead=until-session_start) suppresses redundant probes.
+#
+# Per PR-PHASE3-02 §F (latency budget): suspicion check is a single jq
+# filter over the already-loaded sessions.json snapshot + per-PID `ps`
+# checks bounded by ACTIVE-non-self session count. Probe invocation
+# is backgrounded so its execution time does NOT count against the
+# hook latency.
+SUSPECT_TARGETS=$(coord_watchdog_check_ambient_suspicion 2>/dev/null || printf '')
+if [ -n "$SUSPECT_TARGETS" ]; then
+  OLD_IFS="$IFS"
+  IFS='
+'
+  set -- $SUSPECT_TARGETS
+  IFS="$OLD_IFS"
+  for suspect in "$@"; do
+    [ -z "$suspect" ] && continue
+    # Fire-and-forget: probe runs in background, hook returns immediately.
+    # The disown after backgrounding ensures Claude Code is not blocked
+    # on the subshell's lifetime.
+    ( coord_watchdog_probe "$suspect" >/dev/null 2>&1 ) &
+    disown >/dev/null 2>&1 || true
+  done
 fi
 
 exit 0
