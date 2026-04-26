@@ -164,6 +164,7 @@ materialize_coord() {
            "$COORD_DIR/mediator/lockdown_archive" \
            "$COORD_DIR/watchdog" \
            "$COORD_DIR/watchdog/checking" \
+           "$COORD_DIR/read_snapshots" \
            "$COORD_DIR/hooks" \
            "$COORD_DIR/lib" \
            "$COORD_DIR/bin" \

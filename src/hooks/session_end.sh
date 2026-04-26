@@ -37,6 +37,8 @@ LIB_DIR="$(cd "$HOOK_DIR/../lib" && pwd)"
 . "$LIB_DIR/notify_waiters.sh"
 # shellcheck disable=SC1091
 . "$LIB_DIR/lockdown.sh"
+# shellcheck disable=SC1091
+. "$LIB_DIR/read_snapshots.sh"
 
 coord_resolve_root() {
   if [ -n "${COORD_DIR:-}" ] && [ -d "$COORD_DIR" ]; then
@@ -143,6 +145,13 @@ coord_atomic_edit "$STATE" '
 
 # Remove the marker; ignore failures.
 rm -f "$COORD_DIR/sessions/${SESSION_ID}.active" 2>/dev/null || true
+
+# Phase 4 / PR-PHASE4-05 — clean up read snapshots for this session.
+# Idempotent: if directory absent, no-op. The watchdog/Mediator
+# evict_session path also calls this helper (verdict_apply.sh
+# extension per PR-PHASE4-05 §F) for sessions that crashed before
+# session_end.sh fired.
+coord_read_snapshot_cleanup_session "$SESSION_ID" || true
 
 coord_log_event kind=SESSION_END reason="$REASON"
 exit 0
