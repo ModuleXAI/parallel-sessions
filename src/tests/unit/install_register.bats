@@ -145,7 +145,7 @@ JSON
   for h in session_start session_end stop user_prompt_submit pre_tool_use_any pre_tool_use_read pre_tool_use_write post_tool_use_write; do
     [ -x "$TMP/.coord/hooks/$h.sh" ] || { echo "missing: $h.sh"; return 1; }
   done
-  for l in atomic_write log_event participant state_query subagent_filter head_tracking hash notify_waiters; do
+  for l in atomic_write log_event participant state_query subagent_filter head_tracking hash notify_waiters mediator_pending; do
     [ -f "$TMP/.coord/lib/$l.sh" ] || { echo "missing lib: $l.sh"; return 1; }
   done
 }
