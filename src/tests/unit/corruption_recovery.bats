@@ -1,9 +1,17 @@
 #!/usr/bin/env bats
-# End-to-end corruption-recovery test per CLAUDE.md §B.9.2.
-# Verifies the FULL chain: corrupt sessions.json → hook fires → atomic_edit
-# detects + archives + resets + writes Mediator flag → next hook surfaces
-# the §B.9.2 banner via additionalContext → flag is renamed to delivered
-# so the banner doesn't repeat.
+# End-to-end corruption-recovery test per CLAUDE.md §B.9.2 — updated
+# in T3.07 (PR-PHASE3-03 / Decision 4) for the unified pending.jsonl
+# flow. corrupt_state is now an entry kind in pending.jsonl alongside
+# flock_timeout (T2.04) and Phase 3 new kinds (stale_active /
+# pid_recycled / manual). The legacy single-file pending.json is
+# eliminated; install.sh migrates pre-Phase-3 pending.json forward.
+#
+# Verifies the FULL chain:
+#   corrupt sessions.json → hook fires → atomic_edit detects + archives +
+#   resets + appends pending.jsonl entry (kind=corrupt_state) →
+#   coord_consume_corrupt_state_flag prints the §B.9.2 banner from
+#   pending.jsonl tail → coord_mediator_consume_pending advances HWM,
+#   so the same banner is not emitted twice.
 
 load "../helpers/common"
 
@@ -18,6 +26,10 @@ setup() {
 
   SID="sid-corrupt-0001"
 
+  # Pre-create pending.jsonl + lock + HWM file so consumers find them.
+  : >"$COORD/mediator/pending.jsonl"
+  : >"$COORD/mediator/pending.lock"
+
   # Corrupt the state file.
   printf '{ this is not valid JSON {{{' >"$COORD_DIR/sessions.json"
 }
@@ -27,7 +39,21 @@ teardown() {
   rm -rf "$TMP"
 }
 
-@test "corruption: SessionStart against corrupt sessions.json triggers reset + archive + Mediator flag" {
+# Helper: emit a corrupt_state pending.jsonl entry directly via the
+# T2.04 producer. Used by tests that pre-seed the queue without going
+# through the corruption-detection-in-atomic_edit path.
+_emit_corrupt_state_entry() {
+  bash -c '
+    . "'"$SRC_ROOT/lib/log_event.sh"'"
+    . "'"$SRC_ROOT/lib/mediator_pending.sh"'"
+    coord_mediator_emit_pending corrupt_state \
+      source=test \
+      file="'"$COORD/sessions.json"'" \
+      detected_at="2026-04-25T00:00:00Z"
+  '
+}
+
+@test "corruption: SessionStart against corrupt sessions.json triggers reset + archive + pending.jsonl entry" {
   local INP='{"session_id":"'"$SID"'","cwd":"'"$TMP"'","hook_event_name":"SessionStart","source":"startup"}'
   CLAUDE_COORD=1 run bash -c "echo '$INP' | '$HSS'"
   [ "$status" -eq 0 ]
@@ -37,16 +63,15 @@ teardown() {
   # Corrupt original archived under sessions.json.corrupt.<ts>.json.
   run bash -c 'ls "'"$COORD_DIR"'/sessions.json.corrupt."*.json 2>/dev/null | wc -l | tr -d " "'
   [ "$output" = "1" ]
-  # Banner consumed within this same hook → pending.json renamed to delivered.
-  [ ! -f "$COORD_DIR/mediator/pending.json" ]
+  # pending.jsonl now has at least one corrupt_state entry.
+  sleep 0.2
+  run jq -rs '[.[] | select(.kind == "corrupt_state")] | length' "$COORD_DIR/mediator/pending.jsonl"
+  [ "$output" -ge 1 ]
 }
 
-@test "corruption: pre_tool_use_any surfaces §B.9.2 banner when flag is present" {
-  # Manually create the Mediator pending flag (simulating that a prior
-  # atomic_edit detected corruption and reset the state).
-  jq -n --arg ts "2026-04-25T00:00:00Z" --arg file "$COORD_DIR/sessions.json" \
-    '{kind:"corrupt_state", ts:$ts, file:$file}' \
-    >"$COORD_DIR/mediator/pending.json"
+@test "corruption: pre_tool_use_any surfaces §B.9.2 banner when corrupt_state is unconsumed" {
+  # Pre-seed a corrupt_state entry into pending.jsonl.
+  _emit_corrupt_state_entry
   # Re-write a clean sessions.json so atomic_edit doesn't trigger another
   # corruption.
   bash -c ". '$SRC_ROOT/lib/atomic_write.sh' && coord_state_empty_template" >"$COORD_DIR/sessions.json"
@@ -62,18 +87,14 @@ teardown() {
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.hookSpecificOutput.additionalContext | test("coordination state was reset due to corruption")' >/dev/null
 
-  # Flag is now renamed to pending.delivered.<ts>.json — running the same
-  # hook again must NOT re-emit the banner.
-  [ ! -f "$COORD_DIR/mediator/pending.json" ]
-  run bash -c 'ls "'"$COORD_DIR"'/mediator/pending.delivered."*.json 2>/dev/null | wc -l | tr -d " "'
-  [ "$output" = "1" ]
+  # HWM advanced past the corrupt_state entry → second hook firing
+  # produces no corruption banner.
+  run cat "$COORD_DIR/mediator/pending.consumed"
+  [ "$output" -ge 1 ]
 }
 
 @test "corruption: banner is NOT repeated on a second hook firing" {
-  # Same scenario as above; run the hook twice.
-  jq -n --arg ts "2026-04-25T00:00:00Z" --arg file "$COORD_DIR/sessions.json" \
-    '{kind:"corrupt_state", ts:$ts, file:$file}' \
-    >"$COORD_DIR/mediator/pending.json"
+  _emit_corrupt_state_entry
   bash -c ". '$SRC_ROOT/lib/atomic_write.sh' && coord_state_empty_template" >"$COORD_DIR/sessions.json"
   touch "$COORD_DIR/sessions/${SID}.active"
   jq --arg sid "$SID" '
@@ -87,39 +108,40 @@ teardown() {
   [ "$status" -eq 0 ]
   # Second run: NO additionalContext (no notifications, no HEAD drift, no
   # corruption banner left to emit).
-  [ "$output" = "" ]
+  case "$output" in
+    *"coordination state was reset"*) return 1 ;;
+  esac
+  true
 }
 
-@test "corruption: full end-to-end — corrupt → hook reset → next hook surfaces banner" {
+@test "corruption: full end-to-end — corrupt → hook reset → SessionStart surfaces banner once" {
   # Step 1: SessionStart hook fires against corrupt sessions.json, recovers.
   local INP_START='{"session_id":"'"$SID"'","cwd":"'"$TMP"'","hook_event_name":"SessionStart","source":"startup"}'
   CLAUDE_COORD=1 run bash -c "echo '$INP_START' | '$HSS'"
   [ "$status" -eq 0 ]
-  # Banner emitted by THIS hook (it consumed the flag itself).
+  # Banner emitted by THIS hook (it consumed the flag itself via the
+  # composed banner pipeline: corrupt_state consumer + Coord-v1.0 banner).
   echo "$output" | jq -e '.hookSpecificOutput.additionalContext | test("coordination state was reset")' >/dev/null
 
-  # Step 2: subsequent pre_tool_use_any sees no pending banner (already
-  # consumed by SessionStart), no spurious additionalContext.
+  # Step 2: subsequent pre_tool_use_any sees no corruption banner
+  # (HWM advanced; not re-emitted).
   local INP_ANY='{"session_id":"'"$SID"'","cwd":"'"$TMP"'","hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{}}'
   CLAUDE_COORD=1 run bash -c "echo '$INP_ANY' | '$HANY'"
   [ "$status" -eq 0 ]
   case "$output" in
-    *"coordination state was reset"*) return 1 ;;  # must NOT re-emit
+    *"coordination state was reset"*) return 1 ;;
   esac
   true
 }
 
 @test "corruption: hook never returns non-zero on corruption (fail-open)" {
-  # The point of §B.9.2 step 5 — corruption must never block the tool call.
   local INP_START='{"session_id":"'"$SID"'","cwd":"'"$TMP"'","hook_event_name":"SessionStart","source":"startup"}'
   CLAUDE_COORD=1 run bash -c "echo '$INP_START' | '$HSS'"
   [ "$status" -eq 0 ]
 }
 
-@test "corruption: consume helper returns 1 and no output when no flag exists" {
-  # Direct unit test of the helper: with no pending.json present, the
-  # function must be a silent no-op returning 1 (no banner consumed).
-  rm -f "$COORD_DIR/mediator/pending.json"
+@test "corruption: consume helper returns 1 and no output when pending.jsonl is empty" {
+  # No corrupt_state entries above HWM → helper returns 1.
   run bash -c "
     export COORD_DIR='$COORD_DIR'
     . '$SRC_ROOT/lib/atomic_write.sh'
@@ -129,11 +151,14 @@ teardown() {
   [ "$output" = "" ]
 }
 
-@test "corruption: consume helper ignores pending.json with non-corrupt kind" {
-  # Phase 3 will use pending.json for OTHER kinds (e.g., flock_timeout).
-  # The helper must only consume corrupt_state, leaving others for Phase 3
-  # Mediator to handle.
-  jq -n '{kind:"flock_timeout", ts:"2026-04-25T00:00:00Z"}' >"$COORD_DIR/mediator/pending.json"
+@test "corruption: consume helper ignores non-corrupt kinds in pending.jsonl" {
+  # Phase 2 + 3 share pending.jsonl across multiple kinds. The
+  # corrupt_state consumer must IGNORE non-matching kinds.
+  bash -c '
+    . "'"$SRC_ROOT/lib/log_event.sh"'"
+    . "'"$SRC_ROOT/lib/mediator_pending.sh"'"
+    coord_mediator_emit_pending flock_timeout source=test file=foo
+  '
   run bash -c "
     export COORD_DIR='$COORD_DIR'
     . '$SRC_ROOT/lib/atomic_write.sh'
@@ -141,6 +166,27 @@ teardown() {
   "
   [ "$status" -eq 1 ]
   [ "$output" = "" ]
-  # pending.json untouched.
-  [ -f "$COORD_DIR/mediator/pending.json" ]
+  # pending.jsonl untouched: flock_timeout entry still present.
+  run jq -rs '[.[] | select(.kind == "flock_timeout")] | length' "$COORD_DIR/mediator/pending.jsonl"
+  [ "$output" -ge 1 ]
+}
+
+@test "corruption: consume helper finds corrupt_state in mixed-kind pending.jsonl" {
+  # Mix of flock_timeout (irrelevant) + corrupt_state (relevant) — helper
+  # must return 0 (banner emitted) when AT LEAST ONE corrupt_state is
+  # present above HWM.
+  bash -c '
+    . "'"$SRC_ROOT/lib/log_event.sh"'"
+    . "'"$SRC_ROOT/lib/mediator_pending.sh"'"
+    coord_mediator_emit_pending flock_timeout source=test file=foo
+    coord_mediator_emit_pending corrupt_state source=test file=bar
+    coord_mediator_emit_pending flock_timeout source=test file=baz
+  '
+  run bash -c "
+    export COORD_DIR='$COORD_DIR'
+    . '$SRC_ROOT/lib/atomic_write.sh'
+    coord_consume_corrupt_state_flag
+  "
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "coordination state was reset due to corruption"
 }

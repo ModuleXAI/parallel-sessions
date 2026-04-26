@@ -35,6 +35,8 @@ LIB_DIR="$(cd "$HOOK_DIR/../lib" && pwd)"
 . "$LIB_DIR/subagent_filter.sh"
 # shellcheck disable=SC1091
 . "$LIB_DIR/notify_waiters.sh"
+# shellcheck disable=SC1091
+. "$LIB_DIR/lockdown.sh"
 
 coord_resolve_root() {
   if [ -n "${COORD_DIR:-}" ] && [ -d "$COORD_DIR" ]; then
@@ -71,6 +73,16 @@ export COORD_DIR SESSION_ID
 
 # Participant check: only act if we registered this session.
 if [ ! -e "$COORD_DIR/sessions/${SESSION_ID}.active" ]; then
+  exit 0
+fi
+
+# Lockdown gate (Phase 3 / T3.03 per PR-PHASE3-01): under lockdown,
+# do NOT release this session's locks — Mediator's fix flow may
+# require lock state to persist for analysis (e.g., a critical-bypass
+# lockdown was triggered specifically because a session looked dead).
+# Marker is left in place; a subsequent SessionEnd after clear will
+# proceed normally. Fail-open on parse fail.
+if coord_lockdown_check && coord_lockdown_emit_deny "SessionEnd"; then
   exit 0
 fi
 

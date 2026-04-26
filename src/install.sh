@@ -161,6 +161,9 @@ materialize_coord() {
            "$COORD_DIR/validation" \
            "$COORD_DIR/mediator" \
            "$COORD_DIR/mediator/verdict" \
+           "$COORD_DIR/mediator/lockdown_archive" \
+           "$COORD_DIR/watchdog" \
+           "$COORD_DIR/watchdog/checking" \
            "$COORD_DIR/hooks" \
            "$COORD_DIR/lib" \
            "$COORD_DIR/bin" \
@@ -178,6 +181,31 @@ materialize_coord() {
   if [ -f "$SELF_DIR/bin/coord" ]; then
     cp -f "$SELF_DIR/bin/coord" "$COORD_DIR/bin/coord"
   fi
+  # T3.07: copy MEDIATOR_REFERENCE.md alongside lib/. Idempotent —
+  # if the user customized the installed copy, preserve it (compare
+  # via shasum); otherwise update.
+  if [ -f "$SELF_DIR/lib/MEDIATOR_REFERENCE.md" ]; then
+    local ref_dst="$COORD_DIR/mediator/MEDIATOR_REFERENCE.md"
+    if [ -f "$ref_dst" ]; then
+      local src_hash dst_hash
+      src_hash=$(shasum -a 256 "$SELF_DIR/lib/MEDIATOR_REFERENCE.md" 2>/dev/null | awk '{print $1}')
+      dst_hash=$(shasum -a 256 "$ref_dst" 2>/dev/null | awk '{print $1}')
+      if [ -n "$src_hash" ] && [ -n "$dst_hash" ] && [ "$src_hash" != "$dst_hash" ]; then
+        # Backup user-customized copy before overwriting on --repair;
+        # leave alone on plain re-install.
+        if [ "$MODE" = "repair" ]; then
+          cp -f "$ref_dst" "${ref_dst}.user-backup.$(date -u +%Y%m%dT%H%M%SZ)" 2>/dev/null || true
+          cp -f "$SELF_DIR/lib/MEDIATOR_REFERENCE.md" "$ref_dst"
+        fi
+      else
+        # Hashes match or one missing — safe to overwrite (idempotent).
+        cp -f "$SELF_DIR/lib/MEDIATOR_REFERENCE.md" "$ref_dst" 2>/dev/null || true
+      fi
+    else
+      cp -f "$SELF_DIR/lib/MEDIATOR_REFERENCE.md" "$ref_dst" 2>/dev/null || true
+    fi
+  fi
+
   chmod +x "$COORD_DIR/lib"/*.sh "$COORD_DIR/hooks"/*.sh
   [ -f "$COORD_DIR/bin/coord" ] && chmod +x "$COORD_DIR/bin/coord"
 
@@ -214,6 +242,52 @@ JSON
   for f in sessions.lock events.lock history.lock; do
     : >"$COORD_DIR/$f"
   done
+
+  # Watchdog cache layout (T3.04 / PR-PHASE3-02 §E):
+  # recent_checks.jsonl is append-only; recent_checks.lock is the flock
+  # sentinel. Idempotent: only create if absent, never clobber existing
+  # cache entries on --repair.
+  [ -f "$COORD_DIR/watchdog/recent_checks.jsonl" ] || \
+    : >"$COORD_DIR/watchdog/recent_checks.jsonl"
+  [ -f "$COORD_DIR/watchdog/recent_checks.lock" ] || \
+    : >"$COORD_DIR/watchdog/recent_checks.lock"
+
+  # Mediator pending JSONL queue layout (T2.04 + T3.07 / PR-PHASE3-03):
+  # pending.jsonl is append-only; pending.lock is the flock sentinel;
+  # pending.consumed is the high-water-mark file (single integer line).
+  [ -f "$COORD_DIR/mediator/pending.jsonl" ] || \
+    : >"$COORD_DIR/mediator/pending.jsonl"
+  [ -f "$COORD_DIR/mediator/pending.lock" ] || \
+    : >"$COORD_DIR/mediator/pending.lock"
+
+  # Legacy pending.json migration (T3.07 / PR-PHASE3-03 / Decision 4):
+  # Pre-Phase-3 installs used a single-file pending.json for
+  # corrupt_state. Migrate any active entry forward into the unified
+  # pending.jsonl queue, then delete the legacy file. Idempotent: if
+  # pending.json is absent, no-op.
+  if [ -f "$COORD_DIR/mediator/pending.json" ]; then
+    local legacy="$COORD_DIR/mediator/pending.json"
+    if jq -e . "$legacy" >/dev/null 2>&1; then
+      # Valid JSON: shape into the new top-level + payload form.
+      local migrated_line
+      migrated_line=$(jq -c '
+        {
+          ts: (.ts // "1970-01-01T00:00:00Z"),
+          kind: (.kind // "unknown"),
+          session: null,
+          source: "install_migration",
+          payload: (. | del(.ts) | del(.kind))
+        }
+      ' "$legacy" 2>/dev/null)
+      if [ -n "$migrated_line" ]; then
+        printf '%s\n' "$migrated_line" >>"$COORD_DIR/mediator/pending.jsonl"
+      fi
+      rm -f "$legacy" 2>/dev/null || true
+    else
+      # Unparseable legacy file: archive forensically; do not migrate.
+      mv "$legacy" "${legacy}.legacy.$(date -u +%Y%m%dT%H%M%SZ)" 2>/dev/null || rm -f "$legacy" 2>/dev/null
+    fi
+  fi
 
   # sessions_history.json.
   if [ ! -s "$COORD_DIR/sessions_history.json" ] || [ "$MODE" = repair ]; then

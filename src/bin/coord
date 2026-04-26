@@ -380,9 +380,11 @@ Available subcommands:
   uninstall [--purge]  remove hook entries (and optionally .coord/)
   wait <path> [--timeout N]   block until lock on <path> is released or
                               timeout (clamped to [30, 570] seconds)
+  mediate <subcommand>        operator interface to the Mediator agent.
+                              Run `coord mediate --help` for details.
 
 Subcommands coming in later phases:
-  task-open, self-delegate, tasks, locks, mediate, mediate --retry
+  task-open, self-delegate, tasks, locks, mediate --retry
 USAGE
 }
 
@@ -398,6 +400,24 @@ case "$sub" in
   install)     cmd_install "$@" ;;
   uninstall)   cmd_uninstall "$@" ;;
   wait)        cmd_wait "$@" ;;
+  mediate)
+    # Phase 3 T3.08: operator interface to Mediator. Source the
+    # required libs lazily so the rest of the CLI doesn't pay for
+    # them on unrelated subcommands.
+    # shellcheck disable=SC1091
+    . "$LIB_DIR/log_event.sh"
+    # shellcheck disable=SC1091
+    . "$LIB_DIR/mediator_pending.sh"
+    # shellcheck disable=SC1091
+    . "$LIB_DIR/lockdown.sh"
+    # shellcheck disable=SC1091
+    . "$LIB_DIR/atomic_write.sh"
+    # shellcheck disable=SC1091
+    . "$LIB_DIR/verdict_apply.sh"
+    # shellcheck disable=SC1091
+    . "$LIB_DIR/coord_mediate.sh"
+    coord_mediate_dispatch "$@"
+    ;;
   help|-h|--help) usage ;;
   task-open|self-delegate)
     # Phase 6 deliverables — currently disabled but emit *educational*
@@ -437,7 +457,7 @@ EOF
   *)
     # Stubs for Phase N+ subcommands not yet implemented.
     case "$sub" in
-      tasks|locks|mediate)
+      tasks|locks)
         die "subcommand '$sub' is not implemented in Phase 2; wait for the corresponding phase"
         ;;
       *) die "unknown subcommand: $sub" ;;

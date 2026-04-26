@@ -44,6 +44,8 @@ LIB_DIR="$(cd "$HOOK_DIR/../lib" && pwd)"
 . "$LIB_DIR/participant.sh"
 # shellcheck disable=SC1091
 . "$LIB_DIR/notify_waiters.sh"
+# shellcheck disable=SC1091
+. "$LIB_DIR/lockdown.sh"
 
 coord_resolve_root() {
   if [ -n "${COORD_DIR:-}" ] && [ -d "$COORD_DIR" ]; then
@@ -95,6 +97,15 @@ done
 
 STATE="$COORD_DIR/sessions.json"
 [ ! -f "$STATE" ] && exit 0
+
+# Lockdown gate (Phase 3 / T3.03 per PR-PHASE3-01): under lockdown,
+# do NOT release this session's locks — same rationale as session_end
+# (Mediator's fix flow may require locks to persist for analysis).
+# A subsequent Stop after clear will proceed normally. Fail-open on
+# parse fail.
+if coord_lockdown_check && coord_lockdown_emit_deny "Stop"; then
+  exit 0
+fi
 
 # Collect all locks held by this session, with their acquired_at, before
 # touching state. TSV: "<path>\t<acquired_at>".

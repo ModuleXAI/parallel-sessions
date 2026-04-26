@@ -528,3 +528,948 @@ shape on disk is `path`).
 ---
 
 *Future entries append below.*
+
+---
+
+## PR-PHASE3-01 — Mediator agent design contract (Decision 1)
+
+**Date:** 2026-04-26
+**Author:** Phase 3 builder (draft per user-resolved Decision 1; ambiguity
+dispositions applied 2026-04-26 post-T3.02).
+**Status:** APPROVED (DRAFT → APPROVED on T3.02 close + ambiguity
+disposition; gates T3.07 (Mediator agent hook implementation) and T3.03
+(lockdown flag mechanism, which is the deny side of this PR). Final
+merge into IMPLEMENTATION_PLAN.md / CLAUDE.md folds into
+phase-3-signoff.md per CLAUDE.md §A.4 pattern.
+**Driver:** User direction (Phase 3 resume prompt, Decision 1 verbatim).
+
+### Observed gap requiring change
+
+Plan §5 Phase 3 names the Mediator's scope as "full agent-type hook +
+remediations: reset state, evict dead session, cancel stuck task" but
+does not specify the Mediator's decision contract, confidence model,
+escalation hierarchy, or the lockdown mechanism that breaks the
+Phase 2 deny-source invariant. CLAUDE.md §B.6 describes Mediator
+invocation but predates the four-action contract. The implementation
+needs the contract pinned before T3.03 (lockdown) and T3.07 (agent
+hook) land.
+
+### User-resolved decision (verbatim)
+
+The Mediator inspects the caller's brief, the current state, the
+events log, and the pending queue, then takes one of four action
+types:
+
+- (A) **Advice** — verdict tells the caller "proceed this way." No
+  state change. Other sessions unaffected. Caller retries with the
+  advice.
+- (B) **Caller-blocking surgical fix** — Mediator instructs caller to
+  wait, applies a localized state change (e.g., release orphan lock,
+  clear stale read-set entry), then signals caller to proceed. Other
+  sessions unaffected.
+- (C) **Caller-blocking longer fix** — same category as (B) but larger
+  scope. Multiple orphan locks, partial state corruption. Caller waits
+  longer; others continue. Treat as severity gradient of (B), not a
+  separate branch in code.
+- (D) **System-wide lockdown** — Mediator writes
+  `.coord/mediator/lockdown.json` with `active=true`. Every hook on
+  every tool call reads this file; if active, hook emits
+  `permissionDecision: "deny"` with reason "System-wide pause:
+  Mediator is resolving <reason>. Wait, do not retry until lockdown is
+  cleared." Mediator performs comprehensive fix, clears lockdown flag.
+  All sessions resume.
+
+The Mediator chooses among these autonomously based on the problem's
+scope: caller-only impact → (A) or (B); system-wide impact → (D).
+
+**Confidence model — 2-state (NOT a 4-level enum):**
+- `auto-apply` → verdict is executed immediately.
+- `needs-review` → triggers escalation (peer Mediator).
+
+**Escalation hierarchy (max depth 2):**
+1. First Mediator runs. If `verdict.confidence == auto-apply`, apply
+   and end.
+2. If `verdict.confidence == needs-review`, spawn a SECOND Mediator
+   instance with the same context plus the first Mediator's verdict
+   ("the previous Mediator suggested X; you are an independent
+   reviewer; do you agree?").
+3. If both Mediators agree on action → apply (agreement is defined as
+   same `action_type` regardless of confidence variance — second
+   Mediator is more cautious by design when reviewing; per user
+   clarification, P3).
+4. If they disagree (different `action_type`) → escalate to user (no
+   third Mediator).
+5. Maximum recursion depth is 2. After that, automatic user
+   escalation. NO Mediator-spawning-Mediator beyond depth 2.
+
+**User escalation mechanism — scope-dependent:**
+- Caller-only scope (e.g., evict orphan lock for one session) → emit
+  banner in caller's `additionalContext` with explicit
+  `coord mediate --approve <action>` commands. Other sessions
+  unaffected.
+- System-wide scope → trigger lockdown (action D), block all
+  sessions, surface to user via the next interactive context.
+
+**Lockdown is a NEW deny source — Phase 3 invariant supersedes
+Phase 2's:**
+`permissionDecision: "deny"` is now allowed in EXACTLY two locations:
+1. `pre_tool_use_write.sh` lock-held-by-other branch (existing
+   Phase 2).
+2. ANY hook reading `.coord/mediator/lockdown.json` with
+   `active=true` (new Phase 3).
+Update `phase2_invariant.bats` → `phase3_invariant.bats` with the
+expanded scope.
+
+**Critical conditions that bypass Mediator entirely:**
+If system state is so degraded that even Mediator analysis is risky
+(corrupt schema, impossible state — e.g., two sessions sharing a PID,
+sessions.json fails jq parse repeatedly), skip Mediator entirely.
+Trigger lockdown directly + emit user escalation banner.
+
+### Plan section deltas required
+
+**A. `IMPLEMENTATION_PLAN.md` §5 Phase 3 Scope.** Replace the
+"hooks/mediator_agent.md full agent-type hook" bullet with an
+expanded specification covering: 3-action contract
+(`action_type ∈ {advice, surgical_fix, lockdown}` with
+`severity ∈ {brief, extended}` for `surgical_fix` only); 2-state
+confidence; max-depth-2 escalation hierarchy with peer Mediator
+review; scope-dependent user escalation; lockdown flag mechanism;
+critical-conditions bypass.
+
+**B. `IMPLEMENTATION_PLAN.md` §5 Phase 3 "Done when"** — extend with:
+- "`permissionDecision: deny` confined to exactly 2 locations
+  (lock-held-by-other + lockdown active); asserted by
+  `phase3_invariant.bats`."
+- "Lockdown active causes every hook on every tool call to emit
+  deny with the system-wide-pause reason; verified via fixture."
+- "Needs-review verdict triggers a second Mediator with the first
+  verdict in context; agreement applies, disagreement escalates to
+  user."
+- "Critical-condition bypass triggers lockdown directly without
+  Mediator analysis."
+
+**C. `IMPLEMENTATION_PLAN.md` §3.5 events.jsonl kind list** — add:
+- `MEDIATOR_VERDICT` (payload: `action_type` ∈
+  {advice, surgical_fix, lockdown}, `severity` (surgical_fix-only)
+  ∈ {brief, extended}, `confidence` ∈ {auto-apply, needs-review},
+  `scope` ∈ {caller-only, system-wide}, `mediator_depth` ∈
+  {1, 2}, `verdict_path` pointing at
+  `.coord/mediator/verdict/<ts>.json`).
+- `MEDIATOR_ESCALATED_TO_PEER` (payload: `from_verdict_path`,
+  `peer_invocation_reason: "needs-review"`).
+- `MEDIATOR_PEER_AGREED` / `MEDIATOR_PEER_DISAGREED` (payload:
+  `first_verdict_path`, `second_verdict_path`, `agreed_action`
+  or `first_action`/`second_action`; for AGREED, `applied_severity`
+  reflects the more-conservative-of-two per disposition #5).
+- `MEDIATOR_ESCALATED_TO_USER` (payload: `scope`, `reason`,
+  `caller_session` (caller-only only), `lockdown_active` (bool)).
+- `LOCKDOWN_ACTIVATED` / `LOCKDOWN_CLEARED` (payload: `reason`,
+  `reason_source` ∈ {mediator_verdict, critical_bypass},
+  `mediator_verdict_path` (null for critical_bypass),
+  `archived_to` (CLEARED only; path under
+  `.coord/mediator/lockdown_archive/`)).
+- `HOOK_DENIED_BY_LOCKDOWN` (payload: `hook_name`, `tool_name`,
+  `session_id`).
+- `CRITICAL_CONDITION_DETECTED` (payload: `condition` ∈
+  {corrupt_schema, impossible_state, repeated_jq_failure,
+  pid_collision}, `triggering_observation`).
+- `MEDIATOR_USER_APPROVED` (payload: `verdict_path`, `approved_action`,
+  `approving_session`).
+
+**D. `IMPLEMENTATION_PLAN.md` §3.6 config.json defaults** — add:
+- `mediator_enabled: true` (existing per CLAUDE.md §C.2 emergency
+  override; promote to formal config schema).
+- `mediator_max_depth: 2` (hard ceiling; bounds [1, 2] enforced by
+  `coord health`).
+- `mediator_critical_bypass_enabled: true` (emergency disable for
+  debugging only; default true).
+
+**E. `IMPLEMENTATION_PLAN.md` §3.3 sessions.json schema** — no change
+(lockdown.json is a sibling file under `.coord/mediator/`, not part
+of sessions.json).
+
+**F. `IMPLEMENTATION_PLAN.md` §4 component specs** — add:
+- `.coord/mediator/lockdown.json` schema (per disposition #2 + #3):
+  ```
+  {
+    "active": true,
+    "reason": "<human-readable text for user display>",
+    "reason_source": "critical_bypass" | "mediator_verdict",
+    "started_at": "<ISO timestamp>"
+  }
+  ```
+  Existence-based check: `coord_lockdown_check` simply tests
+  whether the file exists (no field parsing for the gate). Cleared
+  lockdowns archive to
+  `.coord/mediator/lockdown_archive/<ts>.cleared.json` for audit.
+- `.coord/mediator/verdict/<ts>.json` schema:
+  `{ts, mediator_id (UUID for the spawned subagent), depth ∈ {1,2}, action_type ∈ {advice, surgical_fix, lockdown}, severity (surgical_fix-only) ∈ {brief, extended}, confidence ∈ {auto-apply, needs-review}, scope ∈ {caller-only, system-wide}, summary (string), detailed_reasoning (string), proposed_state_changes (array), input_pending_entry (object), referenced_events (array of event_id), referenced_sessions (array of session_id)}`.
+- `lib/lockdown.sh` helper:
+  - `coord_lockdown_check` (returns 0 if `lockdown.json` exists,
+    1 otherwise; existence-based gate per disposition #2; no flock
+    needed for the gate read since file is atomic-renamed in/out).
+  - `coord_lockdown_activate <reason> <reason_source>` (writes
+    lockdown.json atomically via temp+rename; emits
+    `LOCKDOWN_ACTIVATED` event).
+  - `coord_lockdown_clear` (atomic rename of lockdown.json →
+    `lockdown_archive/<ts>.cleared.json`; emits `LOCKDOWN_CLEARED`
+    event with `archived_to` payload).
+  - `coord_lockdown_emit_deny` (reads `reason` from lockdown.json;
+    formats the deny JSON with reason text mirroring §B.2 lock-held
+    deny shape; sourced by every coord hook at top).
+- `coord mediate` CLI extensions:
+  - `coord mediate` — manual primitive (writes
+    `.coord/mediator/pending.jsonl` entry with `kind:"manual"`).
+  - `coord mediate --approve <action>` — consume user-escalation
+    banner choice; reads pending verdict, applies the approved
+    action, logs `MEDIATOR_USER_APPROVED` event.
+  - `coord mediate status` — show active lockdown / recent verdicts /
+    pending entries (operator visibility).
+- `hooks/mediator_agent.md` full spec: agent prompt structure
+  (context bundle per P5; rules-of-the-game restated explicitly;
+  state-mutation must use Bash + atomic_write helpers, NOT Edit/
+  Write/NotebookEdit).
+
+**G. `CLAUDE.md` §B.6 (Mediator invocation protocol)** — rewrite to
+reflect:
+- 4-action contract (A/B/D in code; C as severity gradient on B).
+- 2-state confidence (auto-apply | needs-review).
+- Max-depth-2 escalation with peer Mediator review.
+- Scope-dependent user escalation: caller-only banner with
+  `coord mediate --approve <action>` commands; system-wide
+  lockdown.
+- Critical-conditions bypass.
+
+**H. `CLAUDE.md` §B.10 anti-patterns** — add two entries:
+- "**Do not ignore a lockdown banner.** During lockdown every hook
+  emits deny; retrying immediately wastes turns and may delay
+  Mediator's fix. Wait until the next operation succeeds (lockdown
+  cleared) before resuming work."
+- "**Do not use Edit/Write/NotebookEdit to mutate coord state.**
+  Subagent_filter no-ops these for the Mediator subagent (per
+  Decision 2.17). Mediator MUST use Bash + `lib/atomic_write.sh`
+  helpers for state mutations."
+
+**I. `CLAUDE.md` §B.11 quick-reference table** — new row:
+- Situation: "Lockdown active." You do: "Wait; retry on next prompt
+  after operation succeeds." Hook does: "Emits deny on every tool
+  call until lockdown cleared." Enforcement: "[HOOK-ENFORCED]."
+
+**J. `CLAUDE.md` §C.2 emergency override** — affirm
+`coord config set mediator_enabled false` still works; add affirmation
+that disabling Mediator does NOT disable lockdown (lockdown can be set
+by critical-conditions bypass even if mediator is disabled, since the
+bypass is the safety mechanism for cases Mediator cannot handle).
+
+### Implementation-task dependencies
+
+- T3.03 (lockdown flag mechanism) implements §F lockdown.json schema +
+  §F lib/lockdown.sh + every-hook lockdown check, plus the rename
+  `phase2_invariant.bats → phase3_invariant.bats` per §B done-when
+  expansion. **Gated on this PR approval.**
+- T3.06 (Mediator spawn POC) precedes T3.07; POC may surface
+  implementation constraints worth folding into this PR before final
+  approval. **POC is investigative; PR approval can be conditional on
+  POC findings.**
+- T3.07 (Mediator agent hook) implements §F hooks/mediator_agent.md +
+  §F coord mediate CLI extensions + the verdict-write pass. **Gated on
+  this PR approval AND T3.06 POC closure.**
+- T3.09 (ship-gate fixtures) verifies §B done-when criteria
+  end-to-end.
+
+### Ambiguity dispositions (resolved 2026-04-26 by user)
+
+1. **Verdict-log schema specificity (§F).** **DEFERRED to T3.07
+   design checkpoint** per user direction. T3.06 POC may discover
+   additional fields needed; final schema confirmed at T3.07
+   pre-implementation user checkpoint.
+
+2. **Lockdown clearing protocol.** **RESOLVED — atomic-deletion-
+   with-rename-for-audit (option A).** Hooks check existence
+   ("does lockdown.json exist?") which is simpler than parsing a
+   field. Cleared lockdowns archive to
+   `.coord/mediator/lockdown_archive/<ts>.cleared.json` for audit.
+   During lockdown, Mediator's own state mutations go through Bash
+   + atomic_write helpers (which do NOT route through Edit/Write/
+   NotebookEdit hooks per install.sh hook matchers); once mutation
+   done, Mediator deletes lockdown.json (rename-to-archive); next
+   hook on any session sees no lockdown → resumes.
+
+3. **Lockdown reason text structure.** **RESOLVED — both sources
+   tracked via `reason_source` field.** Schema for lockdown.json:
+   ```
+   {
+     "active": true,
+     "reason": "<human-readable text for user display>",
+     "reason_source": "critical_bypass" | "mediator_verdict",
+     "started_at": "<ISO timestamp>"
+   }
+   ```
+   Hooks read `reason` for the deny banner shown to Claude;
+   `reason_source` is for audit (events.jsonl payload + archive).
+   For Mediator-path lockdowns: `reason` is `mediator_verdict.summary`,
+   `reason_source` = `"mediator_verdict"`. For critical-bypass
+   lockdowns: `reason` is the condition name (e.g., "corrupt schema
+   detected"), `reason_source` = `"critical_bypass"`.
+
+4. **Action C as severity gradient on B.** **RESOLVED — confirmed.**
+   Verdicts emit `action_type ∈ {advice, surgical_fix, lockdown}`
+   (three values; user prompt's A/B/D map to advice/surgical_fix/
+   lockdown). For `surgical_fix`, additional field
+   `severity ∈ {brief, extended}` distinguishes user-prompt
+   action types B (brief = surgical) and C (extended = longer).
+   Three action types; severity is a secondary axis on
+   `surgical_fix` only. The §C events kind list and §F verdict
+   schema below are updated to use these exact enum values.
+
+5. **Confidence variance during agreement.** **RESOLVED — confirmed.**
+   Final algorithm:
+   ```
+   verdict_1 = mediator_invocation(brief, depth=1)
+   if verdict_1.confidence == "auto-apply":
+       apply(verdict_1.action_type, verdict_1.severity); end
+   else:  # needs-review
+       verdict_2 = mediator_invocation(brief, depth=2,
+                                       prior_verdict=verdict_1)
+       if verdict_2.action_type == verdict_1.action_type:
+           # agreement on action_type — apply with MORE
+           # CONSERVATIVE severity (defensive default).
+           # severity ranking: extended > brief; for action_type
+           # other than surgical_fix, severity is N/A.
+           sev = max(verdict_1.severity, verdict_2.severity)
+           apply(verdict_2.action_type, sev); end
+       else:
+           escalate_to_user(verdict_1, verdict_2); end
+   ```
+   Severity disagreement → apply with more conservative severity
+   (defensive default). Action_type disagreement → escalate to
+   user (no third Mediator).
+
+6. **CLAUDE_COORD env var semantics for spawned Mediator
+   subagents.** **DEFERRED to T3.06 POC** per user direction.
+   This PR's approval is conditional: if POC reveals constraints
+   requiring PR amendment, amendment lands before T3.07 design
+   checkpoint.
+
+### Cross-references
+
+- T3.06 POC findings will be cited in this PR's resolution before
+  approval.
+- PR-PHASE3-02 (watchdog) feeds into Mediator via `kind=stale_active`
+  and `kind=pid_recycled` pending entries — the kind list in §C
+  partially duplicates kinds proposed in PR-PHASE3-02; the two PRs
+  must land together to keep the kind list consistent.
+- PR-PHASE3-03 (pending.jsonl unification) is independent; this PR
+  assumes unified pending.jsonl exists.
+- PR-PHASE3-04 (GC) bundles into Mediator runs; this PR's verdict-
+  write pass is the trigger point for GC.
+- FINDINGS — none currently OPEN against this PR; T3.06 POC may
+  surface new findings.
+
+### Non-changes (deliberate)
+
+- `permissionDecisionReason` text format unchanged for the
+  lock-held-by-other branch (existing Phase 2). Only the new lockdown
+  branch adds a different reason text.
+- Validator agent (Phase 4) untouched.
+- Task delegation (Phase 6) untouched.
+- Subagent_filter (PR-PHASE0-01) extends naturally to Mediator
+  subagents — no modification needed; Mediator's tool calls fall in
+  the existing subagent-skip path.
+
+### Acknowledgement
+
+APPROVED 2026-04-26 (user dispositioned ambiguities 1-5 inline; #1 +
+#6 explicitly deferred to T3.06/T3.07 checkpoints per user
+direction). Status DRAFT → APPROVED. Final merge into
+IMPLEMENTATION_PLAN.md / CLAUDE.md folds into phase-3-signoff.md.
+
+---
+
+## PR-PHASE3-02 — Peer watchdog design contract (Decision 2)
+
+**Date:** 2026-04-26
+**Author:** Phase 3 builder (draft per user-resolved Decision 2 + P4
+threshold values; ambiguity dispositions applied 2026-04-26 post-T3.02).
+**Status:** APPROVED — gates T3.04 (cache infra) and T3.05 (probe
+logic). Final merge folds into phase-3-signoff.md.
+**Driver:** User direction (Phase 3 resume prompt, Decision 2 verbatim;
+P4 threshold preferences).
+
+### Observed gap requiring change
+
+Plan §5 Phase 3 names the watchdog as "lib/watchdog.sh: sampled from
+SessionStart + PreToolUse; PID+lstart liveness; 2-voter consensus
+requiring PID-absent/recycled" but does not specify the trigger model
+(when ambient suspicion fires a probe), the duplicate-prevention
+mechanism (multiple sessions noticing the same anomaly), the
+recent-checks cache (avoiding repeat probes), or the relationship to
+Mediator (watchdog as triage layer, not direct decision-maker).
+Implementation needs the contract pinned before T3.04/T3.05 land.
+
+### User-resolved decision (verbatim)
+
+Watchdog is the Mediator's lightweight pre-filter. Runs FAST (bash,
+milliseconds) and answers ONE question: "is this anomaly real, or
+false alarm?"
+
+**Trigger model:**
+- Calling session itself has a problem (e.g., lock denied with
+  unresponsive holder) → invoke Mediator directly. NOT watchdog.
+- Calling session observes suspicion ABOUT another session (e.g.,
+  notices session X's last_activity is 10 min old, notices X's lock
+  acquired 30 min ago and never refreshed) → invoke watchdog.
+
+Watchdog's role is reception/triage for ambient suspicion, not crisis
+response.
+
+**Caller does NOT block:** Watchdog is invoked fire-and-forget. The
+calling session continues its own work. If watchdog confirms real
+problem, watchdog invokes Mediator on behalf of the caller. Caller is
+signaled later via notifications if its work depended on the
+resolution.
+
+**Duplicate watchdog prevention:** When 5+ sessions notice the same
+anomaly simultaneously, only ONE watchdog runs.
+- File: `.coord/watchdog/checking/<target_session_id>.lock`
+- Created atomically via `flock + temp + rename`.
+- Second invoker exits no-op immediately if file exists.
+- Lock file deleted when watchdog completes.
+- Lock file has TTL (e.g., 30 sec); stale lock from crashed watchdog
+  auto-cleared by next observer via age check.
+
+**Recent-checks cache:** After watchdog completes, verdict cached.
+- File: `.coord/watchdog/recent_checks.jsonl` (append-only).
+- Each entry: `{ts, target, verdict, reason, valid_until}`.
+- TTL by verdict type:
+  - `alive` → 60 seconds.
+  - `dead` → until next session_start of any session.
+  - `uncertain` → 30 seconds.
+- Before invoking watchdog, sessions check recent_checks.jsonl. If a
+  non-expired verdict exists for the target, skip invocation.
+
+**Watchdog's output (3 outcomes):**
+- "target alive — false alarm" → write verdict to recent_checks; do
+  NOT invoke Mediator; signal caller (if waiting) "no action needed."
+- "target dead — Mediator needed" → write verdict; invoke Mediator
+  with `kind=stale_active` or `kind=pid_recycled` (Mediator decides
+  specific kind based on observation).
+- "uncertain" → write verdict; invoke Mediator (Mediator handles
+  ambiguity).
+
+Watchdog NEVER writes a verdict directly. Triage layer only.
+
+**Watchdog vs direct Mediator invocation flowchart:**
+```
+Session encounters something:
+├── Self: I am blocked / I am waiting / I have a concrete problem
+│   → invoke Mediator directly (skip watchdog)
+└── Other: I notice another session looks suspicious
+    → invoke watchdog
+        ├── alive → no-op, log
+        ├── dead → watchdog invokes Mediator
+        └── uncertain → watchdog invokes Mediator
+```
+
+### Pre-loaded ambient-suspicion thresholds (per user P4 preferences)
+
+These are STARTING values; Phase 7 stress-test data may revise them.
+Document each as a tunable in `config.json` (similar to
+`lock_ttl_seconds`, Decision 2.20):
+
+1. `last_activity > 10 minutes` (sessions[<id>].last_activity_at older
+   than 600 s) → suspicious; trigger watchdog probe.
+2. `lock acquired_at > 30 minutes AND last_refresh_at == acquired_at`
+   (lock taken 30 min ago and never refreshed since) → suspicious;
+   trigger watchdog probe.
+3. `RESUME_ORPHAN_LOCK_DETECTED` event in recent events.jsonl tail
+   (within last 60 s of probe-evaluation time) → deterministic
+   trigger; bypass cache lookup (this is a known anomaly signal from
+   the resume path, not ambient).
+4. PID listed in `sessions.json` but `ps -p <pid>` returns empty (or
+   `lstart` mismatch) → deterministic trigger; bypass cache lookup.
+
+### Plan section deltas required
+
+**A. `IMPLEMENTATION_PLAN.md` §5 Phase 3 Scope.** Replace the
+"lib/watchdog.sh: sampled from SessionStart + PreToolUse; PID+lstart
+liveness; 2-voter consensus requiring PID-absent/recycled" bullet
+with (note: 2-voter consensus retired per disposition #3 in favor of
+single-watchdog model + dedupe lock):
+- "lib/watchdog.sh: invoked from PreToolUse paths (specifically
+  pre_tool_use_any.sh, the existing cross-cutting concern site) when
+  ambient-suspicion checks fire. Fire-and-forget caller; triage-only
+  (3-outcome verdict: alive | dead | uncertain). Never decides — only
+  invokes Mediator on dead/uncertain."
+- "lib/watchdog_cache.sh: recent_checks.jsonl producer/consumer with
+  verdict-typed TTL (alive 60 s, dead until next session_start,
+  uncertain 30 s); cache-hit lookup gates probe invocation."
+- "Single-watchdog-per-anomaly via dedupe lock:
+  `.coord/watchdog/checking/<target>.lock` created via atomic
+  temp+rename; second observer no-ops; 30 s stale-TTL auto-cleared
+  by next observer."
+- "PID+lstart liveness probing within watchdog: `ps -p <pid> -o lstart=`
+  comparison; PID-absent OR PID-recycled (lstart mismatch) → dead;
+  PID-present with matching lstart → alive."
+- "Eviction triggered on watchdog verdict 'dead' + Mediator
+  confirmation. NO 2-voter consensus mechanic — single watchdog +
+  Mediator review is the chain. anomaly_votes field in sessions.json
+  schema is reserved (inactive in Phase 3)."
+
+**B. `IMPLEMENTATION_PLAN.md` §3.5 events.jsonl kind list** — add:
+- `WATCHDOG_PROBED` (payload: `target_session`, `trigger_reason` ∈
+  {last_activity, lock_unrefreshed, resume_orphan_lock,
+  pid_absent}, `verdict` ∈ {alive, dead, uncertain},
+  `probe_latency_ms`).
+- `WATCHDOG_CACHE_HIT` (payload: `target_session`, `cached_verdict`,
+  `cached_at`, `valid_until`; emitted when probe is skipped).
+- `WATCHDOG_DUPLICATE_SKIPPED` (payload: `target_session`,
+  `existing_lock_age_seconds`; emitted when concurrent observer hits
+  existing checking lock).
+- `WATCHDOG_ESCALATED_TO_MEDIATOR` (payload: `target_session`,
+  `verdict` ∈ {dead, uncertain}, `mediator_pending_kind` ∈
+  {stale_active, pid_recycled, ambiguous_state}).
+- `WATCHDOG_STALE_LOCK_CLEARED` (payload: `target_session`,
+  `stale_lock_age_seconds`; when an observer auto-clears a crashed-
+  watchdog's leftover checking lock).
+
+**C. `IMPLEMENTATION_PLAN.md` §3.6 config.json defaults** — add:
+- `watchdog_enabled: true` (per plan §5 risk row "rollback:
+  watchdog_enabled: false").
+- `watchdog_suspicion_last_activity_seconds: 600` (10 min; bounds
+  [60, 3600]).
+- `watchdog_suspicion_lock_unrefreshed_seconds: 1800` (30 min; bounds
+  [300, 7200]).
+- `watchdog_recent_checks_ttl_alive_seconds: 60` (bounds [10, 600]).
+- `watchdog_recent_checks_ttl_uncertain_seconds: 30` (bounds [10, 300]).
+- `watchdog_dedupe_lock_ttl_seconds: 30` (bounds [10, 120]).
+
+`coord health` validates all bounds.
+
+**D. `IMPLEMENTATION_PLAN.md` §3.3 sessions.json schema** — no new
+field (anomaly_votes already exists). Per disposition #3, document
+anomaly_votes as **reserved for future cross-validation; inactive
+in Phase 3**:
+- Schema annotation: "anomaly_votes — reserved field for future
+  cross-watchdog validation. Phase 3 uses a single-watchdog-per-
+  anomaly model (dedupe lock); this field remains an empty object
+  in Phase 3 and is not written or read by any Phase 3 component.
+  Future phases may activate."
+- No watchdog writes; no Mediator reads.
+
+**E. `IMPLEMENTATION_PLAN.md` §4 component specs** — add:
+- `lib/watchdog.sh`:
+  - `coord_watchdog_check_ambient_suspicion <sessions_snapshot>` — scans
+    sessions for the 4 triggers; returns target_id + reason for each
+    suspicious target found; cheap (single jq filter); called from
+    pre_tool_use_any.sh.
+  - `coord_watchdog_probe <target_id> <reason>` — full probe: check
+    cache → check dedupe lock → run PID/lstart probe → write verdict
+    to recent_checks → invoke Mediator if dead/uncertain → release
+    dedupe lock; backgrounded by caller (`coord_watchdog_probe ... &`)
+    so caller is fire-and-forget. NO anomaly_votes write
+    (per disposition #3).
+- `lib/watchdog_cache.sh`:
+  - `coord_watchdog_cache_lookup <target_id>` — returns cached verdict
+    if non-expired, else "miss".
+  - `coord_watchdog_cache_write <target_id> <verdict> <reason>` —
+    appends to recent_checks.jsonl with TTL-typed valid_until.
+  - `coord_watchdog_cache_invalidate_dead_on_session_start` — called
+    from session_start.sh; expires all "dead" entries.
+- `.coord/watchdog/checking/<target>.lock` — empty file used as
+  dedupe sentinel; created via temp+rename.
+- `.coord/watchdog/recent_checks.jsonl` — append-only verdict cache.
+
+**F. `CLAUDE.md` §B.7-§B.8 (Mediator vs watchdog flow)** — adjust to
+clarify:
+- §B.7 amended: "you do not invoke the Mediator directly except when
+  YOUR session has a concrete problem (blocked write, unresolvable
+  state). Ambient suspicion about ANOTHER session goes through the
+  watchdog (fire-and-forget) which triages and invokes Mediator only
+  if the suspicion is real."
+- §B.8 amended: passive wait remains; watchdog is orthogonal (watchdog
+  is for cross-session triage, not self-blocking).
+
+### Implementation-task dependencies
+
+- T3.04 (cache infra) implements §E lib/watchdog_cache.sh +
+  recent_checks.jsonl + checking/ dedupe lock files. **Gated on this
+  PR approval.**
+- T3.05 (probe logic) implements §E lib/watchdog.sh probe heuristics,
+  PID/lstart liveness, anomaly_votes write, Mediator escalation.
+  **Gated on this PR approval AND T3.04 close.**
+- Watchdog → Mediator handoff (§B WATCHDOG_ESCALATED_TO_MEDIATOR)
+  requires PR-PHASE3-01 Mediator pending kinds (`stale_active`,
+  `pid_recycled`, `ambiguous_state`) to exist. **Cross-PR
+  dependency: PR-PHASE3-01 + PR-PHASE3-02 land together; T3.04 can
+  start as soon as both are approved.**
+
+### Ambiguity dispositions (resolved 2026-04-26 by user)
+
+1. **Watchdog invocation site (specifically which hook).**
+   **RESOLVED — pre_tool_use_any.sh confirmed.** Cross-cutting
+   concern site; watchdog called only when ambient-suspicion
+   signals are present (not on every tool call — the
+   suspicion-detection scan is the gate, the probe invocation is
+   conditional). Existing notification + corruption + mediator-
+   pending consumers in pre_tool_use_any.sh share the same
+   pattern.
+
+2. **Hook latency budget impact.** **RESOLVED — <50 ms p99
+   acceptable target; <2 s is the hard ceiling.** Phase 0
+   Experiment #7 baseline (60 ms avg / 435 ms p99 for full
+   flock+jq RMW) leaves ample headroom. T3.04 close report MUST
+   include actual measurement; flag for user review if real
+   measurement exceeds 100 ms p99.
+
+3. **anomaly_votes schema.** **RESOLVED — keep field reserved
+   in §3.3 schema, do NOT activate in Phase 3.** Watchdog acts as
+   single-instance triage layer per Decision 2 (duplicate-
+   prevention via `.coord/watchdog/checking/<target>.lock` ensures
+   only one watchdog runs per anomaly observation). Multi-voter
+   consensus is retired in favor of the single-watchdog model.
+   Document anomaly_votes in §3.3 as "reserved for future
+   cross-validation; inactive in Phase 3." This simplifies §A
+   (no anomaly_votes write), §B (no anomaly_votes events), and
+   §E (no per-voter logic in lib/watchdog.sh). Plan §5 Phase 3
+   "2-voter consensus" line in scope edits to remove the
+   2-voter requirement; eviction triggers on Watchdog verdict
+   "dead" + Mediator confirmation.
+
+4. **PID-recycled detection portability.** **RESOLVED — verify
+   in T3.05 close report.** Phase 0 already established
+   `ps -p <pid> -o lstart=` works on both BSD (macOS) and GNU
+   (Linux); the new watchdog use must respect the same idiom.
+   T3.05 close report MUST include explicit Linux probe
+   confirming the comparison is portable; flag if any divergence
+   surfaces.
+
+### Cross-references
+
+- PR-PHASE3-01 (Mediator) consumes WATCHDOG_ESCALATED_TO_MEDIATOR
+  events and the `stale_active` / `pid_recycled` / `ambiguous_state`
+  pending kinds.
+- PR-PHASE3-03 (pending.jsonl unification) is independent.
+- FINDINGS — none currently OPEN against this PR.
+
+### Non-changes (deliberate)
+
+- Existing `last_activity_at` / `last_refresh_at` / `pid` / `pid_lstart`
+  fields in sessions.json schema unchanged.
+- Existing `RESUME_ORPHAN_LOCK_DETECTED` event (PR-PHASE1-01) is
+  reused as a watchdog deterministic trigger; no change to its
+  payload.
+- Mediator's eviction algorithm itself (when to actually delete a
+  session row + its locks) is in PR-PHASE3-01 scope, not here.
+
+### Acknowledgement
+
+APPROVED 2026-04-26 (user dispositioned all 4 ambiguities inline;
+anomaly_votes simplification removes one source of complexity from
+T3.05; cross-PR dependency with PR-PHASE3-01 noted).
+
+---
+
+## PR-PHASE3-03 — pending.json/jsonl unification (Decision 4)
+
+**Date:** 2026-04-26
+**Author:** Phase 3 builder (draft per user-resolved Decision 4;
+ambiguity dispositions applied 2026-04-26 post-T3.02).
+**Status:** APPROVED — bundles into T3.07 (Mediator agent hook).
+**Driver:** User direction (Phase 3 resume prompt, Decision 4 verbatim).
+
+### Observed gap requiring change
+
+Phase 1 shipped `pending.json` for Mediator's `corrupt_state` flag
+(single-entry semantics, atomic-write/rename). Phase 2 (T2.04)
+shipped `pending.jsonl` for `flock_timeout` (append-only, multi-
+entry, HWM consumer). The two coexist by historical accident; the
+plan §5 Phase 3 Mediator thread implies a unified queue ("multiple
+pending kinds: corrupt_state, flock_timeout, plus Phase 3 new kinds")
+but does not formalize the migration. Without unification, Phase 3's
+Mediator agent has to consume from two distinct files with different
+semantics — duplicating logic and risking missed entries.
+
+### User-resolved decision (verbatim)
+
+Migrate `corrupt_state` from legacy `pending.json` to `pending.jsonl`.
+Specifically:
+- All Mediator pending kinds (`corrupt_state`, `flock_timeout`, plus
+  Phase 3 new kinds) write to `pending.jsonl`.
+- Single consumer pattern: `pre_tool_use_any.sh` + `session_start.sh`
+  consume from `pending.jsonl` uniformly.
+- Legacy `pending.json` file is removed at install time. Install
+  migrates: if pending.json exists with active corrupt_state entry,
+  append to pending.jsonl, delete pending.json.
+- `coord_consume_corrupt_state_flag` function is updated to consume
+  from JSONL queue.
+- Existing bats tests for corrupt_state are updated to assert the new
+  flow.
+
+This work bundles into the Mediator implementation task (T3.07), not
+standalone.
+
+### Plan section deltas required
+
+**A. `IMPLEMENTATION_PLAN.md` §5 Phase 3 Mediator thread** — extend
+the bullet "flag file infrastructure appears here" (currently scoped
+to Phase 2 corrupt_state + flock_timeout) with:
+- "Phase 3: pending.json → pending.jsonl unification. corrupt_state
+  migrates to JSONL form; legacy pending.json removed at install
+  time. Single consumer at pre_tool_use_any.sh + session_start.sh."
+
+**B. `IMPLEMENTATION_PLAN.md` §4 component specs** — extend:
+- `install.sh` migration step (idempotent):
+  - If `.coord/mediator/pending.json` exists and parses as JSON with
+    `kind == "corrupt_state"`: extract fields → format as JSONL line
+    matching pending.jsonl schema (top-level `ts/kind/session/source`
+    + `.payload`) → append to `.coord/mediator/pending.jsonl` (under
+    flock on pending.lock) → delete pending.json.
+  - If pending.json exists but does not parse: archive to
+    `pending.legacy.<ISO>.json` for forensic; delete pending.json;
+    log INSTALL_MIGRATE_FAILED event.
+  - If pending.json absent: no-op.
+  - Migration runs on `install.sh --repair` for existing installs and
+    on first install (pending.json never exists on first install, so
+    no-op there).
+- `install.sh --uninstall` cleanup: removes both pending.jsonl and
+  pending.consumed (HWM) along with the rest of `.coord/mediator/`
+  (existing behavior; no new cleanup needed).
+- `lib/atomic_write.sh` `coord_consume_corrupt_state_flag` rewrite:
+  reads from pending.jsonl HWM consumer (existing
+  `coord_mediator_consume_pending` from lib/mediator_pending.sh,
+  T2.04). Filters pending entries with `kind == "corrupt_state"` for
+  banner emission; non-corrupt kinds are passed through to the
+  generic mediator-pending banner consumer.
+- Defensive consumer fallback (NOT in user direction; recommended for
+  robustness): the consumer code reads BOTH pending.jsonl AND
+  pending.json on every invocation. If pending.json is found (e.g.,
+  T3.07-deployed coord runs against an install that pre-dates T3.07),
+  drains pending.json into pending.jsonl on first read and then
+  ignores pending.json forever. This decouples migration from strict
+  install-order coupling. **Optional; flagged for confirmation.**
+
+**C. `CLAUDE.md` §B.9.2 (corrupted state file)** — update step 3 from
+"writes Mediator flag (kind: 'corrupt_state')" to:
+"appends a `pending.jsonl` entry with `kind: 'corrupt_state'`,
+preserving the existing semantics (banner emission via the unified
+mediator-pending consumer; non-repetition via HWM advance)."
+
+### Implementation-task dependencies
+
+- T3.07 (Mediator agent hook) bundles this PR as part of its
+  delivery: corrupt_state migration + install.sh changes + consumer
+  rewrite all land in the T3.07 commit (per Decision 4: "bundles into
+  Mediator implementation task, not standalone").
+- T2.04 already shipped pending.jsonl producer + consumer for
+  flock_timeout; this PR extends to corrupt_state. **No dependency on
+  T2.04 changes.**
+- bats updates: `corruption_recovery.bats` rewritten to assert JSONL
+  flow; `mediator_flock_timeout.bats` unchanged (already JSONL).
+
+### Ambiguity dispositions (resolved 2026-04-26 by user)
+
+1. **Defensive consumer fallback.** **RESOLVED — strict mode
+   (option A); no defensive fallback.** Migration is
+   deterministic; defensive read-both adds complexity for a
+   no-real-scenario edge case. If post-install pending.json
+   appears, that is unsupported state — log a warning, do NOT
+   auto-merge. Implementation: install.sh migration is the only
+   transition path; consumer reads only pending.jsonl.
+
+2. **Schema delta in pending.jsonl entries for corrupt_state.**
+   **RESOLVED — confirmed as drafted.** Migration mapping:
+   ```
+   legacy pending.json:                                  pending.jsonl entry:
+   {kind:"corrupt_state",                                {ts: <ts>,
+    ts: <ts>,                                             kind:"corrupt_state",
+    archived_to: ".coord/sessions.corrupt.<ts>.json",     session: null,
+    detected_by: "atomic_write.sh"}                       source:"install_migration",
+                                                          payload: {
+                                                            archived_to: "...",
+                                                            detected_by: "atomic_write.sh"
+                                                          }}
+   ```
+   `session` field is null because corrupt_state is not
+   session-specific.
+
+### Cross-references
+
+- PR-PHASE3-01 (Mediator) — Mediator agent consumes the unified
+  pending.jsonl; this PR makes corrupt_state visible to the agent.
+- PR-PHASE3-04 (GC) — GC operates on pending.jsonl; this PR ensures
+  all kinds live there.
+- T2.04 (existing code) — `lib/mediator_pending.sh` helpers reused.
+- FINDINGS — none currently OPEN against this PR.
+
+### Non-changes (deliberate)
+
+- pending.consumed (HWM file) shape unchanged; existing single-
+  integer-line format continues.
+- pending.lock unchanged; flock-on-pending.lock guards all writes.
+- Phase 1 corruption-recovery banner format unchanged (consumer
+  produces same text; only the underlying queue shape changes).
+
+### Acknowledgement
+
+APPROVED 2026-04-26 (strict-mode migration confirmed; schema
+mapping confirmed). Bundles into T3.07; no separate
+implementation task.
+
+---
+
+## PR-PHASE3-04 — pending.jsonl GC bundled with Mediator runs (Decision 6)
+
+**Date:** 2026-04-26
+**Author:** Phase 3 builder (draft per user-resolved Decision 6;
+ambiguity dispositions applied 2026-04-26 post-T3.02).
+**Status:** APPROVED — bundles into T3.07 (Mediator agent hook).
+**Driver:** User direction (Phase 3 resume prompt, Decision 6 verbatim).
+
+### Observed gap requiring change
+
+T2.04 shipped pending.jsonl as append-only with a HWM consumer
+(pending.consumed). Without garbage collection, pending.jsonl grows
+unboundedly across the system's lifetime — every flock_timeout,
+corrupt_state, watchdog escalation, and manual coord mediate adds a
+line. Plan §5 Phase 3 implies the Mediator agent owns this state but
+does not specify GC. Phase 2 signoff flagged "pending.jsonl GC" as a
+Phase 3 Open Question.
+
+### User-resolved decision (verbatim)
+
+Garbage collection bundled with Mediator agent runs. Specifically:
+- When Mediator finishes a verdict-write pass, it ALSO truncates
+  consumed entries from pending.jsonl.
+- Truncation rule: any entry with index <= pending.consumed
+  high-water-mark AND age > 24 hours is removed.
+- Single combined operation: rewrite pending.jsonl atomically (via
+  atomic_write), keeping only un-consumed entries plus
+  recently-consumed ones (< 24h).
+- No separate `coord mediator gc` CLI; GC is implicit in agent runs.
+
+24-hour retention preserves recent-history visibility for debugging
+(operator can inspect "what happened last hour" via coord events)
+without unbounded growth.
+
+### Plan section deltas required
+
+**A. `IMPLEMENTATION_PLAN.md` §5 Phase 3 Mediator thread** — extend
+to include:
+- "GC of pending.jsonl bundled with verdict-write pass: 24h
+  retention; atomic rewrite via lib/atomic_write.sh primitives;
+  implicit (no separate CLI)."
+
+**B. `IMPLEMENTATION_PLAN.md` §4 component spec** — `hooks/mediator_agent.md`
+post-verdict step:
+- After Mediator writes its verdict to
+  `.coord/mediator/verdict/<ts>.json` (per PR-PHASE3-01), it also
+  performs pending.jsonl GC.
+- Algorithm:
+  ```
+  1. Read pending.consumed → HWM (integer index, line-count).
+  2. Read pending.jsonl line-by-line; keep lines where:
+     (line_index > HWM) OR (now - line.ts < retention_hours * 3600).
+  3. Atomically rewrite pending.jsonl with kept lines (temp +
+     rename under flock on pending.lock).
+  4. After rewrite, advance pending.consumed to (HWM -
+     removed_count) so that the HWM still points at the
+     "last-consumed" entry in the new file.
+  5. Emit PENDING_GC_RUN event with kept_count, removed_count,
+     before_size_bytes, after_size_bytes.
+  ```
+- HWM rebasing (step 4) is critical: removing N lines from before HWM
+  shifts every subsequent index by -N; HWM must adjust accordingly so
+  the consumer continues from the correct position.
+
+**C. `IMPLEMENTATION_PLAN.md` §3.5 events.jsonl kind list** — add:
+- `PENDING_GC_RUN` (payload: `kept_count`, `removed_count`,
+  `before_size_bytes`, `after_size_bytes`, `retention_hours`,
+  `triggered_by_verdict_path`).
+
+**D. `IMPLEMENTATION_PLAN.md` §3.6 config.json defaults** — add:
+- `mediator_pending_retention_hours: 24` (bounds [1, 168] i.e. 1
+  hour minimum, 1 week maximum).
+
+`coord health` validates the bound.
+
+**E. `IMPLEMENTATION_PLAN.md` §4 lib/mediator_pending.sh** — extend
+(this file shipped in T2.04):
+- New function `coord_mediator_gc_pending <retention_hours>`:
+  implements the algorithm in §B. Called only by Mediator agent
+  hook (no external callers in v1).
+- Atomic rewrite uses lib/atomic_write.sh primitives extended for
+  non-state-file targets — pending.jsonl is not sessions.json but
+  uses the same temp + rename + flock idiom. Add a generic helper
+  `coord_atomic_rewrite_jsonl <path> <lock_path> <filter_fn>` to
+  lib/atomic_write.sh for this and future similar use.
+
+### Implementation-task dependencies
+
+- T3.07 (Mediator agent hook) bundles this PR as part of its
+  delivery: GC trigger, rewrite, HWM rebase all land in the T3.07
+  commit (per Decision 6: "bundles into Mediator implementation
+  task, not standalone").
+- T2.04 (existing) — pending.consumed HWM file is the index source.
+- PR-PHASE3-03 (pending.jsonl unification) — must land first so all
+  pending kinds live in pending.jsonl before GC operates.
+
+### Ambiguity dispositions (resolved 2026-04-26 by user)
+
+1. **GC frequency on healthy systems.** **RESOLVED — no
+   periodic trigger.** Mediator-bundled GC suffices;
+   pending.jsonl growth on healthy systems is negligible (only
+   flock_timeout entries, rare). Revisit if Phase 7 stress test
+   reveals user-visible bloat.
+
+2. **HWM atomicity vs GC atomicity.** **RESOLVED — two-phase
+   confirmed.** HWM advance (existing T2.04 mechanism on consumer
+   side) is separate from GC truncation. Two-phase: HWM advances
+   during banner emission; GC reads stable HWM during rewrite.
+   No new atomicity needed beyond what atomic_write.sh already
+   provides.
+
+3. **Crash recovery during GC.** **RESOLVED — single flock
+   encloses both rewrite + HWM update.** The GC critical section
+   holds flock on pending.lock for the entirety of: read HWM →
+   read pending.jsonl → compute kept lines → atomic temp+rename
+   for pending.jsonl → atomic temp+rename for pending.consumed.
+   If Mediator crashes mid-section, the flock releases on fd
+   close; either both files are pre-state or both are post-state
+   (no partial application).
+
+4. **pending.consumed format after GC.** **RESOLVED — HWM
+   rebases to "lines 1..N are consumed in the new file".** The
+   HWM is a single integer line; semantics continue to mean
+   "lines 1..HWM are consumed" — but interpreted relative to the
+   POST-GC file. Example: if pre-GC file had 10 lines with HWM=7
+   (lines 1-7 consumed) and GC removes 5 entries (lines 1-5
+   were >24h old; lines 6-7 were <24h, so kept; lines 8-10 were
+   un-consumed), post-GC file has 5 lines (old lines 6-10) and
+   HWM=2 (the first 2 lines of the new file = old lines 6-7,
+   which were consumed).
+
+### Cross-references
+
+- PR-PHASE3-01 (Mediator) — verdict-write pass triggers GC.
+- PR-PHASE3-03 (pending.jsonl unification) — must land first.
+- T2.04 (existing) — HWM mechanism reused.
+- FINDINGS — none currently OPEN against this PR.
+
+### Non-changes (deliberate)
+
+- T2.04 producer (`coord_mediator_emit_pending`) and consumer
+  (`coord_mediator_consume_pending`) function signatures unchanged.
+- pending.lock semantics unchanged.
+- No separate `coord mediator gc` CLI (per Decision 6 explicit).
+
+### Acknowledgement
+
+APPROVED 2026-04-26 (all 4 ambiguities dispositioned; HWM-rebase
+algorithm clarified with worked example). Bundles into T3.07;
+PR-PHASE3-03 cross-PR dependency noted.
+
+---
+
+*Future entries append below.*

@@ -114,8 +114,7 @@ teardown() {
   echo "$output" | grep -q "1 new entry"
   echo "$output" | grep -q "file=/new"
   # /old must NOT appear in this banner (already consumed).
-  run bash -c "echo '$output' | grep -c 'file=/old'"
-  [ "$output" = "0" ]
+  ! _grep_output_for "file=/old"
 }
 
 # --- Producer wired to atomic_write.sh -------------------------------------

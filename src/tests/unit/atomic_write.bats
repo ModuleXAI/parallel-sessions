@@ -52,8 +52,10 @@ teardown() {
   [ "$output" = "s1,s10,s2,s3,s4,s5,s6,s7,s8,s9" ]
 }
 
-@test "atomic: corrupt state → reset + archive + mediator flag" {
+@test "atomic: corrupt state → reset + archive + mediator pending.jsonl entry" {
   mkdir -p "$TMP/.coord/mediator"
+  : >"$TMP/.coord/mediator/pending.jsonl"
+  : >"$TMP/.coord/mediator/pending.lock"
   export COORD_DIR="$TMP/.coord"
   printf 'this is not json\n' >"$STATE"
   run "$A" edit "$STATE" '.sessions.after = {ok:true}'
@@ -63,10 +65,16 @@ teardown() {
   # Archived original
   run bash -c "ls '$STATE'.corrupt.*.json 2>/dev/null | head -1"
   [ -n "$output" ]
-  # Mediator flag set
-  [ -f "$COORD_DIR/mediator/pending.json" ]
-  run jq -r .kind "$COORD_DIR/mediator/pending.json"
-  [ "$output" = "corrupt_state" ]
+  # Mediator pending.jsonl now has a corrupt_state entry (T3.07 /
+  # PR-PHASE3-03: legacy single-file pending.json is retired in
+  # favor of unified JSONL queue).
+  sleep 0.2
+  run jq -rs '[.[] | select(.kind == "corrupt_state")] | length' "$COORD_DIR/mediator/pending.jsonl"
+  [ "$output" -ge 1 ]
+  run jq -rs '[.[] | select(.kind == "corrupt_state")][-1].source' "$COORD_DIR/mediator/pending.jsonl"
+  [ "$output" = "atomic_write" ]
+  # Legacy pending.json file is NOT created.
+  [ ! -f "$COORD_DIR/mediator/pending.json" ]
 }
 
 @test "atomic: flock timeout returns exit 42" {

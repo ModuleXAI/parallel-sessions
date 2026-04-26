@@ -40,6 +40,18 @@ if [ -f "$_ATOMIC_WRITE_DIR/mediator_pending.sh" ]; then
   # shellcheck disable=SC1091
   . "$_ATOMIC_WRITE_DIR/mediator_pending.sh"
 fi
+# T3.07: critical_check.sh provides coord_critical_record_parse_failure
+# (3x consecutive parse failures → lockdown directly per PR-PHASE3-01
+# critical-bypass disposition). Lockdown helpers loaded lazily inside
+# the helper itself to avoid sourcing cycles.
+if [ -f "$_ATOMIC_WRITE_DIR/critical_check.sh" ]; then
+  # shellcheck disable=SC1091
+  . "$_ATOMIC_WRITE_DIR/critical_check.sh"
+fi
+if [ -f "$_ATOMIC_WRITE_DIR/lockdown.sh" ]; then
+  # shellcheck disable=SC1091
+  . "$_ATOMIC_WRITE_DIR/lockdown.sh"
+fi
 
 coord_state_empty_template() {
   # Emitted via jq to guarantee a canonical JSON object.
@@ -98,11 +110,36 @@ coord_atomic_edit() {
         rm -f "${state_file}.tmp.$$"
         exit 44
       fi
-      # Set a Mediator pending flag so downstream hooks surface the reset.
-      if [ -n "${COORD_DIR:-}" ] && [ -d "$COORD_DIR/mediator" ]; then
-        jq -n --arg ts "$ts" --arg file "$state_file" \
-          '{kind:"corrupt_state", ts:$ts, file:$file}' \
-          >"$COORD_DIR/mediator/pending.json" 2>/dev/null || true
+      # Emit a Mediator pending JSONL entry so downstream hooks surface
+      # the reset (PR-PHASE3-03 / Decision 4: corrupt_state migrates to
+      # pending.jsonl alongside flock_timeout + Phase 3 new kinds).
+      # The producer is the existing T2.04 helper; this avoids the
+      # legacy single-entry pending.json file entirely. install.sh
+      # migrates any pre-Phase-3 pending.json into the JSONL queue at
+      # install/repair time.
+      if [ -n "${COORD_DIR:-}" ] && command -v coord_mediator_emit_pending >/dev/null 2>&1; then
+        local archived_path=""
+        if [ -f "${state_file}.corrupt.$ts.json" ]; then
+          archived_path="${state_file}.corrupt.$ts.json"
+        fi
+        coord_mediator_emit_pending corrupt_state \
+          source=atomic_write \
+          file="$state_file" \
+          archived_to="$archived_path" \
+          detected_at="$ts" || true
+      fi
+      # T3.07 critical bypass: increment the parse-fail counter. After
+      # 3 consecutive failures the helper triggers lockdown directly
+      # (skipping Mediator, since its analysis would be unsafe on
+      # repeatedly-corrupt state).
+      if command -v coord_critical_record_parse_failure >/dev/null 2>&1; then
+        coord_critical_record_parse_failure || true
+      fi
+    else
+      # Successful parse — reset the parse-fail counter so a single
+      # successful read clears any prior streak.
+      if command -v coord_critical_reset_parse_counter >/dev/null 2>&1; then
+        coord_critical_reset_parse_counter || true
       fi
     fi
 
@@ -158,30 +195,68 @@ coord_atomic_reset() {
 }
 
 # coord_consume_corrupt_state_flag
-#   Implements §B.9.2 step 4: if a corrupt_state Mediator-pending flag is
-#   present at $COORD_DIR/mediator/pending.json AND has not yet been
-#   delivered (no .delivered.* counterpart), print the user-facing banner
-#   text on stdout AND rename the flag to pending.delivered.<ts>.json so
-#   the same banner is not emitted twice.
+#   Implements §B.9.2 step 4 in the JSONL world (PR-PHASE3-03 /
+#   Decision 4): scans pending.jsonl for any unconsumed entries with
+#   kind=corrupt_state. If at least one exists, prints the user-facing
+#   banner text on stdout and returns 0. The HWM advance is owned by
+#   coord_mediator_consume_pending (the unified consumer); this dedicated
+#   consumer only emits the friendly-text banner. consume_pending's own
+#   banner SKIPS corrupt_state entries to prevent double-display.
 #
-#   Returns 0 if a banner was emitted (caller should compose into
-#   additionalContext); 1 if no flag was found / not corrupt_state.
+#   Returns 0 if a banner was emitted; 1 if no unconsumed corrupt_state
+#   entry found / pending.jsonl absent / parse error.
 #
 #   This function does NOT format the JSON envelope — it just prints the
 #   banner text. Callers wrap it with their own jq -nc shape.
 coord_consume_corrupt_state_flag() {
-  local pending="${COORD_DIR:-}/mediator/pending.json"
-  [ -f "$pending" ] || return 1
-  local kind
-  kind=$(jq -r '.kind // ""' "$pending" 2>/dev/null || printf '')
-  if [ "$kind" != "corrupt_state" ]; then
+  [ -z "${COORD_DIR:-}" ] && return 1
+  local jsonl="${COORD_DIR}/mediator/pending.jsonl"
+  local hwm_file="${COORD_DIR}/mediator/pending.consumed"
+  [ -f "$jsonl" ] || return 1
+  local hwm=0
+  if [ -f "$hwm_file" ]; then
+    hwm=$(cat "$hwm_file" 2>/dev/null | tr -d ' \n')
+    case "$hwm" in *[!0-9]*|'') hwm=0 ;; esac
+  fi
+  local found
+  found=$(tail -n +$((hwm + 1)) "$jsonl" 2>/dev/null \
+    | jq -rs '[.[] | select(.kind == "corrupt_state")] | length' 2>/dev/null) || found=0
+  case "$found" in *[!0-9]*|'') found=0 ;; esac
+  if [ "$found" -eq 0 ]; then
     return 1
   fi
   printf 'Coord: coordination state was reset due to corruption. Mediator will diagnose; prior locks are lost. Retry your operation.'
-  local ts
-  ts=$(date -u +%Y-%m-%dT%H-%M-%SZ)
-  mv "$pending" "${COORD_DIR}/mediator/pending.delivered.${ts}.json" 2>/dev/null || rm -f "$pending" 2>/dev/null || true
   return 0
+}
+
+# coord_atomic_rewrite_jsonl <jsonl_file> <jq_filter>
+#   Atomically rewrite a JSONL file by passing each line through
+#   `jq -c <filter>` and keeping only entries that emit a non-null
+#   object. Used by Mediator GC (PR-PHASE3-04) and any future
+#   JSONL-rewrite use case.
+#
+#   <filter> is a jq expression evaluated per-entry (jq -c, not -cs).
+#   Common patterns:
+#     'select(.valid_until | fromdateiso8601 > $now)' — expire
+#     'select(.kind != "corrupt_state")'              — filter
+#     '. | .ts |= sub("Z"; "+00:00") | .'             — transform
+#
+#   Returns 0 on success; non-zero on flock timeout (42), jq error
+#   (43), or rename failure (44). Caller decides escalation.
+coord_atomic_rewrite_jsonl() {
+  local jsonl="$1"
+  local filter="$2"
+  [ -z "$jsonl" ] && return 1
+  [ -z "$filter" ] && return 1
+  [ -f "$jsonl" ] || return 0   # nothing to rewrite
+  local lock_file="${jsonl}.lock"
+  [ -f "$lock_file" ] || : >"$lock_file"
+  local tmp="${jsonl}.tmp.$$.$RANDOM"
+  (
+    flock -x -w 5 9 || exit 42
+    jq -c "$filter" "$jsonl" >"$tmp" 2>/dev/null || { rm -f "$tmp"; exit 43; }
+    mv -f "$tmp" "$jsonl" 2>/dev/null || { rm -f "$tmp"; exit 44; }
+  ) 9>"$lock_file"
 }
 
 # CLI shim for tests and ad-hoc use:

@@ -56,6 +56,8 @@ LIB_DIR="$(cd "$HOOK_DIR/../lib" && pwd)"
 . "$LIB_DIR/participant.sh"
 # shellcheck disable=SC1091
 . "$LIB_DIR/hash.sh"
+# shellcheck disable=SC1091
+. "$LIB_DIR/lockdown.sh"
 
 coord_resolve_root() {
   if [ -n "${COORD_DIR:-}" ] && [ -d "$COORD_DIR" ]; then
@@ -178,6 +180,14 @@ done
 
 STATE="$COORD_DIR/sessions.json"
 [ ! -f "$STATE" ] && exit 0   # nothing to validate
+
+# Lockdown gate (Phase 3 / T3.03 per PR-PHASE3-01): emit deny + skip
+# stale-read scan / lock check / acquire when lockdown is active. The
+# lockdown deny supersedes the lock-held deny — the Mediator's pause
+# is the priority signal. Fail-open on parse fail.
+if coord_lockdown_check && coord_lockdown_emit_deny "PreToolUse"; then
+  exit 0
+fi
 
 # Always log the intent-to-write before any branching.
 coord_log_event kind=WRITE tool="$TOOL_NAME" file="$TARGET" source=pre_tool_use_write

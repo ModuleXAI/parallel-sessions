@@ -157,6 +157,74 @@ You MUST maintain `FINDINGS.md` at the project root. This file captures everythi
 
 **FINDINGS.md is gitignored.**
 
+### A.13 Testing, portability, and subagent-invocation notes (Phase 3 lessons)
+
+These three patterns accumulated during Phase 3 construction. Each surfaced from a real bug and must be the default for future work. They are operational guidance, not architectural decisions — no plan-revision required.
+
+**1. `perl utime` for portable mtime manipulation in tests** (T3.04 lesson, F-016 family).
+
+Tests that need to backdate a file's mtime (e.g., to verify a stale-lock detector) MUST use `perl utime` with raw epoch seconds, NOT `touch -t`:
+
+```bash
+perl -e 'utime time-60, time-60, $ARGV[0]' "$file"   # 60 seconds ago
+```
+
+`touch -t` interprets its timestamp argument in LOCAL timezone, not UTC. On hosts where local != UTC, a `date -u` formatted string fed to `touch -t` produces a future-dated mtime (observed: 5h drift on macOS, surfaced in T3.04 watchdog cache stale-lock test). `perl utime` takes a raw epoch and bypasses both `touch -t` and date-format conversions. Perl ships in the base OS on macOS and Linux per F-009, so this is portable.
+
+**2. Command-substitution capture pattern for `set -o pipefail` isolation in sourced libraries** (T3.05 lesson, F-018 family).
+
+Sourced libraries that may run under callers using `set -o pipefail` (which propagates from any of `log_event.sh`, `atomic_write.sh`, etc.) MUST capture command output into a variable BEFORE piping, instead of piping directly:
+
+```bash
+# WRONG — pipefail will kill the function when ps -p <gone-pid> returns rc=1:
+ps -p "$pid" -o lstart= 2>/dev/null | sed -e 's/^ *//' | tr -d '\n'
+
+# RIGHT — function's trailing command is always printf (rc=0):
+local raw
+raw=$(ps -p "$pid" -o lstart= 2>/dev/null) || raw=""
+printf '%s' "$raw" | sed -e 's/^ *//' | tr -d '\n'
+```
+
+Bash 3.2 lacks `local +o pipefail`, so this capture pattern is the portable alternative. Surfaced in T3.05 watchdog `_coord_watchdog_ps_lstart` (caller saw rc=2 with empty stdout instead of rc=0 with empty lstart, killing the probe silently). Also relevant to any helper that parses optional command output where rc=1 is normal.
+
+**3. GNU-first `stat` probe for portable file-mtime / file-size helpers** (T3.10 lesson, F-018).
+
+Helpers that read file mtime or size MUST try GNU form first, validate the captured value is a pure integer, and fall back to BSD only on rc != 0 OR non-numeric output:
+
+```bash
+# WRONG — Linux GNU stat re-purposes -f as filesystem info (rc=0 with garbage):
+mtime=$(stat -f '%m' "$f" 2>/dev/null || stat -c '%Y' "$f" 2>/dev/null || printf '0')
+
+# RIGHT — GNU first; numeric-validate; BSD only on failure:
+mtime=$(stat -c '%Y' "$f" 2>/dev/null)
+case "$mtime" in
+  ''|*[!0-9]*) mtime="" ;;
+esac
+if [ -z "$mtime" ]; then
+  mtime=$(stat -f '%m' "$f" 2>/dev/null)
+  case "$mtime" in
+    ''|*[!0-9]*) mtime=0 ;;
+  esac
+fi
+```
+
+macOS users see no symptoms with the WRONG form (BSD stat succeeds, fallback never fires). Linux deployments would silently mis-evaluate file-age comparisons or produce garbage event payloads.
+
+**4. `claude -p` spawn discipline for any in-process Claude invocation** (T3.06 + T3.07 lesson).
+
+Hook scripts or libraries that spawn `claude -p` (today: only the Mediator; future: any in-process subagent pattern) MUST follow these rules:
+
+- `--output-format json` — structured output is the only reliable parsing path.
+- ALWAYS parse `is_error` from JSON. NEVER rely on shell exit code: `claude -p` exits 0 even on auth failure / budget cap / model error. The truth is in the JSON payload.
+- `--max-budget-usd <cap>` — cost guard. Default $0.50/invocation; cache_creation tokens dominate cost (~$0.10 minimum without `--bare`).
+- `--allowedTools` + `--disallowedTools` — restrict the spawned session's capabilities. Never give it Edit/Write/NotebookEdit if it should mutate state via Bash + atomic_write helpers.
+- `CLAUDE_COORD=0` in spawn env — coord hooks early-exit, preventing recursive registration of the spawned session. Required even when `--bare` is used (defense in depth).
+- `CLAUDE_CODE_MEDIATOR=<depth>` env (or analogous) — recursion guard marker. The spawn helper MUST refuse to spawn from within a session that already has this marker set.
+- Spawned `claude -p` gets a NEW UUID `session_id`, NOT the parent's. Subagent-filter (`subagent_filter.sh`) does NOT recognize claude -p spawns — the isolation comes from `--bare` or `CLAUDE_COORD=0`, not from agent_type filtering.
+- Hook timeout: 120s wall-clock max for the spawn's full lifetime. Real Mediator analysis takes 20-35s with `--bare`, 30-60s without; >120s indicates stuck spawn that should be killed and treated as Mediator-failed.
+
+These rules apply to any future use of `claude -p` from coord scripts, not just the Mediator. See `src/lib/MEDIATOR_REFERENCE.md` (installed at `.coord/mediator/MEDIATOR_REFERENCE.md`) for the full Mediator-specific contract.
+
 ---
 
 ## Part B — Runtime Rules for Coordinated Sessions
@@ -248,6 +316,19 @@ If this banner is absent, you are not in a coordinated session and none of the r
 
 **When Mediator cannot decide:** It writes `kind:"escalate_to_user"` in its verdict and emits `additionalContext` asking you to surface the situation to the user in your response.
 
+**Watchdog signal model (Phase 3 / PR-PHASE3-02 §A clarification).** When ambient suspicion fires a watchdog probe of another session, the watchdog combines three signals to produce one of three verdicts:
+
+- **Signal 1 (deterministic — PID liveness):** `ps -p <pid> -o lstart=` is empty → dead/pid_gone. lstart mismatch → dead/pid_recycled. Match → continue to Signal 2/3.
+- **Signal 2 (timing — last_activity_at):** older than `watchdog_suspicion_last_activity_seconds` (default 600s) → suspicious. Does NOT promote to dead by itself.
+- **Signal 3 (lock-context):** any lock with `last_refresh_at == acquired_at` AND age > `watchdog_suspicion_lock_unrefreshed_seconds` (default 1800s) → suspicious. Does NOT promote to dead by itself.
+
+**Verdict computation:**
+- `dead` REQUIRES Signal 1 confirmation. Subkind (pid_gone / pid_recycled) drives Mediator pending kind (stale_active / pid_recycled).
+- `alive` REQUIRES Signal 1 confirms-alive AND no Signal 2 / 3 fires. No pending entry emitted.
+- `uncertain` when Signal 1 confirms alive BUT Signal 2 OR 3 fires (suspicion without deterministic dead confirmation). Emits stale_active pending with `payload.uncertain=true`; Mediator decides escalation.
+
+The watchdog NEVER returns `alive` solely on activity/lock signals — Signal 1 is mandatory for the alive verdict. This is the false-negative protection: a session whose PID is gone cannot be declared alive even if its last_activity is recent.
+
 ### B.7 On self-delegation (a session deferring its own work until a lock clears)
 
 **Rule:** When you choose option (b) from the lock-denied prompt (§B.2), issue:
@@ -281,6 +362,24 @@ If this banner is absent, you are not in a coordinated session and none of the r
 **Rule:** If `sessions.json` is missing when a hook runs, the hook creates an empty initialized file under `flock` and emits `additionalContext: "Coordination state initialized (was missing)."`
 
 **Enforcement:** `[HOOK-ENFORCED]` in `atomic_write.sh`.
+
+#### B.9.1a Critical-conditions bypass (Phase 3 / PR-PHASE3-01 disposition)
+
+**Rule:** Some failure modes are too degraded for Mediator analysis to be safe — Mediator's own context loading would inherit the corrupt state and produce a wrong verdict. For these, the system skips Mediator entirely and triggers lockdown directly with `reason_source=critical_bypass`. Recovery is OPERATOR-DRIVEN.
+
+**Conditions that trigger critical bypass (Phase 3 implements the first; others are documented for Phase 4+):**
+1. `sessions.json` fails jq parse 3+ consecutive times (the parse-fail counter at `.coord/mediator/critical_counters.json` resets on any successful parse).
+
+**Enforcement:** `[HOOK-ENFORCED]` via `lib/critical_check.sh`'s `coord_critical_record_parse_failure` (called from `atomic_write.sh` parse-fail branch). When threshold reached, the helper invokes `coord_lockdown_activate` directly with `reason_source=critical_bypass` and emits a `CRITICAL_CONDITION_DETECTED` event.
+
+**Recovery path:**
+1. Operator inspects the situation (e.g., reads the most recent `sessions.json.corrupt.<ts>.json` archive).
+2. Operator runs `coord mediate --resume`, which clears `lockdown.json` and archives it to `lockdown_archive/<ts>.cleared.json`.
+3. Sessions resume normal operation. The atomic_write.sh parse-fail branch will have already auto-reset `sessions.json` to a clean empty template, so the next operation finds a parseable file.
+
+**What this means for you (Claude in a coordinated session):** If you see a system-pause deny banner with `reason_source=critical_bypass`, do NOT retry the operation. The recovery requires the user. Surface the situation in your response — the user runs `coord mediate --resume` once they've confirmed the underlying fix.
+
+The bypass is a safety mechanism: the alternative (firing Mediator on corrupt state) risks Mediator producing a confidently-wrong verdict. Pause-and-escalate is preferred to confidently-wrong.
 
 #### B.9.2 Corrupted state file
 

@@ -38,6 +38,8 @@ LIB_DIR="$(cd "$HOOK_DIR/../lib" && pwd)"
 . "$LIB_DIR/participant.sh"
 # shellcheck disable=SC1091
 . "$LIB_DIR/notify_waiters.sh"
+# shellcheck disable=SC1091
+. "$LIB_DIR/lockdown.sh"
 
 coord_resolve_root() {
   if [ -n "${COORD_DIR:-}" ] && [ -d "$COORD_DIR" ]; then
@@ -91,6 +93,14 @@ done
 STATE="$COORD_DIR/sessions.json"
 [ ! -f "$STATE" ] && exit 0
 [ -z "$TARGET" ] && exit 0
+
+# Lockdown gate (Phase 3 / T3.03 per PR-PHASE3-01): under active
+# lockdown, do NOT release the lock — Mediator's fix flow may
+# require the lock state to remain as-is for analysis. Emit deny +
+# exit. Fail-open on parse fail.
+if coord_lockdown_check && coord_lockdown_emit_deny "PostToolUse"; then
+  exit 0
+fi
 
 # Identify the lock holder + acquired_at for $TARGET, if any. Capture
 # acquired_at BEFORE deletion so the notification scan window is correct.

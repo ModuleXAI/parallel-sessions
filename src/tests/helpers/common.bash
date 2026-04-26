@@ -23,6 +23,25 @@ mk_coord_dir() {
   printf '%s/.coord\n' "$base"
 }
 
+# _grep_output_for <pattern>
+#   Apostrophe-safe replacement for the legacy
+#   `run bash -c "echo '$output' | grep -c '<pattern>' || true"` scaffold.
+#   Returns 0 if bats's `$output` contains <pattern>, 1 otherwise.
+#   Pipes $output via printf — no `bash -c`, no inner single-quoted shell
+#   fragments — so an ASCII apostrophe in either $output or <pattern> cannot
+#   terminate string scaffolding mid-flight (F-014 root fix).
+#
+#   Usage:
+#     _grep_output_for "stale-read warning"           # positive
+#     ! _grep_output_for "permissionDecision"         # negative
+#
+#   Note: leaves bats's `$output` and `$status` (set by the most recent `run`)
+#   untouched, unlike the legacy pattern which rebinds them to grep's stdout.
+_grep_output_for() {
+  local pattern="$1"
+  printf '%s' "$output" | grep -q -- "$pattern"
+}
+
 # mk_empty_sessions <.coord_dir>
 #   Write an empty valid sessions.json to the given .coord directory.
 mk_empty_sessions() {

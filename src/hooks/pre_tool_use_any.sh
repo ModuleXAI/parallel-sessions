@@ -37,6 +37,20 @@ LIB_DIR="$(cd "$HOOK_DIR/../lib" && pwd)"
 . "$LIB_DIR/participant.sh"
 # shellcheck disable=SC1091
 . "$LIB_DIR/head_tracking.sh"
+# shellcheck disable=SC1091
+. "$LIB_DIR/lockdown.sh"
+# shellcheck disable=SC1091
+. "$LIB_DIR/watchdog_cache.sh"
+# shellcheck disable=SC1091
+. "$LIB_DIR/mediator_pending.sh"
+# shellcheck disable=SC1091
+. "$LIB_DIR/watchdog.sh"
+# shellcheck disable=SC1091
+. "$LIB_DIR/critical_check.sh"
+# shellcheck disable=SC1091
+. "$LIB_DIR/verdict_apply.sh"
+# shellcheck disable=SC1091
+. "$LIB_DIR/mediator_spawn.sh"
 
 coord_resolve_root() {
   if [ -n "${COORD_DIR:-}" ] && [ -d "$COORD_DIR" ]; then
@@ -95,6 +109,13 @@ done
 
 STATE="$COORD_DIR/sessions.json"
 [ ! -f "$STATE" ] && exit 0
+
+# Lockdown gate (Phase 3 / T3.03 per PR-PHASE3-01): emit deny + skip
+# all cross-cutting consumers (notifications / mediator-pending /
+# corruption banners) when lockdown is active. Fail-open on parse fail.
+if coord_lockdown_check && coord_lockdown_emit_deny "PreToolUse"; then
+  exit 0
+fi
 
 # --- 1. Notification scan + atomic clear ---------------------------------
 # Capture pending notifications first (read-only), then clear them in a
@@ -174,6 +195,161 @@ fi
 
 if [ -n "$BANNER" ]; then
   emit_additional_context "$BANNER"
+fi
+
+# --- 5. Ambient-suspicion watchdog probes (Phase 3 / T3.05) -----------
+# Scan sessions.json for OTHER-session anomalies. For each suspect,
+# fire-and-forget a watchdog probe. Caller (this hook) does NOT block
+# on probe execution — the probe runs in the background and writes its
+# verdict to recent_checks.jsonl + (on dead/uncertain) emits a Mediator
+# pending entry that a future pre_tool_use_any.sh consumer-pass surfaces.
+#
+# The dedupe lock (.coord/watchdog/checking/<target>.lock) guarantees
+# only ONE probe per target runs even if 5+ sessions notice the same
+# anomaly simultaneously. The recent_checks cache (TTL alive=60s,
+# uncertain=30s, dead=until-session_start) suppresses redundant probes.
+#
+# Per PR-PHASE3-02 §F (latency budget): suspicion check is a single jq
+# filter over the already-loaded sessions.json snapshot + per-PID `ps`
+# checks bounded by ACTIVE-non-self session count. Probe invocation
+# is backgrounded so its execution time does NOT count against the
+# hook latency.
+SUSPECT_TARGETS=$(coord_watchdog_check_ambient_suspicion 2>/dev/null || printf '')
+if [ -n "$SUSPECT_TARGETS" ]; then
+  OLD_IFS="$IFS"
+  IFS='
+'
+  set -- $SUSPECT_TARGETS
+  IFS="$OLD_IFS"
+  for suspect in "$@"; do
+    [ -z "$suspect" ] && continue
+    # Fire-and-forget: probe runs in background, hook returns immediately.
+    # The disown after backgrounding ensures Claude Code is not blocked
+    # on the subshell's lifetime.
+    ( coord_watchdog_probe "$suspect" >/dev/null 2>&1 ) &
+    disown >/dev/null 2>&1 || true
+  done
+fi
+
+# --- 6. Mediator verdict consumer (Phase 3 / T3.07) -----------------------
+# Read verdict files written by Mediator subagents since this session's
+# last_consumed_verdict pointer. Apply each verdict's actions[] in
+# sorted order (lockdown → release_lock → evict_session → clear_read_set
+# per PR-PHASE3-04 Note B), inject message_to_caller into
+# additionalContext, and advance the pointer.
+#
+# The pointer lives at .coord/sessions/<sid>.last_consumed_verdict
+# (single line: timestamp ISO of the most-recent consumed verdict file).
+# Verdict files are named <ts>.json (with colons → dashes for
+# filesystem safety); lex order = chronological order.
+VERDICT_DIR="$COORD_DIR/mediator/verdict"
+POINTER_FILE="$COORD_DIR/sessions/${SESSION_ID}.last_consumed_verdict"
+LAST_CONSUMED=""
+if [ -f "$POINTER_FILE" ]; then
+  LAST_CONSUMED=$(cat "$POINTER_FILE" 2>/dev/null | tr -d ' \n')
+fi
+if [ -d "$VERDICT_DIR" ]; then
+  VERDICT_BANNERS=""
+  NEW_POINTER="$LAST_CONSUMED"
+  # Iterate verdict files in chronological order.
+  for vfile in $(ls -1 "$VERDICT_DIR"/*.json 2>/dev/null | sort); do
+    [ -f "$vfile" ] || continue
+    vname=$(basename "$vfile" .json)
+    # Skip if this verdict is at-or-before our pointer.
+    if [ -n "$LAST_CONSUMED" ] && [ "$vname" \< "$LAST_CONSUMED" ] || [ "$vname" = "$LAST_CONSUMED" ]; then
+      continue
+    fi
+    # Read verdict JSON. Skip on parse failure (fail-open).
+    verdict_action=$(jq -r '.action_type // ""' "$vfile" 2>/dev/null) || verdict_action=""
+    [ -z "$verdict_action" ] && continue
+    verdict_confidence=$(jq -r '.confidence // "auto_apply"' "$vfile" 2>/dev/null)
+    verdict_depth=$(jq -r '.depth // 1' "$vfile" 2>/dev/null)
+    verdict_msg=$(jq -r '.message_to_caller // ""' "$vfile" 2>/dev/null)
+    verdict_actions=$(jq -c '.actions // []' "$vfile" 2>/dev/null)
+    # Peer-review path (PR-PHASE3-01 escalation hierarchy): if the
+    # primary verdict is needs_review AND we're at depth=1, spawn a
+    # peer Mediator at depth=2 with the primary verdict in context.
+    # Compare action_types; same → apply primary (more conservative
+    # severity); different → emit user-escalation banner.
+    apply_this="1"
+    user_escalation_banner=""
+    if [ "$verdict_confidence" = "needs_review" ] && [ "$verdict_depth" = "1" ]; then
+      pending_id=$(jq -r '.for_pending_entry // ""' "$vfile" 2>/dev/null)
+      peer_path=$(coord_mediator_spawn "$pending_id" 2 "$vfile" 2>/dev/null || printf '')
+      if [ -n "$peer_path" ] && [ -f "$peer_path" ]; then
+        peer_action=$(jq -r '.action_type // ""' "$peer_path" 2>/dev/null)
+        if [ -n "$peer_action" ] && [ "$peer_action" = "$verdict_action" ]; then
+          # Agreement on action_type — apply primary with the more
+          # conservative severity (extended > brief).
+          peer_severity=$(jq -r '.severity // ""' "$peer_path" 2>/dev/null)
+          primary_severity=$(jq -r '.severity // ""' "$vfile" 2>/dev/null)
+          if [ "$peer_severity" = "extended" ] || [ "$primary_severity" = "extended" ]; then
+            chosen_severity="extended"
+          else
+            chosen_severity="$primary_severity"
+          fi
+          coord_log_event kind=MEDIATOR_PEER_AGREED \
+            primary_verdict_path="$vfile" peer_verdict_path="$peer_path" \
+            agreed_action="$verdict_action" applied_severity="$chosen_severity" 2>/dev/null || true
+          apply_this="1"
+        else
+          # Disagreement → user escalation; do NOT apply.
+          coord_log_event kind=MEDIATOR_PEER_DISAGREED \
+            primary_verdict_path="$vfile" peer_verdict_path="$peer_path" \
+            primary_action="$verdict_action" peer_action="$peer_action" 2>/dev/null || true
+          user_escalation_banner="Mediator peer-review disagreed (primary=$verdict_action peer=$peer_action). Please inspect verdict files: $vfile and $peer_path. Run \`coord mediate --approve <path>\` to choose, or \`coord mediate --escalate\` to overrule."
+          apply_this=""
+        fi
+      else
+        # Peer spawn failed — escalate to user rather than apply
+        # unverified needs_review verdict.
+        coord_log_event kind=MEDIATOR_ESCALATED_TO_USER \
+          reason=peer_spawn_failed primary_verdict_path="$vfile" 2>/dev/null || true
+        user_escalation_banner="Mediator verdict at $vfile is needs_review but peer-review spawn failed. Please inspect manually."
+        apply_this=""
+      fi
+    fi
+    # Apply actions (verdict_apply.sh handles ordering + idempotency
+    # internally; the simple iteration here is enough since actions
+    # array is already small + per-verdict).
+    if [ -n "$apply_this" ] && [ -n "$verdict_actions" ] && [ "$verdict_actions" != "null" ] && [ "$verdict_actions" != "[]" ]; then
+      coord_verdict_apply_actions "$verdict_actions" 2>/dev/null || true
+    fi
+    if [ -n "$verdict_msg" ]; then
+      if [ -n "$VERDICT_BANNERS" ]; then
+        VERDICT_BANNERS="$VERDICT_BANNERS"$'\n\n'
+      fi
+      VERDICT_BANNERS="${VERDICT_BANNERS}Coord Mediator verdict: ${verdict_msg}"
+    fi
+    if [ -n "$user_escalation_banner" ]; then
+      if [ -n "$VERDICT_BANNERS" ]; then
+        VERDICT_BANNERS="$VERDICT_BANNERS"$'\n\n'
+      fi
+      VERDICT_BANNERS="${VERDICT_BANNERS}${user_escalation_banner}"
+    fi
+    NEW_POINTER="$vname"
+  done
+  # Persist new pointer (atomic temp+rename).
+  if [ -n "$NEW_POINTER" ] && [ "$NEW_POINTER" != "$LAST_CONSUMED" ]; then
+    mkdir -p "$(dirname "$POINTER_FILE")" 2>/dev/null
+    printf '%s' "$NEW_POINTER" >"${POINTER_FILE}.tmp.$$" 2>/dev/null \
+      && mv -f "${POINTER_FILE}.tmp.$$" "$POINTER_FILE" 2>/dev/null \
+      || rm -f "${POINTER_FILE}.tmp.$$" 2>/dev/null
+  fi
+  # Compose verdict banners into the hook output. The lockdown gate
+  # already fired earlier (line 100ish); if it didn't deny us, the
+  # verdict banner is safe to emit. We append to the BANNER variable
+  # if it exists, otherwise emit standalone additionalContext.
+  if [ -n "$VERDICT_BANNERS" ]; then
+    if [ -n "${BANNER:-}" ]; then
+      BANNER="$BANNER"$'\n\n'"$VERDICT_BANNERS"
+      # Re-emit additionalContext with the augmented BANNER. The
+      # earlier emit already happened above so we'd double-emit;
+      # cleaner to emit verdict banners as a separate
+      # additionalContext block.
+    fi
+    emit_additional_context "$VERDICT_BANNERS"
+  fi
 fi
 
 exit 0

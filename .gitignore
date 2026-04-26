@@ -17,6 +17,13 @@ phase-*-signoff.md
 # Phase 0 verification artifact (gitignored per plan §5 Phase 0).
 phase0-verification.md
 
+# Phase POCs (e.g., phase-3-poc-mediator-spawn.md). POCs are
+# investigative artifacts per CLAUDE.md §A.8; they accumulate findings
+# but do NOT ship as production code. Authoritative learnings get
+# folded into the corresponding signoff CLAUDE.md / plan-revisions
+# updates.
+phase-*-poc-*.md
+
 # State-of-system briefings (reporting artifacts, not deliverables).
 STATE_OF_SYSTEM.md
 
