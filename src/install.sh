@@ -162,6 +162,8 @@ materialize_coord() {
            "$COORD_DIR/mediator" \
            "$COORD_DIR/mediator/verdict" \
            "$COORD_DIR/mediator/lockdown_archive" \
+           "$COORD_DIR/validator" \
+           "$COORD_DIR/validator/verdict" \
            "$COORD_DIR/watchdog" \
            "$COORD_DIR/watchdog/checking" \
            "$COORD_DIR/read_snapshots" \
@@ -204,6 +206,27 @@ materialize_coord() {
       fi
     else
       cp -f "$SELF_DIR/lib/MEDIATOR_REFERENCE.md" "$ref_dst" 2>/dev/null || true
+    fi
+  fi
+  # T4.05: copy VALIDATOR_REFERENCE.md alongside the validator lib.
+  # Idempotent with same user-customization-preservation contract as
+  # MEDIATOR_REFERENCE.md above.
+  if [ -f "$SELF_DIR/lib/VALIDATOR_REFERENCE.md" ]; then
+    local vref_dst="$COORD_DIR/validator/VALIDATOR_REFERENCE.md"
+    if [ -f "$vref_dst" ]; then
+      local vsrc_hash vdst_hash
+      vsrc_hash=$(shasum -a 256 "$SELF_DIR/lib/VALIDATOR_REFERENCE.md" 2>/dev/null | awk '{print $1}')
+      vdst_hash=$(shasum -a 256 "$vref_dst" 2>/dev/null | awk '{print $1}')
+      if [ -n "$vsrc_hash" ] && [ -n "$vdst_hash" ] && [ "$vsrc_hash" != "$vdst_hash" ]; then
+        if [ "$MODE" = "repair" ]; then
+          cp -f "$vref_dst" "${vref_dst}.user-backup.$(date -u +%Y%m%dT%H%M%SZ)" 2>/dev/null || true
+          cp -f "$SELF_DIR/lib/VALIDATOR_REFERENCE.md" "$vref_dst"
+        fi
+      else
+        cp -f "$SELF_DIR/lib/VALIDATOR_REFERENCE.md" "$vref_dst" 2>/dev/null || true
+      fi
+    else
+      cp -f "$SELF_DIR/lib/VALIDATOR_REFERENCE.md" "$vref_dst" 2>/dev/null || true
     fi
   fi
 
