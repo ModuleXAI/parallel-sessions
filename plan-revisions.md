@@ -2776,6 +2776,365 @@ user's verbatim schema.
 
 ---
 
+## PR-PHASE4-05 — Read-snapshot capture for validator pipeline
+
+**Date:** 2026-04-26
+**Author:** Phase 4 builder (T4.01 amendment; surfaced at T4.02
+pre-implementation halt — read-snapshot content gap not addressed
+in Decision 2 / PR-PHASE4-01).
+**Status:** APPROVED 2026-04-26 at T4.01-amendment close — gates
+T4.02a (snapshot capture in `pre_tool_use_read.sh`), T4.02b
+(validator cache + pre-filter consuming snapshots), T4.04
+(validator spawn whose Section 3 prompt embeds the read snapshot
+content).
+**Driver:** User direction at T4.02 halt-report (Option A
+disposition; standalone PR per disposition (ii); T4.02 split into
+T4.02a + T4.02b per disposition (3)).
+
+### Observed gap requiring change
+
+The Phase 4 validator pipeline (per Decision 2 + PR-PHASE4-01 +
+PR-PHASE4-04) needs the *content* of the file as the session read
+it (the "read snapshot"), not just the hash:
+- **Pre-filter** (`lib/validator_prefilter.sh`) computes the diff
+  between read snapshot and current state for whitespace-only /
+  comment-only / blank-line-only heuristics. This requires both
+  contents.
+- **Validator agent prompt Section 3 (b)** (per PR-PHASE4-01)
+  embeds "Read snapshot: sha256 + file content as session saw it
+  at read time."
+
+The Phase 1 read-set (per Decision 2.18 / `pre_tool_use_read.sh`)
+stores only `{path, hash, at, is_latest}` — no content. There is
+no content-addressable cache. When stale-read is detected in
+`pre_tool_use_write.sh`, the on-disk file is the *current* state;
+the read snapshot's content is unrecoverable from existing data
+(non-git edits between Reads, the dominant multi-session
+coordination case, cannot be reconstructed via `git show`).
+
+T4.02 implementation cannot proceed without resolving this. T4.01
+documentation work did not surface the gap because PR-PHASE4-01 §E
+specifies `coord_validator_prefilter <file> <read_content_path>
+<current_content_path>` (content paths) without specifying where
+`<read_content_path>` comes from.
+
+### User-resolved decision
+
+**Option A — Snapshot at Read time, content-addressable storage:**
+
+`pre_tool_use_read.sh` writes the file content to
+`.coord/read_snapshots/<sid>/<hash>.txt` immediately after
+recording the hash in `read_sets`. Subsequent validator pipeline
+invocations resolve the read content via
+`.coord/read_snapshots/<sid>/<read_hash>.txt`.
+
+**Sizing + skip handling:**
+- Files >10 MB (existing Phase 1 hash cap; `coord_hash_file`
+  returns `SKIPPED_LARGE`) → no snapshot is written. Pre-filter
+  unconditionally ESCALATEs in this case (consistent with the
+  existing `>1 MB` rule from PR-PHASE4-01 — at the 10 MB
+  hash-cap level, Phase 1's `SKIPPED_LARGE` already masks the
+  read entry as un-comparable).
+- Snapshot file is exactly the read-time bytes; no transformation.
+  The on-disk filename uses the hash as-is (64 hex chars + `.txt`).
+- Phase 7 may revisit with size-bounded variant (Option C from
+  T4.02 halt-report) if storage pressure surfaces; mechanical
+  refinement only.
+
+**GC semantics:**
+- **On supersede** (next Read of same file with a different hash):
+  the prior snapshot is deleted in the same atomic edit that
+  supersedes the read-set entry. Idempotent.
+- **On supersede with same hash** (Read of an unchanged file):
+  no-op. Snapshot already correct.
+- **On `superseded_by_head_change` flag** (git HEAD change per
+  Decision 2.22): no snapshot deletion. The flag marks the
+  read-set entry as invalidated by HEAD, but the snapshot
+  content remains valid for diff computation if needed.
+- **On session end** (`session_end.sh`): `.coord/read_snapshots/
+  <sid>/` directory is removed entirely. Idempotent.
+- **On orphaned snapshots** (session crashed before
+  `session_end.sh` fired): cleaned up by the watchdog/Mediator
+  pathway when the session is evicted (action verb extension —
+  see §F below).
+
+**Concurrency:**
+- Per-session subdirectory (`<sid>/`) avoids cross-session
+  collisions; no flock needed for write because each session
+  owns its directory.
+- WITHIN a session, two simultaneous Reads of the same file with
+  different hashes (e.g., file changed between two PreToolUse
+  hooks firing on subagent activity) would race. Existing
+  Phase 1 design already excludes subagents from coord (Decision
+  2.17), so the race is bounded to one Read per session per file
+  per turn. `mv` from temp + atomic rename pattern handles any
+  residual race.
+- Per-snapshot atomic rename (temp + `mv`) ensures no partial
+  files visible to concurrent readers.
+
+**Failure modes:**
+- Snapshot write fails (disk full, permission) → log
+  `READ_SNAPSHOT_WRITE_FAILED` event; allow Read to proceed
+  (fail-open per CLAUDE.md §A.5). Pre-filter / validator agent
+  will see missing snapshot at consume time and ESCALATE
+  defensively.
+- Snapshot lookup at consume time finds missing file → pre-filter
+  ESCALATEs `escalate:read_snapshot_missing`; validator agent's
+  prompt notes "read snapshot unavailable; current content only"
+  in Section 3.
+
+### Plan section deltas required
+
+**A. `IMPLEMENTATION_PLAN.md` §3.1 layer 3 (Read-set tracking)** —
+extend description: "`PreToolUse(Read)` hook computes file
+sha256, appends entry to `read_sets[<session_id>].reads[]`,
+deduplicates (latest supersedes older). Phase 4 addition: also
+captures file content to `.coord/read_snapshots/<sid>/<hash>.txt`
+for the validator pipeline (Phase 4) to consume during stale-read
+classification. Files exceeding the 10 MB hash cap are recorded
+as `SKIPPED_LARGE` in the read-set with no snapshot written;
+validator pre-filter unconditionally ESCALATEs in that case."
+
+**B. `IMPLEMENTATION_PLAN.md` §3.2 file structure on disk** — add
+`read_snapshots/` block alongside `validator/` (the Phase 4
+container) and `validation/` (legacy stub-flag-file path,
+removed per PR-PHASE4-01 §B):
+
+```
+├── read_snapshots/                  # Phase 4 read-snapshot store
+│   └── <session_id>/
+│       └── <sha256>.txt             # exact read-time bytes; gone on session_end
+```
+
+**C. `IMPLEMENTATION_PLAN.md` §3.5 events.jsonl kind list** — add:
+- `READ_SNAPSHOT_WRITTEN` (payload: `file`, `session`, `hash`,
+  `bytes`, `path`).
+- `READ_SNAPSHOT_SKIPPED_LARGE` (payload: `file`, `session`,
+  `hash="SKIPPED_LARGE"`, `bytes`).
+- `READ_SNAPSHOT_WRITE_FAILED` (payload: `file`, `session`,
+  `hash`, `reason` ∈ {disk_full, permission_denied,
+  rename_failed, unknown}).
+- `READ_SNAPSHOT_SUPERSEDED` (payload: `file`, `session`,
+  `prior_hash`, `new_hash`).
+- `READ_SNAPSHOT_SESSION_CLEANUP` (payload: `session`,
+  `removed_count`, `bytes_freed`).
+
+**D. `IMPLEMENTATION_PLAN.md` §3.6 config.json defaults** — add:
+- `read_snapshots_enabled: true` (emergency override; falls
+  back to no-snapshot mode + validator pipeline ESCALATEs for
+  every stale-read).
+- `read_snapshots_max_per_session_mb: 100` (soft cap; bounds
+  [1, 1024] — 1 MB minimum, 1 GB maximum). When exceeded, oldest
+  snapshots are GCed via LRU on the snapshot-write path. (Phase 7
+  may relax this if measurement shows the cap is rarely hit; for
+  v1, defensive against runaway storage.)
+
+`coord health` validates the bounds.
+
+**E. `IMPLEMENTATION_PLAN.md` §4 component specs** — add:
+
+`lib/read_snapshots.sh`:
+- `coord_read_snapshot_path <sid> <hash>` — returns the canonical
+  filesystem path for a snapshot (string only; no I/O). Used by
+  consumers (validator pre-filter, validator spawn) to resolve
+  `<read_content_path>`.
+- `coord_read_snapshot_write <sid> <hash> <source_file>` —
+  copies `<source_file>` to `coord_read_snapshot_path <sid>
+  <hash>` via temp + atomic rename. Returns 0 on success, 1 on
+  failure (logs `READ_SNAPSHOT_WRITE_FAILED` event). Idempotent:
+  if the destination exists, no-op (re-Read of unchanged file).
+  Skips silently when `hash == "SKIPPED_LARGE"` (logs
+  `READ_SNAPSHOT_SKIPPED_LARGE` and returns 0).
+- `coord_read_snapshot_supersede <sid> <prior_hash>` — deletes
+  the prior snapshot file. Returns 0 on success or no-op (file
+  absent). Logs `READ_SNAPSHOT_SUPERSEDED` when a file was
+  actually removed.
+- `coord_read_snapshot_cleanup_session <sid>` — recursively
+  removes `.coord/read_snapshots/<sid>/`. Returns 0 idempotent.
+  Logs `READ_SNAPSHOT_SESSION_CLEANUP` with counts.
+- `coord_read_snapshot_lookup <sid> <hash>` — returns 0 if the
+  snapshot file exists and is readable; 1 otherwise. Used by
+  consumers to detect missing-snapshot fallback path.
+
+`pre_tool_use_read.sh` extension (T4.02a):
+- After existing atomic_edit recording the read-set entry, call
+  `coord_read_snapshot_write "$SESSION_ID" "$HASH" "$FILE_PATH"`.
+- The supersede behavior (deleting prior snapshot when the
+  read-set entry's `is_latest` flips to false) is handled inline
+  in the same atomic-edit step: detect prior hash via jq during
+  the supersede walk, then call
+  `coord_read_snapshot_supersede` after the atomic_edit returns.
+
+`session_end.sh` extension (T4.02a):
+- After existing session-row archive logic, call
+  `coord_read_snapshot_cleanup_session "$SESSION_ID"`.
+
+`install.sh` extension (T4.02a):
+- Create `.coord/read_snapshots/` (empty directory; per-session
+  subdirectories created lazily on first Read).
+- `install.sh --uninstall` cleanup removes the directory along
+  with the rest of `.coord/`.
+
+**F. `IMPLEMENTATION_PLAN.md` §4 `lib/verdict_apply.sh` (existing
+Mediator action helper)** — extend the `evict_session` action to
+ALSO call `coord_read_snapshot_cleanup_session <sid>` for the
+evicted session. Bundles snapshot GC into Mediator's
+session-eviction path (handles "session crashed before
+session_end.sh fired" case via watchdog → Mediator → eviction
+flow).
+
+**G. `IMPLEMENTATION_PLAN.md` §5 Phase 4 Scope** — add:
+
+> "`lib/read_snapshots.sh` and `pre_tool_use_read.sh` /
+> `session_end.sh` extensions: capture file content at Read
+> time to `.coord/read_snapshots/<sid>/<hash>.txt` for validator
+> pipeline consumption. Snapshots are GCed on read-set supersede,
+> session end, and Mediator session-eviction. Files >10 MB
+> (existing `SKIPPED_LARGE` handling) are not snapshotted;
+> validator pre-filter ESCALATEs unconditionally for those."
+
+**H. `CLAUDE.md` §B.1 (before reading any file)** — add a
+non-binding note (no rule change for the user; this is purely
+internal mechanism):
+
+> "Phase 4 addition: the hook ALSO captures the file content to
+> `.coord/read_snapshots/<sid>/<hash>.txt` for the validator
+> pipeline to consume on stale-read classification. This is
+> internal storage; you do not interact with it. Snapshots are
+> GCed automatically (on read-set supersede, on session end, on
+> Mediator session-eviction)."
+
+### Implementation-task dependencies
+
+- T4.02a (read-snapshot capture) implements §E + §F + §G. **Gated
+  on this PR approval.**
+- T4.02b (validator cache + pre-filter) consumes
+  `coord_read_snapshot_path` / `coord_read_snapshot_lookup`.
+  **Gated on T4.02a close.**
+- T4.04 (validator spawn) consumes the read snapshot file in
+  Section 3 prompt assembly. **Gated on T4.02a close (along with
+  PR-PHASE4-01 + PR-PHASE4-03 approval).**
+- T4.06 (pipeline integration) wires the consume side; not
+  affected directly by this PR (consumes via T4.02b's pre-filter
+  + T4.04's spawn helper).
+
+### Ambiguity dispositions (resolved 2026-04-26 at T4.01-amendment close)
+
+1. **Snapshot file naming.** **RESOLVED — `<hash>.txt`** with
+   hash being the full 64-hex sha256. The `.txt` suffix is
+   purely cosmetic (signals plaintext to operators inspecting
+   the directory); content is exact bytes from the source file
+   regardless of whether the source is text or binary. Binary
+   files would not normally be Read-tracked at v1 anyway, but
+   if they are, the snapshot stores their bytes faithfully.
+
+2. **Snapshot directory permission model.** **RESOLVED — inherit
+   from `.coord/`.** `mkdir` defaults apply. Explicit chmod
+   not specified; if shared-host permission concerns surface,
+   raise as a finding and revisit.
+
+3. **Storage cap behavior when exceeded.** **RESOLVED — LRU
+   eviction on snapshot-write path.** When a session's
+   `read_snapshots/<sid>/` directory exceeds
+   `read_snapshots_max_per_session_mb`, the oldest snapshots
+   (by `cached_at` mtime equivalent) are evicted until the cap
+   is met. Eviction logs `READ_SNAPSHOT_LRU_EVICTED` event
+   (added to §C event list). Consumer-side pre-filter ESCALATEs
+   defensively if a needed snapshot is evicted (rare; recent
+   reads stay in cache).
+
+4. **Snapshot encoding for non-UTF-8 files.** **RESOLVED — raw
+   bytes.** The snapshot is a byte-identical copy of the source
+   file. Validator agent's prompt (Section 3) MAY truncate the
+   embedded content if it exceeds 100 KB or contains
+   non-printable bytes (per PR-PHASE4-01 §"Validator prompt
+   structure" Section 3 truncation marker). The truncation is
+   the validator spawn helper's responsibility, not the
+   snapshot-write path's.
+
+5. **Race between snapshot write and stale-read detection in
+   another session.** **RESOLVED — accepted as-designed.**
+   When session A reads `foo.ts` and writes its snapshot, then
+   session B writes `foo.ts` (changing on-disk content), then
+   session A's `pre_tool_use_write.sh` detects stale-read on
+   `foo.ts`, the validator pipeline:
+   (a) Looks up A's snapshot at
+       `.coord/read_snapshots/<A>/<read_hash>.txt` (still
+       present — only A's own next-Read or session-end would
+       remove it).
+   (b) Compares against on-disk current content.
+   (c) Computes diff/heuristics correctly.
+   The snapshot is "frozen at A's read time," which is exactly
+   what we want for stale-read classification. No race here.
+
+6. **Handling of `SKIPPED_LARGE` reads in pre-filter consume
+   path.** **RESOLVED — pre-filter ESCALATEs unconditionally.**
+   When `read_set` entry's hash is `SKIPPED_LARGE`, no snapshot
+   exists. Pre-filter returns `escalate:read_snapshot_missing`
+   (or a more specific `escalate:source_skipped_large`).
+   Validator agent's prompt notes "the file was too large to
+   snapshot at read time; classify based on current content
+   alone." Validator agent's classification quality on these
+   files is degraded, but consistent with existing Phase 1
+   behavior (large files were already SKIPPED_LARGE).
+
+### Cross-references
+
+- PR-PHASE4-01 (Validator agent design contract) — defines the
+  consumer; this PR provides the read-snapshot resource. Update
+  PR-PHASE4-01 §E `coord_validator_prefilter` signature to
+  reference `coord_read_snapshot_path` for resolving
+  `<read_content_path>`.
+- PR-PHASE4-04 (Validator cache) — cache key is `(file,
+  read_hash, current_hash)`; this PR doesn't affect cache but
+  notes that on cache miss the pre-filter consume path
+  delegates to snapshot lookup.
+- PR-PHASE3-01 (Mediator) — `verdict_apply.sh` action verb
+  `evict_session` extends to call
+  `coord_read_snapshot_cleanup_session`. Documentation-level
+  extension; no Mediator code rewrite.
+- Decision 2.18 (read-set scope) — extended in spirit: the
+  read-set's "reads" entries now have a parallel content
+  store. The Decision text itself doesn't change; §3.1 layer 3
+  description is the canonical update site (per §A above).
+- Decision 2.22 (git HEAD tracking) — orthogonal.
+  `superseded_by_head_change` does NOT trigger snapshot
+  deletion (snapshot remains valid for diff use; only the
+  read-set entry's `is_latest` is invalidated).
+- FINDINGS — none currently OPEN against this PR.
+
+### Non-changes (deliberate)
+
+- `read_sets[<sid>].reads[]` schema unchanged — snapshots are a
+  parallel content store, not a schema field. Keeping the schema
+  unchanged means Phase 1 / Phase 2 / Phase 3 read-set logic is
+  byte-identical; Phase 4 only adds a side-effect.
+- `coord_hash_file` (`lib/hash.sh`) unchanged — the existing 10
+  MB cap + `SKIPPED_LARGE` handling apply to snapshot decisions
+  via `pre_tool_use_read.sh`'s call site.
+- Phase 3 invariant unchanged: `pre_tool_use_read.sh` still
+  emits no `permissionDecision: "deny"` (Phase 1 invariant
+  preserved through Phase 3 + 4).
+- Subagent filter unchanged — subagent Reads still no-op
+  (Decision 2.17 / `subagent_filter.sh`); their snapshots
+  would not be written either, since the filter exits 0
+  before the hook reaches snapshot capture.
+- Validator agent prompt (Section 3) format unchanged from
+  PR-PHASE4-01 §"Validator prompt structure" — this PR fills
+  the gap of WHERE the read snapshot content comes from
+  (`coord_read_snapshot_path`), not the prompt structure.
+
+### Acknowledgement
+
+APPROVED 2026-04-26 at T4.01-amendment close. Status
+DRAFT → APPROVED. Surfaced via T4.02 pre-implementation halt;
+discipline of halting before code-touch on ambiguity is what
+F-011 + the user's "halt and report" direction codify. Final
+merge into IMPLEMENTATION_PLAN.md / CLAUDE.md folds into
+phase-4-signoff.md.
+
+---
+
 *Future entries append below.*
 
 
