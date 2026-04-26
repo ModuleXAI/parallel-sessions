@@ -187,14 +187,17 @@ coord_mediator_consume_pending() {
     return 1
   fi
 
-  # Format the banner — one bullet per entry.
+  # Format the banner — one bullet per non-corrupt_state entry. The
+  # dedicated coord_consume_corrupt_state_flag emits a friendlier
+  # corruption-specific banner (PR-PHASE3-03 / Decision 4); skipping
+  # corrupt_state here prevents double-display when both consumers
+  # run in sequence.
   # We DELIBERATELY phrase this without apostrophes (F-014 lesson) so
   # bats tests that pipe output through `bash -c "echo '$output' | …"`
   # can scan the text safely.
-  local n_new
-  n_new=$(wc -l <"$new_entries_tmp" | tr -d ' ')
   local body
   body=$(jq -r '
+    select(.kind != "corrupt_state") |
     "  - kind=" + (.kind // "?")
     + (if .source then " source=" + .source else "" end)
     + (if (.payload // {}) | length > 0 then
@@ -202,10 +205,168 @@ coord_mediator_consume_pending() {
          + ((.payload | to_entries | map(.key + "=" + (.value | tostring)) | join(", ")))
        else "" end)
   ' "$new_entries_tmp" 2>/dev/null)
+  local n_new
+  n_new=$(printf '%s' "$body" | grep -c '^  - ' || true)
+  case "$n_new" in *[!0-9]*|'') n_new=0 ;; esac
   rm -f "$new_entries_tmp" 2>/dev/null
+
+  if [ "$n_new" -eq 0 ]; then
+    # All unconsumed entries were corrupt_state — banner produced by
+    # the dedicated consumer. Return 1 so the caller does not compose
+    # an empty section into additionalContext.
+    return 1
+  fi
 
   printf 'Coord Mediator pending (%d new entr%s); the Phase 3 Mediator will diagnose. Recent entries:\n%s' \
     "$n_new" "$( [ "$n_new" -eq 1 ] && printf 'y' || printf 'ies' )" "$body"
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# Garbage collection — bundled with Mediator agent runs (T3.07 /
+# PR-PHASE3-04 / Decision 6). Mediator's verdict-write pass calls this
+# AFTER writing its verdict, so GC frequency matches Mediator-firing
+# frequency (per "GC is implicit in agent runs"). 24-hour retention
+# preserves recent-history visibility for debugging.
+#
+# Algorithm (per PR-PHASE3-04 disposition #3, single-flock atomicity):
+#   1. Acquire flock on pending.lock.
+#   2. Read pending.consumed → HWM (integer).
+#   3. Read pending.jsonl line-by-line; keep a line if EITHER
+#      (a) line_index > HWM (un-consumed), OR
+#      (b) (now - line.ts) < retention_hours * 3600 (recently-consumed).
+#   4. Write kept lines to pending.jsonl.tmp.<pid>.<rand>; rename to
+#      pending.jsonl (atomic on POSIX local fs).
+#   5. Compute new HWM = (kept_lines_consumed_count) — i.e., the count
+#      of kept lines that were ABOVE the old HWM (none, by step 3a) +
+#      kept lines that were below it. After rebase, "lines 1..NEW_HWM
+#      are consumed" semantics holds against the new file.
+#   6. Atomic rewrite pending.consumed with NEW_HWM.
+#   7. Emit PENDING_GC_RUN event with kept/removed counts + sizes.
+#   8. Release flock.
+#
+# Single-flock encloses both rewrites so a Mediator crash mid-GC leaves
+# either pre-state OR post-state — never partial.
+#
+# Best-effort: returns 0 always; logs ERROR + warns to stderr on
+# anything that prevents progress (flock timeout, jq error, disk full).
+
+# Internal: portable file size in bytes. macOS BSD stat -f %z; GNU stat -c %s.
+_coord_pending_file_size() {
+  local f="$1"
+  [ -e "$f" ] || { printf '0'; return; }
+  stat -f '%z' "$f" 2>/dev/null || stat -c '%s' "$f" 2>/dev/null || printf '0'
+}
+
+# coord_mediator_gc_pending [<retention_hours>]
+#   Idempotent. Default retention = 24h (env: COORD_MEDIATOR_PENDING_RETENTION_HOURS).
+coord_mediator_gc_pending() {
+  local retention_hours="${1:-${COORD_MEDIATOR_PENDING_RETENTION_HOURS:-24}}"
+  case "$retention_hours" in *[!0-9]*|'') retention_hours=24 ;; esac
+  if [ -z "${COORD_DIR:-}" ] || [ ! -d "$COORD_DIR" ]; then
+    return 0
+  fi
+  local mdir="$COORD_DIR/mediator"
+  local jsonl="$mdir/pending.jsonl"
+  local hwm_file="$mdir/pending.consumed"
+  local lockfile="$mdir/pending.lock"
+  [ -f "$jsonl" ] || return 0   # nothing to GC
+  : >>"$lockfile" 2>/dev/null || true
+
+  local now_epoch retention_seconds before_size
+  now_epoch=$(date -u +%s 2>/dev/null || printf '0')
+  retention_seconds=$(( retention_hours * 3600 ))
+  before_size=$(_coord_pending_file_size "$jsonl")
+
+  local tmp_jsonl="${jsonl}.tmp.$$.$RANDOM"
+  local hwm_tmp="${hwm_file}.tmp.$$.$RANDOM"
+  local kept removed new_hwm gc_rc=0
+
+  (
+    if ! flock -x -w 5 9; then
+      printf 'coord mediator_pending: GC flock timeout\n' >&2
+      exit 42
+    fi
+    local hwm=0
+    if [ -f "$hwm_file" ]; then
+      hwm=$(cat "$hwm_file" 2>/dev/null | tr -d ' \n')
+      case "$hwm" in *[!0-9]*|'') hwm=0 ;; esac
+    fi
+    # Pass 1: build kept-lines + count NEW_HWM in one awk pass.
+    # awk reads pending.jsonl line by line; for each line, decides
+    # whether to keep based on index vs HWM and ts age. NEW_HWM is the
+    # count of kept lines whose original index was <= old HWM (these
+    # are "recently-consumed" entries that survived retention).
+    awk -v hwm="$hwm" \
+        -v now="$now_epoch" \
+        -v ret="$retention_seconds" \
+        -v hwm_out="$hwm_tmp" '
+      function iso_to_epoch(iso,    cmd, e) {
+        if (iso == "") return 0
+        # Strip ms suffix
+        sub(/\.[0-9]+Z$/, "Z", iso)
+        cmd = "date -u -d \"" iso "\" +%s 2>/dev/null || date -u -j -f \"%Y-%m-%dT%H:%M:%SZ\" \"" iso "\" +%s 2>/dev/null"
+        cmd | getline e
+        close(cmd)
+        return (e == "") ? 0 : e + 0
+      }
+      {
+        idx = NR
+        keep = 0
+        if (idx > hwm) {
+          keep = 1   # un-consumed
+        } else {
+          # Recently-consumed: extract ts JSON field via grep-like
+          # match; awk regex is enough for this shape.
+          ts = ""
+          if (match($0, /"ts":"[^"]+"/)) {
+            ts = substr($0, RSTART+6, RLENGTH-7)
+          }
+          age_secs = now - iso_to_epoch(ts)
+          if (age_secs < ret) {
+            keep = 1
+            new_hwm_kept_below_old_hwm++
+          }
+        }
+        if (keep) {
+          print $0
+        }
+      }
+      END {
+        printf "%d", new_hwm_kept_below_old_hwm > hwm_out
+      }
+    ' "$jsonl" >"$tmp_jsonl" 2>/dev/null || { rm -f "$tmp_jsonl" "$hwm_tmp"; exit 43; }
+
+    # Atomic rename for both files (file-system atomic on POSIX local).
+    mv -f "$tmp_jsonl" "$jsonl" 2>/dev/null || { rm -f "$tmp_jsonl" "$hwm_tmp"; exit 44; }
+    mv -f "$hwm_tmp" "$hwm_file" 2>/dev/null || { rm -f "$hwm_tmp"; exit 44; }
+
+  ) 9>"$lockfile"
+  gc_rc=$?
+
+  if [ "$gc_rc" -ne 0 ]; then
+    printf 'coord mediator_pending: GC failed (rc=%d)\n' "$gc_rc" >&2
+    return 0
+  fi
+
+  local after_size
+  after_size=$(_coord_pending_file_size "$jsonl")
+  kept=$(wc -l <"$jsonl" 2>/dev/null | tr -d ' ')
+  case "$kept" in *[!0-9]*|'') kept=0 ;; esac
+  new_hwm=0
+  if [ -f "$hwm_file" ]; then
+    new_hwm=$(cat "$hwm_file" 2>/dev/null | tr -d ' \n')
+    case "$new_hwm" in *[!0-9]*|'') new_hwm=0 ;; esac
+  fi
+
+  if command -v coord_log_event >/dev/null 2>&1; then
+    coord_log_event kind=PENDING_GC_RUN \
+      kept_count="$kept" \
+      new_hwm="$new_hwm" \
+      retention_hours="$retention_hours" \
+      before_size_bytes="$before_size" \
+      after_size_bytes="$after_size" 2>/dev/null || true
+  fi
   return 0
 }
 
@@ -222,6 +383,7 @@ if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
   case "${1:-}" in
     emit)    shift; coord_mediator_emit_pending "$@" ;;
     consume) coord_mediator_consume_pending && exit 0 || exit 1 ;;
-    *) printf 'usage: mediator_pending.sh {emit <kind> [k=v ...] | consume}\n' >&2; exit 2 ;;
+    gc)      shift; coord_mediator_gc_pending "${1:-}" ;;
+    *) printf 'usage: mediator_pending.sh {emit <kind> [k=v ...] | consume | gc [<hours>]}\n' >&2; exit 2 ;;
   esac
 fi
