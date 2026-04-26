@@ -478,4 +478,53 @@ Approved 2026-04-24 with clarifications (a) and (b) folded in as above.
 
 ---
 
+## PR-PHASE2-01 — `read_sets[].reads[]` schema-text correction (`file` → `path`)
+
+**Date:** 2026-04-25
+**Author:** Phase 3 builder (proposal); user-approved on T2.01 close.
+**Status:** APPROVED-on-proposal. Applied to `IMPLEMENTATION_PLAN.md`
+§3.3 in this revision.
+**Driver:** FINDINGS F-013 (OPEN → RESOLVED by this revision).
+
+### Observed fact requiring change
+
+`IMPLEMENTATION_PLAN.md` §3.3 (sessions.json JSON Schema) documents
+the read-set entry shape as `{file, ts, hash, is_latest,
+superseded_by, superseded_by_head_change}`. Every Phase 1 production
+implementation site uses the field name `path` instead:
+`pre_tool_use_read.sh` (writer), `pre_tool_use_write.sh` (reader),
+`head_tracking.sh` (reader), `coord_status` (renderer). Producer and
+consumer have always agreed on `path`, so behavior is correct on disk
+and in tests; the discrepancy is plan-text-vs-code only and was not
+caught during Phase 1 because no bats assertion compared §3.3 schema
+text against actual on-disk shape.
+
+### Edit applied
+
+`IMPLEMENTATION_PLAN.md` §3.3 — within `read_sets.additionalProperties.
+properties.reads.items`:
+
+- `"required": ["file","ts","hash","is_latest"]`
+  → `"required": ["path","ts","hash","is_latest"]`
+- `"file": { "type": "string" }`
+  → `"path": { "type": "string" }`
+
+No other field changed. Code authority preserved (Phase 1 production
+shape on disk is `path`).
+
+### Cross-references
+
+- FINDINGS F-013 → RESOLVED.
+- Discovered during T2.01 (lock acquire/release implementation) when
+  the new pre_tool_use_write.sh lock-check branch reused the existing
+  read-set-walk jq filter from Phase 1.
+
+### Non-changes
+
+- No code change. Production data shape is unchanged; tests unchanged.
+- No other §3.3 field touched. Other shape decisions (e.g., locks
+  schema, read_set top-level keys) remain as documented.
+
+---
+
 *Future entries append below.*

@@ -29,6 +29,18 @@
 
 set -euo pipefail
 
+# Mediator pending helper. Producer-side: when coord_atomic_edit hits a
+# flock-acquisition timeout (rc=42), we want to emit a flock_timeout
+# entry into the JSONL pending queue so the next pre_tool_use_any.sh
+# surfaces it. Sourcing here so every caller of atomic_write picks it
+# up (no per-caller wiring); mediator_pending.sh has no dependency on
+# atomic_write.sh, avoiding a cycle.
+_ATOMIC_WRITE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$_ATOMIC_WRITE_DIR/mediator_pending.sh" ]; then
+  # shellcheck disable=SC1091
+  . "$_ATOMIC_WRITE_DIR/mediator_pending.sh"
+fi
+
 coord_state_empty_template() {
   # Emitted via jq to guarantee a canonical JSON object.
   jq -n '{
@@ -111,6 +123,19 @@ coord_atomic_edit() {
       exit 44
     fi
   ) 9>"$lock_file" || rc=$?
+
+  # Phase 2 T2.04: emit a Mediator flock_timeout pending entry so the
+  # next pre_tool_use_any.sh consumer surfaces it. Best-effort; never
+  # fails the caller. The producer uses its own pending.lock, NOT the
+  # sessions.lock that just timed out, so there is no recursion risk.
+  if [ "$rc" = "42" ] && command -v coord_mediator_emit_pending >/dev/null 2>&1; then
+    coord_mediator_emit_pending flock_timeout \
+      "source=atomic_write" \
+      "file=$state_file" \
+      "lock=$lock_file" \
+      "timeout_sec=5" \
+      "attempted_op=atomic_edit" || true
+  fi
 
   return "$rc"
 }

@@ -243,13 +243,15 @@ register_hooks() {
   #   1. Remove any prior coord-owned entries (commands under .coord/hooks/)
   #      from EVERY event's hook list. This preserves user-authored entries
   #      sitting alongside ours.
-  #   2. Append our Phase-1 hook set:
+  #   2. Append our Phase-2 hook set:
   #        SessionStart       → session_start.sh         (matcher *)
   #        SessionEnd         → session_end.sh           (matcher *)
+  #        Stop               → stop.sh                  (matcher *)              ← Phase 2 T2.02
   #        UserPromptSubmit   → user_prompt_submit.sh    (matcher *)
   #        PreToolUse         → pre_tool_use_any.sh      (matcher *)
   #                             pre_tool_use_read.sh     (matcher Read)
   #                             pre_tool_use_write.sh    (matcher Write|Edit|NotebookEdit)
+  #        PostToolUse        → post_tool_use_write.sh   (matcher Write|Edit|NotebookEdit)  ← Phase 2 T2.01
   #
   # Idempotent: re-running install/--repair strips the prior entries and
   # re-adds the current set, so changes to commands/timeouts roll forward.
@@ -264,12 +266,16 @@ register_hooks() {
         + [{matcher:"*", hooks:[{type:"command", command:($hdir+"/session_start.sh"),     timeout:10}]}])
     | .hooks.SessionEnd        = ((.hooks.SessionEnd // [])
         + [{matcher:"*", hooks:[{type:"command", command:($hdir+"/session_end.sh"),       timeout:10}]}])
+    | .hooks.Stop              = ((.hooks.Stop // [])
+        + [{matcher:"*", hooks:[{type:"command", command:($hdir+"/stop.sh"),              timeout:10}]}])
     | .hooks.UserPromptSubmit  = ((.hooks.UserPromptSubmit // [])
         + [{matcher:"*", hooks:[{type:"command", command:($hdir+"/user_prompt_submit.sh"),timeout:10}]}])
     | .hooks.PreToolUse        = ((.hooks.PreToolUse // [])
         + [{matcher:"*",                       hooks:[{type:"command", command:($hdir+"/pre_tool_use_any.sh"),   timeout:10}]},
            {matcher:"Read",                    hooks:[{type:"command", command:($hdir+"/pre_tool_use_read.sh"),  timeout:10}]},
            {matcher:"Write|Edit|NotebookEdit", hooks:[{type:"command", command:($hdir+"/pre_tool_use_write.sh"), timeout:10}]}])
+    | .hooks.PostToolUse       = ((.hooks.PostToolUse // [])
+        + [{matcher:"Write|Edit|NotebookEdit", hooks:[{type:"command", command:($hdir+"/post_tool_use_write.sh"),timeout:10}]}])
   ' >"$tmp"
   mv "$tmp" "$CLAUDE_SETTINGS"
 }

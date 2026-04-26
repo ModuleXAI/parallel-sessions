@@ -68,3 +68,41 @@ teardown() { unset CLAUDE_COORD; rm -rf "$TMP"; }
   run jq -rs 'last | .payload.reason' "$COORD_DIR/events.jsonl"
   [ "$output" = "logout" ]
 }
+
+# --- Phase 2 T2.02: per-file release with notification population ---------
+
+@test "session_end (Phase 2): no locks held → no LOCK_RELEASED events, idempotent silent" {
+  CLAUDE_COORD=1 bash -c "echo '{\"session_id\":\"$SID\",\"hook_event_name\":\"SessionEnd\",\"reason\":\"exit\"}' | '$H_END'"
+  sleep 0.3
+  run jq -rs '[.[] | select(.kind == "LOCK_RELEASED")] | length' "$COORD_DIR/events.jsonl"
+  [ "$output" = "0" ]
+  run jq -r --arg sid "$SID" '.sessions[$sid].state' "$COORD_DIR/sessions.json"
+  [ "$output" = "IDLE_CLOSED" ]
+}
+
+@test "session_end (Phase 2): multi-lock held → one LOCK_RELEASED per file with source=session_end" {
+  "$A" edit "$COORD_DIR/sessions.json" '
+    .locks = {
+      "/f/a.ts": {session:$sid, acquired_at:"2026-01-01T00:00:00Z", last_refresh_at:"t", tasks:[]},
+      "/f/b.ts": {session:$sid, acquired_at:"2026-01-01T00:00:00Z", last_refresh_at:"t", tasks:[]}
+    }' --arg sid "$SID"
+  CLAUDE_COORD=1 bash -c "echo '{\"session_id\":\"$SID\",\"hook_event_name\":\"SessionEnd\",\"reason\":\"exit\"}' | '$H_END'"
+  sleep 0.3
+  run jq -rs '[.[] | select(.kind == "LOCK_RELEASED" and .payload.source == "session_end")] | length' "$COORD_DIR/events.jsonl"
+  [ "$output" = "2" ]
+  # Both locks gone.
+  run jq -r '.locks | length' "$COORD_DIR/sessions.json"
+  [ "$output" = "0" ]
+}
+
+@test "session_end (Phase 2): Phase-1 'releases own locks only' invariant preserved" {
+  # Regression of original test, verified under the new per-file path.
+  "$A" edit "$COORD_DIR/sessions.json" '
+    .locks = {
+      "/f/mine.ts":  {session:$mine,  acquired_at:"t", last_refresh_at:"t", tasks:[]},
+      "/f/other.ts": {session:$other, acquired_at:"t", last_refresh_at:"t", tasks:[]}
+    }' --arg mine "$SID" --arg other "other-session"
+  CLAUDE_COORD=1 bash -c "echo '{\"session_id\":\"$SID\",\"hook_event_name\":\"SessionEnd\",\"reason\":\"exit\"}' | '$H_END'"
+  run jq -r '.locks | keys | sort | join(",")' "$COORD_DIR/sessions.json"
+  [ "$output" = "/f/other.ts" ]
+}

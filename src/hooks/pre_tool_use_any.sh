@@ -149,6 +149,14 @@ CORRUPT_BANNER=$(coord_consume_corrupt_state_flag || printf '')
 if [ -n "$CORRUPT_BANNER" ]; then
   BANNER="$CORRUPT_BANNER"
 fi
+# Phase 2 T2.04: Mediator pending JSONL consumer (flock_timeout +
+# any future Phase-3+ kinds). Compose alongside corruption banner.
+PENDING_BANNER=$(coord_mediator_consume_pending || printf '')
+if [ -n "$PENDING_BANNER" ]; then
+  if [ -n "$BANNER" ]; then BANNER="$BANNER"$'\n\n'; fi
+  BANNER="${BANNER}${PENDING_BANNER}"
+  coord_log_event kind=MEDIATOR_PENDING_DELIVERED source=pre_tool_use_any
+fi
 if [ -n "$NOTIFS_TEXT" ]; then
   if [ -n "$BANNER" ]; then BANNER="$BANNER"$'\n\n'; fi
   BANNER="${BANNER}Coord notifications pending:"$'\n'"$NOTIFS_TEXT"
@@ -170,14 +178,16 @@ fi
 
 exit 0
 
-# PHASE-3 UPGRADE POINT:
-#   When the Mediator command-hook + agent hook land, this hook adds:
-#     - A check for `.coord/mediator/pending.json`. If present, inject
-#       a one-line banner ("Coord Mediator pending: <kind>; running on
-#       this tool call") so Claude knows why the agent hook is firing.
-#     - A check for `.coord/mediator/verdict/<latest>.json` to surface
-#       Mediator outcomes that were not delivered to a previous turn
-#       (e.g., escalate_to_user verdicts).
+# PHASE-3 UPGRADE POINT (partially retired in T2.04):
+#   T2.04 added the JSONL pending-queue consumer (coord_mediator_consume_pending
+#   above) covering kind=flock_timeout. Phase 3 will EXTEND with:
+#     - Mediator agent-hook firing on consume (instead of just surfacing
+#       a banner, the agent hook investigates + remediates).
+#     - Verdict surfacing: a check for `.coord/mediator/verdict/<latest>.json`
+#       to deliver verdicts that Claude did not see at the time of issuance
+#       (e.g., escalate_to_user verdicts written between turns).
+#     - Additional pending kinds: stale_active, pid_recycled, schema_mismatch,
+#       manual (via `coord mediate`).
 #   See IMPLEMENTATION_PLAN.md §4 mediator_agent.md component spec and
 #   §5 Phase 3 "Done when" criteria.
 #

@@ -1,6 +1,8 @@
 #!/usr/bin/env bats
-# Tests for hooks/pre_tool_use_write.sh (Phase 1 warning-only mode).
-# Ship-gate: the hook MUST NEVER set permissionDecision in Phase 1.
+# Tests for hooks/pre_tool_use_write.sh.
+# Phase 1 (warning-only) + Phase 2 (lock acquisition + deny on contention).
+# The Phase 2 invariant: permissionDecision: "deny" appears ONLY in the
+# lock-held-by-other branch; every other code path remains allow.
 
 load "../helpers/common"
 
@@ -89,13 +91,13 @@ _prime_read() {
   [ "$output" = "" ]
 }
 
-@test "pre_tool_use_write: drifted file → additionalContext warning, NO permissionDecision (Phase 1 ship gate)" {
+@test "pre_tool_use_write: drifted file → additionalContext warning, NO permissionDecision (Phase 2 still warns on stale read alone)" {
   _prime_read "$READ_F1"
   # Modify alpha.txt on disk to simulate another session's change.
   printf 'alpha v2 drifted\n' >"$F1"
   CLAUDE_COORD=1 run bash -c "echo '$WRITE_TARGET' | '$H'"
   [ "$status" -eq 0 ]
-  # Stdout must NOT contain permissionDecision anywhere.
+  # Stdout must NOT contain permissionDecision (no lock contention here).
   run bash -c "echo '$output' | grep -c 'permissionDecision' || true"
   [ "$output" = "0" ]
   # Re-run to capture output for content checks.
@@ -154,15 +156,134 @@ _prime_read() {
   [ "$output" = "" ]
 }
 
-@test "pre_tool_use_write: Phase-1 ship gate — NO code path ever sets permissionDecision" {
-  # Exhaustively confirm: prime drift, then run; scan output for the forbidden key.
-  _prime_read "$READ_F1"
-  printf 'alpha v2\n' >"$F1"
+@test "pre_tool_use_write: Phase 2 lock acquire — empty locks → state has lock entry + LOCK_ACQUIRED event" {
   CLAUDE_COORD=1 run bash -c "echo '$WRITE_TARGET' | '$H'"
   [ "$status" -eq 0 ]
-  # The literal string "permissionDecision" must NOT appear in stdout.
+  # Lock entry materialized in sessions.json keyed to the target.
+  run jq -r --arg f "$TARGET" --arg sid "$SID" '.locks[$f].session // ""' "$COORD_DIR/sessions.json"
+  [ "$output" = "$SID" ]
+  run jq -r --arg f "$TARGET" '.locks[$f] | [.acquired_at, .last_refresh_at] | @tsv' "$COORD_DIR/sessions.json"
+  # Both timestamps populated and equal at acquire time.
+  [ -n "$output" ]
+  acq=$(echo "$output" | awk -F'\t' '{print $1}')
+  ref=$(echo "$output" | awk -F'\t' '{print $2}')
+  [ "$acq" = "$ref" ]
+  # tasks[] is initialized empty (Phase 6 populates).
+  run jq -r --arg f "$TARGET" '.locks[$f].tasks | length' "$COORD_DIR/sessions.json"
+  [ "$output" = "0" ]
+  # LOCK_ACQUIRED event emitted with file payload.
+  sleep 0.3
+  run jq -rs '[.[] | select(.kind == "LOCK_ACQUIRED")] | length' "$COORD_DIR/events.jsonl"
+  [ "$output" -ge "1" ]
+  run jq -rs 'last(.[] | select(.kind == "LOCK_ACQUIRED")) | .file' "$COORD_DIR/events.jsonl"
+  [ "$output" = "$TARGET" ]
+}
+
+@test "pre_tool_use_write: Phase 2 self-write refresh — second write by same session refreshes last_refresh_at, no deny" {
+  CLAUDE_COORD=1 run bash -c "echo '$WRITE_TARGET' | '$H'"
+  [ "$status" -eq 0 ]
+  acq=$(jq -r --arg f "$TARGET" '.locks[$f].acquired_at' "$COORD_DIR/sessions.json")
+  ref1=$(jq -r --arg f "$TARGET" '.locks[$f].last_refresh_at' "$COORD_DIR/sessions.json")
+  sleep 1.1
+  CLAUDE_COORD=1 run bash -c "echo '$WRITE_TARGET' | '$H'"
+  [ "$status" -eq 0 ]
+  # No permissionDecision on self-write.
   case "$output" in
-    *permissionDecision*) return 1 ;;
+    *permissionDecision*) echo "self-write produced permissionDecision: $output"; return 1 ;;
   esac
-  true
+  # acquired_at unchanged; last_refresh_at advanced.
+  acq2=$(jq -r --arg f "$TARGET" '.locks[$f].acquired_at' "$COORD_DIR/sessions.json")
+  ref2=$(jq -r --arg f "$TARGET" '.locks[$f].last_refresh_at' "$COORD_DIR/sessions.json")
+  [ "$acq2" = "$acq" ]
+  [ "$ref2" != "$ref1" ]
+  # LOCK_REFRESH event emitted (per-write granularity per phase-1 signoff Q2).
+  sleep 0.3
+  run jq -rs '[.[] | select(.kind == "LOCK_REFRESH")] | length' "$COORD_DIR/events.jsonl"
+  [ "$output" -ge "1" ]
+}
+
+@test "pre_tool_use_write: Phase 2 deny on other-holder — full §B.2 three-options reason; LOCK_DENIED event" {
+  # Pre-seed lock held by a DIFFERENT session.
+  OTHER="sid-other-9999"
+  jq --arg f "$TARGET" --arg sid "$OTHER" '
+    .locks[$f] = {
+      session: $sid,
+      acquired_at: "2026-04-25T12:00:00Z",
+      last_refresh_at: "2026-04-25T12:30:00Z",
+      tasks: []
+    }
+    | .sessions[$sid] = {state:"ACTIVE",pid:1,pid_lstart:"x",registered_at:"y",last_activity_at:"z",git_head:"",prompt_id:null,script_version:"1.0"}
+  ' "$COORD_DIR/sessions.json" >"$COORD_DIR/sessions.json.new"
+  mv "$COORD_DIR/sessions.json.new" "$COORD_DIR/sessions.json"
+  touch "$COORD_DIR/sessions/${OTHER}.active"
+
+  CLAUDE_COORD=1 run bash -c "echo '$WRITE_TARGET' | '$H'"
+  [ "$status" -eq 0 ]
+  # (carry-forward #4: Output is valid JSON; jq parses cleanly.)
+  echo "$output" | jq -e . >/dev/null
+  # permissionDecision is exactly "deny".
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null
+  # Reason is a string (not stringified-JSON or null).
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | type == "string"' >/dev/null
+  # All three option markers present.
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("\\(a\\) Delegate")' >/dev/null
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("\\(b\\) Self-delegate")' >/dev/null
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("\\(c\\) Passively wait")' >/dev/null
+  # (a)+(b) reference the subcommand abstractly — name only, no full arg
+  # shape (Phase 6 hasn't frozen the contract yet). They MUST point at
+  # option (c) for the disabled fallback path.
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | contains("`coord task-open`")' >/dev/null
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | contains("`coord self-delegate`")' >/dev/null
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("Phase 6 . currently disabled")' >/dev/null
+  # The deny reason MUST NOT freeze Phase 6 argument syntax — guard
+  # against accidental regression to "--file ... --complexity ... --anchor".
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | (contains("task-open --file") | not)' >/dev/null
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | (contains("self-delegate --file") | not)' >/dev/null
+  # Embedded `coord wait` syntax is exact + copy-paste-runnable (option (c)
+  # IS active in Phase 2 — its CLI is stable).
+  echo "$output" | jq -e --arg t "$TARGET" '.hookSpecificOutput.permissionDecisionReason | contains("coord wait " + $t + " --timeout 570")' >/dev/null
+  # Both timestamps surfaced in human-readable form.
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("acquired .* ago")' >/dev/null
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("last activity .* ago")' >/dev/null
+  # additionalContext field preserves multi-line structure (newlines round-trip).
+  # The reason string itself contains literal newline characters (jq passes them
+  # through; Claude Code then surfaces them to Claude verbatim).
+  echo "$output" | jq -r '.hookSpecificOutput.permissionDecisionReason' | grep -qc '^.' && \
+    [ "$(echo "$output" | jq -r '.hookSpecificOutput.permissionDecisionReason' | wc -l | tr -d ' ')" -ge "4" ]
+  # Holder session prefix appears (first 8 chars).
+  echo "$output" | jq -e --arg p "${OTHER:0:8}" '.hookSpecificOutput.permissionDecisionReason | contains($p)' >/dev/null
+  # LOCK_DENIED event emitted.
+  sleep 0.3
+  run jq -rs '[.[] | select(.kind == "LOCK_DENIED")] | length' "$COORD_DIR/events.jsonl"
+  [ "$output" -ge "1" ]
+}
+
+@test "pre_tool_use_write: Phase 2 invariant — permissionDecision: deny appears ONLY in lock-held-by-other branch" {
+  # Branch 1: empty locks → ACQUIRE, no deny.
+  CLAUDE_COORD=1 run bash -c "echo '$WRITE_TARGET' | '$H'"
+  case "$output" in *permissionDecision*) echo "FAIL acquire: $output"; return 1 ;; esac
+
+  # Branch 2: self-refresh → no deny.
+  CLAUDE_COORD=1 run bash -c "echo '$WRITE_TARGET' | '$H'"
+  case "$output" in *permissionDecision*) echo "FAIL refresh: $output"; return 1 ;; esac
+
+  # Branch 3: stale-read but no contention → warning only, no deny.
+  jq --arg f "$TARGET" 'del(.locks[$f])' "$COORD_DIR/sessions.json" >"$COORD_DIR/sessions.json.new"
+  mv "$COORD_DIR/sessions.json.new" "$COORD_DIR/sessions.json"
+  _prime_read "$READ_F1"
+  printf 'alpha drifted\n' >"$F1"
+  CLAUDE_COORD=1 run bash -c "echo '$WRITE_TARGET' | '$H'"
+  case "$output" in *permissionDecision*) echo "FAIL stale: $output"; return 1 ;; esac
+
+  # Branch 4: lock held by other → MUST deny.
+  OTHER="sid-other-7777"
+  jq --arg f "$TARGET" --arg sid "$OTHER" '
+    .locks = {} | .locks[$f] = {
+      session: $sid, acquired_at: "2026-04-25T10:00:00Z",
+      last_refresh_at: "2026-04-25T10:00:30Z", tasks: []
+    }
+  ' "$COORD_DIR/sessions.json" >"$COORD_DIR/sessions.json.new"
+  mv "$COORD_DIR/sessions.json.new" "$COORD_DIR/sessions.json"
+  CLAUDE_COORD=1 run bash -c "echo '$WRITE_TARGET' | '$H'"
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null
 }

@@ -256,6 +256,13 @@ CORRUPT_BANNER=$(coord_consume_corrupt_state_flag || printf '')
 if [ -n "$CORRUPT_BANNER" ]; then
   BANNER="$CORRUPT_BANNER"$'\n\n'"$BANNER"
 fi
+# Phase 2 T2.04: surface any pending Mediator JSONL entries (e.g.
+# flock_timeout from a prior turn). Parallel to pre_tool_use_any.sh.
+PENDING_BANNER=$(coord_mediator_consume_pending || printf '')
+if [ -n "$PENDING_BANNER" ]; then
+  BANNER="$BANNER"$'\n\n'"$PENDING_BANNER"
+  coord_log_event kind=MEDIATOR_PENDING_DELIVERED source=session_start
+fi
 emit_additional_context "$BANNER"
 
 # --- Event log per source ---
