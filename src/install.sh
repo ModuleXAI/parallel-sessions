@@ -161,6 +161,9 @@ materialize_coord() {
            "$COORD_DIR/validation" \
            "$COORD_DIR/mediator" \
            "$COORD_DIR/mediator/verdict" \
+           "$COORD_DIR/mediator/lockdown_archive" \
+           "$COORD_DIR/watchdog" \
+           "$COORD_DIR/watchdog/checking" \
            "$COORD_DIR/hooks" \
            "$COORD_DIR/lib" \
            "$COORD_DIR/bin" \
@@ -214,6 +217,15 @@ JSON
   for f in sessions.lock events.lock history.lock; do
     : >"$COORD_DIR/$f"
   done
+
+  # Watchdog cache layout (T3.04 / PR-PHASE3-02 §E):
+  # recent_checks.jsonl is append-only; recent_checks.lock is the flock
+  # sentinel. Idempotent: only create if absent, never clobber existing
+  # cache entries on --repair.
+  [ -f "$COORD_DIR/watchdog/recent_checks.jsonl" ] || \
+    : >"$COORD_DIR/watchdog/recent_checks.jsonl"
+  [ -f "$COORD_DIR/watchdog/recent_checks.lock" ] || \
+    : >"$COORD_DIR/watchdog/recent_checks.lock"
 
   # sessions_history.json.
   if [ ! -s "$COORD_DIR/sessions_history.json" ] || [ "$MODE" = repair ]; then
