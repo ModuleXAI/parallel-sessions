@@ -103,10 +103,28 @@ _coord_epoch_now() { date -u +%s 2>/dev/null || printf '0'; }
 # _coord_file_age_seconds <path>
 #   Portable file-mtime-to-now-difference in seconds. macOS BSD stat
 #   uses -f %m; GNU stat uses -c %Y. Returns 0 if unreadable.
+#
+#   F-018 fix: try GNU form FIRST. macOS BSD `stat -c` errors out
+#   (rc!=0) so fallback fires correctly. Linux `stat -f '%m' file`
+#   silently re-purposes -f as "display filesystem info" and returns
+#   rc=0 with filesystem stats on stdout — making the BSD-first probe
+#   the wrong default on Linux. Validate the captured value is a
+#   pure non-empty integer before accepting it.
 _coord_file_age_seconds() {
-  local f="$1" mtime
+  local f="$1" mtime=""
   [ -e "$f" ] || { printf '0'; return; }
-  mtime=$(stat -f '%m' "$f" 2>/dev/null || stat -c '%Y' "$f" 2>/dev/null || printf '0')
+  # GNU first (Linux): -c '%Y' prints epoch seconds.
+  mtime=$(stat -c '%Y' "$f" 2>/dev/null)
+  case "$mtime" in
+    ''|*[!0-9]*) mtime="" ;;
+  esac
+  if [ -z "$mtime" ]; then
+    # BSD fallback (macOS): -f '%m' prints epoch seconds.
+    mtime=$(stat -f '%m' "$f" 2>/dev/null)
+    case "$mtime" in
+      ''|*[!0-9]*) mtime=0 ;;
+    esac
+  fi
   local now
   now=$(_coord_epoch_now)
   local diff=$(( now - mtime ))

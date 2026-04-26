@@ -251,11 +251,24 @@ coord_mediator_consume_pending() {
 # Best-effort: returns 0 always; logs ERROR + warns to stderr on
 # anything that prevents progress (flock timeout, jq error, disk full).
 
-# Internal: portable file size in bytes. macOS BSD stat -f %z; GNU stat -c %s.
+# Internal: portable file size in bytes. macOS BSD stat -f %z; GNU
+# stat -c %s. F-018 fix: GNU first (Linux). macOS BSD `stat -c`
+# errors out so the fallback fires; Linux BSD `stat -f` on a regular
+# file would re-interpret as filesystem info, breaking parse.
 _coord_pending_file_size() {
-  local f="$1"
+  local f="$1" sz=""
   [ -e "$f" ] || { printf '0'; return; }
-  stat -f '%z' "$f" 2>/dev/null || stat -c '%s' "$f" 2>/dev/null || printf '0'
+  sz=$(stat -c '%s' "$f" 2>/dev/null)
+  case "$sz" in
+    ''|*[!0-9]*) sz="" ;;
+  esac
+  if [ -z "$sz" ]; then
+    sz=$(stat -f '%z' "$f" 2>/dev/null)
+    case "$sz" in
+      ''|*[!0-9]*) sz=0 ;;
+    esac
+  fi
+  printf '%s' "$sz"
 }
 
 # coord_mediator_gc_pending [<retention_hours>]
