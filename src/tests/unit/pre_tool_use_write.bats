@@ -98,8 +98,7 @@ _prime_read() {
   CLAUDE_COORD=1 run bash -c "echo '$WRITE_TARGET' | '$H'"
   [ "$status" -eq 0 ]
   # Stdout must NOT contain permissionDecision (no lock contention here).
-  run bash -c "echo '$output' | grep -c 'permissionDecision' || true"
-  [ "$output" = "0" ]
+  ! _grep_output_for "permissionDecision"
   # Re-run to capture output for content checks.
   CLAUDE_COORD=1 run bash -c "echo '$WRITE_TARGET' | '$H'"
   echo "$output" | jq -e '.hookSpecificOutput.additionalContext | test("stale-read warning")' >/dev/null
