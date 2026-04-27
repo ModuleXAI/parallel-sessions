@@ -5643,28 +5643,47 @@ task_id = "<sid_B>-task-<created_at_ms>-<random_4_hex>"
 - `rationale`: 1-3 sentence string. Embedded in TASK_
   OUTCOME notification.
 
-**Mock binary case branch** (added to existing
-`mock_claude.sh` per Phase 4-5 precedent):
+**Mock binary distribution: per-test inline fake binary
+pattern** (Phase 4-5 carry-forward; reference:
+`src/tests/unit/validator_spawn.bats:52-99` +
+`src/tests/unit/mediator_spawn.bats` analogous setup).
+T6.05 implementation honors §5's env-var contract via
+direct `COORD_MOCK_CLAUDE_TASK_PATCH` read inside
+`coord_task_processor_spawn_claude` (`src/lib/task_processor.sh`)
+— no shared `src/lib/mock_claude.sh` helper file exists or is
+created in Phase 6. Tests exercise the contract by exporting
+the env-var to the desired JSON before invoking the
+processor; the function returns the env-var value verbatim
+(after jq validation of the status enum + affected_lines
+shape). When the env-var is unset, a deterministic default
+fires:
 
 ```bash
-case "$mode" in
-  validator-verdict)  # Phase 4
-    ...
-  mediator-verdict)   # Phase 5
-    ...
-  task-patch)          # Phase 6 NEW
-    if [ -n "${COORD_MOCK_CLAUDE_TASK_PATCH:-}" ]; then
-      printf '%s' "$COORD_MOCK_CLAUDE_TASK_PATCH"
-    else
-      printf '%s' \
-        '{"status":"COMPLETED","diff":"","affected_lines":[0,0],"rationale":"mock default"}'
-    fi
-    ;;
-esac
+'{"status":"COMPLETED","diff":"","affected_lines":[0,0],"rationale":"mock default"}'
 ```
 
-Phase 7 real-Claude integration replaces mock with
-`claude -p` invocation against the same JSON contract.
+(literal string returned by `coord_task_processor_spawn_claude`
+when `COORD_MOCK_CLAUDE_TASK_PATCH` is empty/unset).
+
+Phase 7 real-Claude integration will replace the env-var
+read with `claude -p` invocation against the same JSON
+contract; the env-var path remains as a test override for
+deterministic CI fixtures. If a shared mock-helper file
+becomes desirable for cross-test consistency at that point,
+introduce as `src/tests/helpers/mock_claude.sh` (NEW, NOT
+"extend") and migrate Phase 4/5 inline fakes piecewise.
+
+> **+ UPDATED 2026-04-27 at T6.05 close** reflecting actual
+> Phase 4-5 mock pattern. Earlier draft of this section
+> assumed `src/lib/mock_claude.sh` existed as a shared
+> Phase 4-5 helper and described a hypothetical case-branch
+> extension. The file does not exist; Phase 4-5 mock pattern
+> is per-test inline fake binaries written to `$TMP/bin/claude`
+> via `cat <<...` heredocs. T6.05 implementation deferred
+> the shared-helper question to Phase 7 by using the
+> env-var path exclusively. Mirrors Phase 6 T6.02
+> PR-PHASE6-03 §3 supersession + T6.01 ambiguity C/D §8
+> inline-edit precedents.
 
 #### 6. Lock-held-by-other deny banner (toggle true vs false)
 
@@ -5746,25 +5765,18 @@ shape verbatim:
 
 #### 8. TASK_OUTCOME notification payload
 
-When task processor (T6.04) writes outcome, it appends a
-notification to opener B via the existing
-`pending_notifications[<sid_B>]` queue (Phase 1+2
-mechanism). Payload:
+When the task processor writes an outcome (T6.05), it
+appends the per-task banner to opener B via the canonical
+`.notifications[<opener_sid>][<file>]` slot (the existing
+Phase 1+2 array-of-strings notification queue, consumed by
+`pre_tool_use_read.sh` + `pre_tool_use_any.sh` on B's next
+PreToolUse). The slot key is `<opener_sid>` (B's session
+id) and the inner key is `<file>` (the target the task
+was opened on); the value is an array of notification
+strings appended in arrival order.
 
-```json
-{
-  "kind": "TASK_OUTCOME",
-  "task_id": "<task_id>",
-  "file": "<file>",
-  "status": "COMPLETED|CONFLICT|SKIPPED",
-  "diff": "<unified diff; may be truncated to 4KB>",
-  "rationale": "<from mock-Claude or processor verdict>",
-  "completed_at": "<ISO8601 with ms>",
-  "holder_session": "<sid_A>"
-}
-```
-
-Banner format injected to B at next PreToolUse:
+Banner string format (one entry per archived task; appended
+to `.notifications[<opener_sid>][<file>]`):
 
 > Task `<task_id>` on `<file>` completed by session
 > `<holder_session>`. Status: `<COMPLETED|CONFLICT|SKIPPED>`.
@@ -5774,8 +5786,49 @@ Banner format injected to B at next PreToolUse:
 > ```
 
 (Banner template uses `<holder_session>` placeholder
-matching the JSON payload field name; T6.04 substitutes via
-field-name match. Ambiguity C disposition at T6.01 close.)
+matching the JSON payload field name; T6.05 substitutes
+via field-name match. Ambiguity C disposition at T6.01
+close.)
+
+Audit-trail event payload (`TASK_OUTCOME_PERSISTED` in
+`events.jsonl`; structured object with full untruncated
+diff per ambiguity D + below):
+
+```json
+{
+  "kind": "TASK_OUTCOME_PERSISTED",
+  "file": "<file>",
+  "task_id": "<task_id>",
+  "opener": "<opener_sid>",
+  "holder_session": "<sid_A>",
+  "status": "COMPLETED|CONFLICT|SKIPPED",
+  "rationale": "<from mock-Claude or processor verdict>",
+  "diff_full": "<unified diff; UNTRUNCATED>",
+  "completed_at": "<ISO8601 with ms>"
+}
+```
+
+The notification banner string is inherently lossy (4KB
+diff cap + structure-flattened); the
+`TASK_OUTCOME_PERSISTED` event is the canonical audit
+record.
+
+> **+ UPDATED 2026-04-27 at T6.05 close** reflecting
+> production slot name (Phase 1+2 canonical). Earlier
+> draft of this section named the slot
+> `pending_notifications[<sid_B>]`. The actual canonical
+> schema slot used by the existing notify_waiters.sh +
+> state_query.sh + pre_tool_use_*.sh consumers is
+> `.notifications[<sid>][<path>]` — keyed by session AND
+> path, value array of strings. T6.05 implementation
+> appends to this slot directly. The structured JSON
+> payload originally listed inline at §8 is the
+> `TASK_OUTCOME_PERSISTED` event-payload shape (full diff
+> in audit), not the notification entry shape (banner
+> string in `.notifications`). Two payloads, two
+> destinations; this update separates them explicitly.
+> Mirrors Phase 6 T6.02 PR-PHASE6-03 §3 supersession +
+> T6.01 ambiguity C/D §8 inline-edit precedents.
 
 Diff truncation: 4KB byte-cap with UTF-8 codepoint-boundary
 safe truncation. Recommended pattern: `head -c 4096 |
