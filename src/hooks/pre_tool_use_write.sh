@@ -58,6 +58,21 @@ LIB_DIR="$(cd "$HOOK_DIR/../lib" && pwd)"
 . "$LIB_DIR/hash.sh"
 # shellcheck disable=SC1091
 . "$LIB_DIR/lockdown.sh"
+# Phase 4 / T4.06 pipeline libs.
+# shellcheck disable=SC1091
+. "$LIB_DIR/read_snapshots.sh"
+# shellcheck disable=SC1091
+. "$LIB_DIR/validator_cache.sh"
+# shellcheck disable=SC1091
+. "$LIB_DIR/validator_prefilter.sh"
+# shellcheck disable=SC1091
+. "$LIB_DIR/validator_spawn.sh"
+# shellcheck disable=SC1091
+. "$LIB_DIR/mediator_pending.sh"
+# shellcheck disable=SC1091
+. "$LIB_DIR/mediator_spawn.sh"
+# shellcheck disable=SC1091
+. "$LIB_DIR/verdict_apply.sh"
 
 coord_resolve_root() {
   if [ -n "${COORD_DIR:-}" ] && [ -d "$COORD_DIR" ]; then
@@ -90,6 +105,248 @@ emit_deny() {
 }
 
 warn_stderr() { printf 'coord pre_tool_use_write: %s\n' "$*" >&2; }
+
+# ---------------------------------------------------------------------------
+# Phase 4 / T4.06 — 3-stage validator pipeline helpers
+# ---------------------------------------------------------------------------
+# Per PR-PHASE4-01..05 + Concern B disposition: when stale-read is
+# detected on a file, run the pipeline cache → pre-filter → validator
+# agent → (CRITICAL only) inline Mediator. Each stage is fail-soft;
+# any unexpected failure falls back to the Phase 1 warning (emit
+# banner + proceed). Pipefail-safe: every $() and piped jq has an
+# explicit `|| <fallback>` to avoid set -e/pipefail aborts mid-flow
+# (CLAUDE.md §A.13 lesson #2).
+
+# _coord_phase4_critical_emit_pending <file> <rhash> <chash> <verdict_file>
+#   Writes a kind=critical_drift entry to pending.jsonl with payload
+#   per PR-PHASE4-03. Returns the entry's ts on stdout (rc=0) or
+#   empty + rc=1 on failure. Generates ts locally so caller can pass
+#   it to coord_mediator_spawn (Mediator's prompt filters by ts).
+_coord_phase4_critical_emit_pending() {
+  local file="$1" rhash="$2" chash="$3" verdict_file="$4"
+  [ -z "${COORD_DIR:-}" ] && return 1
+  local v_reasoning v_summary v_session
+  v_reasoning=$(jq -r '.reasoning // ""' "$verdict_file" 2>/dev/null) || v_reasoning=""
+  v_summary=$(jq -r '.diff_summary // ""' "$verdict_file" 2>/dev/null) || v_summary=""
+  v_session=$(jq -r '.validator_session_id // ""' "$verdict_file" 2>/dev/null) || v_session=""
+
+  local ts
+  if command -v coord_now_iso8601 >/dev/null 2>&1; then
+    ts=$(coord_now_iso8601)
+  else
+    ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  fi
+
+  local entry
+  entry=$(jq -nc \
+    --arg ts "$ts" --arg sid "${SESSION_ID:-unknown}" --arg file "$file" \
+    --arg vr "$v_reasoning" --arg vs "$v_summary" \
+    --arg yh "$rhash" --arg ch "$chash" --arg vsid "$v_session" \
+    '{
+      ts: $ts,
+      kind: "critical_drift",
+      session: $sid,
+      source: "validator",
+      payload: {
+        file: $file,
+        validator_verdict: "CRITICAL",
+        validator_reasoning: $vr,
+        your_read_hash: $yh,
+        current_hash: $ch,
+        diff_summary: $vs,
+        validator_session_id: $vsid
+      }
+    }' 2>/dev/null) || return 1
+  [ -z "$entry" ] && return 1
+
+  local mdir="$COORD_DIR/mediator"
+  local jsonl="$mdir/pending.jsonl"
+  local lockfile="$mdir/pending.lock"
+  mkdir -p "$mdir" 2>/dev/null
+  : >>"$lockfile" 2>/dev/null || true
+  local rc=0
+  (
+    flock -x -w 5 9 || exit 1
+    printf '%s\n' "$entry" >>"$jsonl" 2>/dev/null || exit 1
+  ) 9>"$lockfile" || rc=$?
+  if [ "$rc" -ne 0 ]; then return 1; fi
+  printf '%s\n' "$ts"
+  return 0
+}
+
+# _coord_phase4_advance_verdict_pointer <verdict_path>
+#   Advances the per-session POINTER_FILE so pre_tool_use_any.sh's
+#   verdict consumer skips this verdict on the next tool call
+#   (we already applied + banner-emitted it inline). Idempotent.
+_coord_phase4_advance_verdict_pointer() {
+  local vpath="$1"
+  [ -z "$vpath" ] && return 0
+  [ -z "${COORD_DIR:-}" ] && return 0
+  [ -z "${SESSION_ID:-}" ] && return 0
+  local vname
+  vname=$(basename "$vpath" .json)
+  local pointer_file="$COORD_DIR/sessions/${SESSION_ID}.last_consumed_verdict"
+  printf '%s\n' "$vname" >"$pointer_file" 2>/dev/null || true
+  return 0
+}
+
+# _coord_phase4_handle_critical <file> <rhash> <chash> <verdict_file>
+#   On Validator CRITICAL: writes critical_drift pending entry,
+#   spawns Mediator inline (synchronous per PR-PHASE4-02), applies
+#   verdict's actions[], advances pointer, returns banner text on
+#   stdout. Returns rc=0 on success (banner printed), rc=1 on failure
+#   (caller falls back to Phase 1 warning).
+_coord_phase4_handle_critical() {
+  local file="$1" rhash="$2" chash="$3" verdict_file="$4"
+  local diff_summary
+  diff_summary=$(jq -r '.diff_summary // ""' "$verdict_file" 2>/dev/null) || diff_summary=""
+
+  coord_log_event kind=VALIDATOR_VERDICT_CRITICAL \
+    file="$file" verdict_path="$verdict_file" diff_summary="$diff_summary" || true
+
+  local pending_ts
+  pending_ts=$(_coord_phase4_critical_emit_pending "$file" "$rhash" "$chash" "$verdict_file") \
+    || pending_ts=""
+  if [ -z "$pending_ts" ]; then
+    coord_log_event kind=VALIDATOR_PIPELINE_FAILED file="$file" \
+      reason=pending_emit_failed || true
+    return 1
+  fi
+
+  coord_log_event kind=VALIDATOR_VERDICT_CRITICAL_ESCALATED_TO_MEDIATOR \
+    file="$file" pending_ts="$pending_ts" || true
+
+  local mediator_verdict
+  mediator_verdict=$(coord_mediator_spawn "$pending_ts" 1 2>/dev/null) || mediator_verdict=""
+
+  if [ -z "$mediator_verdict" ] || [ ! -f "$mediator_verdict" ]; then
+    coord_log_event kind=VALIDATOR_PIPELINE_FAILED file="$file" \
+      reason=mediator_spawn_failed pending_ts="$pending_ts" || true
+    return 1
+  fi
+
+  # Apply Mediator verdict's actions (idempotent via verdict_apply.sh).
+  local actions_json
+  actions_json=$(jq -c '.actions // []' "$mediator_verdict" 2>/dev/null) || actions_json="[]"
+  if [ "$actions_json" != "[]" ] && [ "$actions_json" != "null" ] \
+     && command -v coord_verdict_apply_actions >/dev/null 2>&1; then
+    coord_verdict_apply_actions "$actions_json" 2>/dev/null || true
+  fi
+
+  # Advance per-session pointer so this verdict is not re-banner-ed.
+  _coord_phase4_advance_verdict_pointer "$mediator_verdict"
+
+  coord_log_event kind=MEDIATOR_INLINE_VERDICT_APPLIED \
+    file="$file" verdict_path="$mediator_verdict" pending_ts="$pending_ts" || true
+
+  local mediator_msg mediator_action
+  mediator_msg=$(jq -r '.message_to_caller // ""' "$mediator_verdict" 2>/dev/null) || mediator_msg=""
+  mediator_action=$(jq -r '.action_type // "?"' "$mediator_verdict" 2>/dev/null) || mediator_action="?"
+
+  # Compose banner: "Critical drift on FILE -> Mediator: ACTION; <message_to_caller>".
+  printf 'Critical drift on %s -> Mediator: %s; %s' \
+    "$file" "$mediator_action" "$mediator_msg"
+  return 0
+}
+
+# _coord_phase4_run_pipeline <file> <stored_hash> <current_hash>
+#   Returns banner text on stdout (may be empty for SAFE) and rc=0
+#   on pipeline success; rc=1 on pipeline failure (caller falls back
+#   to Phase 1 warning text).
+_coord_phase4_run_pipeline() {
+  local file="$1" rhash="$2" chash="$3"
+
+  coord_log_event kind=VALIDATOR_PIPELINE_STARTED \
+    file="$file" read_hash="$rhash" current_hash="$chash" || true
+
+  # Stage 1: cache lookup.
+  local cache_hit
+  cache_hit=$(coord_validator_cache_lookup "$file" "$rhash" "$chash" 2>/dev/null) \
+    || cache_hit=""
+  if [ -n "$cache_hit" ]; then
+    local cached_verdict cached_summary
+    cached_verdict=$(printf '%s' "$cache_hit" | awk -F'\t' '{print $1}')
+    cached_summary=$(printf '%s' "$cache_hit" | awk -F'\t' '{print $3}')
+    case "$cached_verdict" in
+      SAFE)
+        # Silent — no banner contribution.
+        return 0
+        ;;
+      MINOR)
+        printf 'Drift on %s: %s. Validator classified as MINOR. Proceeding.' \
+          "$file" "$cached_summary"
+        return 0
+        ;;
+      *)
+        # Defensive: cache should never store CRITICAL. Treat as MISS.
+        ;;
+    esac
+  fi
+
+  # Stage 2: pre-filter.
+  local prefilter_out
+  prefilter_out=$(coord_validator_prefilter "${SESSION_ID:-unknown}" "$file" "$rhash" "$chash" 2>/dev/null) \
+    || prefilter_out=""
+  case "$prefilter_out" in
+    safe:*)
+      # Cache the SAFE verdict + return silent.
+      coord_validator_cache_write "$file" "$rhash" "$chash" "SAFE" "prefilter" 2>/dev/null || true
+      return 0
+      ;;
+    escalate:*|"")
+      # Fall through to validator agent spawn.
+      ;;
+  esac
+
+  # Stage 3: validator agent spawn.
+  local verdict_path
+  verdict_path=$(coord_validator_spawn "${SESSION_ID:-unknown}" "$file" "$rhash" "$chash" 2>/dev/null) \
+    || verdict_path=""
+  if [ -z "$verdict_path" ] || [ ! -f "$verdict_path" ]; then
+    coord_log_event kind=VALIDATOR_PIPELINE_FAILED file="$file" \
+      reason=validator_spawn_failed || true
+    return 1
+  fi
+
+  local agent_verdict agent_summary
+  agent_verdict=$(jq -r '.verdict // ""' "$verdict_path" 2>/dev/null) || agent_verdict=""
+  agent_summary=$(jq -r '.diff_summary // ""' "$verdict_path" 2>/dev/null) || agent_summary=""
+
+  case "$agent_verdict" in
+    SAFE)
+      coord_validator_cache_write "$file" "$rhash" "$chash" "SAFE" "validator_agent" 2>/dev/null || true
+      coord_log_event kind=VALIDATOR_VERDICT_SAFE file="$file" verdict_path="$verdict_path" || true
+      return 0
+      ;;
+    MINOR)
+      coord_validator_cache_write "$file" "$rhash" "$chash" "MINOR" "validator_agent" "$agent_summary" 2>/dev/null || true
+      coord_log_event kind=VALIDATOR_VERDICT_MINOR file="$file" verdict_path="$verdict_path" \
+        diff_summary="$agent_summary" || true
+      printf 'Drift on %s: %s. Validator classified as MINOR. Proceeding.' \
+        "$file" "$agent_summary"
+      return 0
+      ;;
+    CRITICAL)
+      # Synchronous Mediator inline path. CRITICAL is NEVER cached.
+      _coord_phase4_handle_critical "$file" "$rhash" "$chash" "$verdict_path"
+      return $?
+      ;;
+    *)
+      coord_log_event kind=VALIDATOR_PIPELINE_FAILED file="$file" \
+        reason=unknown_verdict verdict="$agent_verdict" || true
+      return 1
+      ;;
+  esac
+}
+
+# _coord_phase4_phase1_fallback <file> <reason>
+#   Phase 1 warning text for a single drifted file (used when pipeline
+#   fails or for non-classifiable drifts e.g. file deleted).
+_coord_phase4_phase1_fallback() {
+  local file="$1" reason="$2"
+  printf 'Drift on %s (%s). Pipeline unavailable; consider re-reading before proceeding.' \
+    "$file" "$reason"
+}
 
 # Render a humane "N min ago" / "N sec ago" string from an ISO-8601
 # timestamp. Falls back to the raw timestamp on parse failure. Bash 3.2
@@ -192,7 +449,18 @@ fi
 # Always log the intent-to-write before any branching.
 coord_log_event kind=WRITE tool="$TOOL_NAME" file="$TARGET" source=pre_tool_use_write
 
-# --- (3) Stale-read warning walk (Phase 1 behavior preserved) -------------
+# --- (3) Stale-read pipeline (Phase 4 / T4.06) ----------------------------
+# For each drifted file: cache → pre-filter → validator agent →
+# (CRITICAL only) inline Mediator. Banner accumulates per-file outcomes.
+# Non-classifiable drifts (file deleted, hash failed, SKIPPED_LARGE)
+# fall back to a Phase 1 warning line. Pipeline failures
+# (validator/mediator spawn fail) emit Phase 1 warning lines and
+# proceed — fail-open per CLAUDE.md §A.5/§A.6.
+#
+# Phase 4 invariant: this block emits NO permissionDecision: deny.
+# CRITICAL → Mediator → lockdown (when scope is system-wide) routes
+# through the existing lockdown gate at line 188. Phase 3 two-location
+# deny invariant preserved.
 ENTRIES_TSV=$(jq -r --arg sid "$SESSION_ID" '
   (.read_sets[$sid].reads // [])
   | map(select((.is_latest // false) == true and ((.superseded_by_head_change // false) == false)))
@@ -201,9 +469,8 @@ ENTRIES_TSV=$(jq -r --arg sid "$SESSION_ID" '
 ' "$STATE" 2>/dev/null || printf '')
 
 STALE_BANNER=""
+BANNER_LINES=""
 if [ -n "$ENTRIES_TSV" ]; then
-  STALE_LINES=""
-  STALE_COUNT=0
   OLD_IFS="$IFS"
   IFS='
 '
@@ -214,29 +481,68 @@ if [ -n "$ENTRIES_TSV" ]; then
     stored=$(printf '%s' "$entry" | awk -F'\t' '{print $2}')
     [ -z "$path" ] && continue
 
-    reason=""
+    # Compute current state + classify drift kind.
+    drift_kind=""           # one of: deleted | skipped_large | hash_failed | modified | unchanged
+    current=""
     if [ ! -e "$path" ]; then
-      reason="file deleted since read"
+      drift_kind="deleted"
     elif [ "$stored" = "SKIPPED_LARGE" ]; then
-      reason="large-file read — treated as stale (SKIPPED_LARGE)"
+      drift_kind="skipped_large"
     else
       current=$(coord_hash_file "$path" 2>/dev/null || printf '')
       if [ -z "$current" ]; then
-        reason="hash failed (unreadable?)"
+        drift_kind="hash_failed"
       elif [ "$current" != "$stored" ]; then
-        reason="modified since read"
+        drift_kind="modified"
+      else
+        drift_kind="unchanged"
       fi
     fi
 
-    if [ -n "$reason" ]; then
-      STALE_LINES="$STALE_LINES- $path ($reason)"$'\n'
-      STALE_COUNT=$((STALE_COUNT + 1))
-    fi
+    case "$drift_kind" in
+      unchanged|"")
+        # No drift; nothing to classify.
+        continue
+        ;;
+      modified)
+        # Real drift — run the pipeline. Use `if` to capture rc
+        # reliably under set -e (the `var=$(...) || alt; rc=$?`
+        # pattern always reads rc=0 from the `||` branch in
+        # bash 3.2; CLAUDE.md §A.13 lesson #2).
+        line=""
+        if line=$(_coord_phase4_run_pipeline "$path" "$stored" "$current"); then
+          :
+        else
+          line=$(_coord_phase4_phase1_fallback "$path" "modified since read; pipeline failed")
+        fi
+        if [ -n "$line" ]; then
+          BANNER_LINES="$BANNER_LINES- $line"$'\n'
+        fi
+        ;;
+      deleted)
+        line=$(_coord_phase4_phase1_fallback "$path" "file deleted since read")
+        BANNER_LINES="$BANNER_LINES- $line"$'\n'
+        coord_log_event kind=STALE_READ_WARNED tool="$TOOL_NAME" \
+          file="$path" stale_kind=deleted || true
+        ;;
+      skipped_large)
+        line=$(_coord_phase4_phase1_fallback "$path" "large-file read; pre-filter ESCALATEs unconditionally and validator has no snapshot")
+        BANNER_LINES="$BANNER_LINES- $line"$'\n'
+        coord_log_event kind=STALE_READ_WARNED tool="$TOOL_NAME" \
+          file="$path" stale_kind=skipped_large || true
+        ;;
+      hash_failed)
+        line=$(_coord_phase4_phase1_fallback "$path" "hash failed; file unreadable")
+        BANNER_LINES="$BANNER_LINES- $line"$'\n'
+        coord_log_event kind=STALE_READ_WARNED tool="$TOOL_NAME" \
+          file="$path" stale_kind=hash_failed || true
+        ;;
+    esac
   done
 
-  if [ "$STALE_COUNT" -gt 0 ]; then
-    STALE_BANNER="Coord stale-read warning: $STALE_COUNT file(s) you previously read have changed:"$'\n'"${STALE_LINES%$'\n'}"$'\n'"This write ($TOOL_NAME on $TARGET) is being allowed, but your earlier plan may be based on outdated content. Consider re-reading before proceeding. Phase 2 still warns rather than denies for stale reads; the Phase 4 validator agent will classify diffs."
-    coord_log_event kind=STALE_READ_WARNED tool="$TOOL_NAME" file="$TARGET" stale_count="$STALE_COUNT"
+  if [ -n "$BANNER_LINES" ]; then
+    STALE_BANNER="Coord drift report ($TOOL_NAME on $TARGET):"$'\n'"${BANNER_LINES%$'\n'}"
+    coord_log_event kind=VALIDATOR_PIPELINE_COMPLETED tool="$TOOL_NAME" file="$TARGET" || true
   fi
 fi
 
@@ -301,14 +607,10 @@ fi
 coord_log_event kind=LOCK_ACQUIRED tool="$TOOL_NAME" file="$TARGET" acquired_at="$NOW"
 [ -n "$STALE_BANNER" ] && emit_additional_context "$STALE_BANNER"
 
-# PHASE-4 UPGRADE POINT:
-#   When the validation subagent lands, on stale-read-detected:
-#     (a) write .coord/validation/<session_id>.json with payload
-#         {tool, file, old_hash, current_hash, prompt_text} so the
-#         validator agent hook can classify the diff as SAFE / MINOR /
-#         CRITICAL on the next PreToolUse(Write|Edit) cycle.
-#     (b) read back the verdict (written by validator_agent.md) and
-#         escalate to deny only when verdict == CRITICAL.
-#   See IMPLEMENTATION_PLAN.md §2 Decision 2.16 + §5 Phase 4.
+# Phase 4 / T4.06: pipeline integration is ABOVE this point (in the
+# stale-read walk at lines 195-241 area). The historical PHASE-4
+# UPGRADE POINT comment at this site has been removed because the
+# integration is no longer post-acquire — it is per-file inside the
+# stale-read walk per PR-PHASE4-01 ambiguity disposition #1.
 
 exit 0
