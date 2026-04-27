@@ -19,7 +19,7 @@ teardown() {
 @test "atomic: template emits valid empty JSON with required keys" {
   run "$A" template
   [ "$status" -eq 0 ]
-  run bash -c "'$A' template | jq -e 'has(\"schema_version\") and has(\"sessions\") and has(\"locks\") and has(\"wait_queue\") and has(\"read_sets\")'"
+  run bash -c "'$A' template | jq -e 'has(\"schema_version\") and has(\"sessions\") and has(\"locks\") and has(\"wait_queues\") and has(\"read_sets\")'"
   [ "$status" -eq 0 ]
   [ "$output" = "true" ]
 }

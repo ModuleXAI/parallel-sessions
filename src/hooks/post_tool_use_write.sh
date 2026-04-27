@@ -155,7 +155,7 @@ coord_log_event kind=LOCK_RELEASED source=post_tool_use_write \
 # any tool call.
 coord_notify_lock_release_waiters "$SESSION_ID" "$TARGET" "$LOCK_ACQUIRED" "$NOW"
 
-# Phase 5 will replace this best-effort scan with an explicit wait_queue
+# Phase 5 will replace this best-effort scan with an explicit wait_queues
 # FIFO + diff-summary content; Phase 2's notification has no diff yet.
 
 exit 0

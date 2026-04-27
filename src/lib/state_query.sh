@@ -25,7 +25,7 @@ coord_state_dump() {
   else
     jq -n '{
       schema_version: "1.0",
-      sessions: {}, locks: {}, wait_queue: {}, read_sets: {},
+      sessions: {}, locks: {}, wait_queues: {}, read_sets: {},
       notifications: {}, self_tasks: {}, anomaly_votes: {}, task_graph: {}
     }'
   fi

@@ -49,7 +49,7 @@ cmd_status() {
   schema=$(jq -r '.schema_version' "$(state_file)" 2>/dev/null || printf '?')
   active_count=$(jq -r '[.sessions[]|select(.state=="ACTIVE")]|length' "$(state_file)" 2>/dev/null || printf '0')
   locks=$(jq -r '.locks | length' "$(state_file)" 2>/dev/null || printf '0')
-  wait_q=$(jq -r '[.wait_queue[]|length]|add // 0' "$(state_file)" 2>/dev/null || printf '0')
+  wait_q=$(jq -r '[.wait_queues[]|length]|add // 0' "$(state_file)" 2>/dev/null || printf '0')
   pending_self=$(jq -r '[.self_tasks[]|length]|add // 0' "$(state_file)" 2>/dev/null || printf '0')
   pending_valid=$(ls "$COORD_DIR/validation" 2>/dev/null | wc -l | tr -d ' ')
 
@@ -62,7 +62,7 @@ cmd_status() {
   else
     info "  locks: (none)"
   fi
-  info "  wait_queue:  $wait_q waiter(s)"
+  info "  wait_queues: $wait_q waiter(s)"
   info "  self_tasks:  $pending_self pending"
   info "  validation:  $pending_valid pending"
 
