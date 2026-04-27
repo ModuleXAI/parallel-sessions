@@ -86,26 +86,44 @@ _coord_wq_flock_timeout() {
   printf '%s' "${COORD_WAIT_QUEUE_FLOCK_TIMEOUT:-5}"
 }
 
-# _coord_cycle_detect_or_stub <sid>
-#   Phase 5 T5.02 ships a stub. T5.05 will replace this with a real
-#   bipartite DFS in lib/cycle_detection.sh. The stub never reports a
-#   cycle; it logs an observability event so we can confirm the
-#   trigger wiring fires without invoking the real detector.
-#
-#   When T5.05 lands, this stub is removed and the function call
-#   resolves to the lib/cycle_detection.sh implementation.
+# _coord_cycle_detect_or_stub <sid> <file> <depth>
+#   Phase 5 T5.05 wiring. When lib/cycle_detection.sh is sourced,
+#   forward to the real detector + (on cycle hit) emit the
+#   cycle_detected pending entry + spawn Mediator inline. When the
+#   detector lib is absent (e.g., minimal install), emit the legacy
+#   T5.02 placeholder so the trigger wiring stays observable.
 _coord_cycle_detect_or_stub() {
   local sid="$1" file="$2" depth="$3"
   if command -v coord_cycle_detect >/dev/null 2>&1; then
-    # Real detector available (T5.05+). Forward.
-    coord_cycle_detect "$sid"
-    return $?
+    local cycle_json
+    cycle_json=$(coord_cycle_detect "$sid" 2>/dev/null) || cycle_json=""
+    if [ -n "$cycle_json" ]; then
+      # Cycle found — write pending entry + spawn Mediator inline
+      # synchronously (mirrors the Phase 4 critical_drift pattern per
+      # PR-PHASE4-02 + Concern B). T5.06 will integrate this with the
+      # full Mediator verdict-apply pipeline; T5.05 ships the
+      # producer half (pending entry write).
+      if command -v coord_cycle_emit_pending >/dev/null 2>&1; then
+        local pending_ts
+        pending_ts=$(coord_cycle_emit_pending "$cycle_json" 2>/dev/null) \
+          || pending_ts=""
+        if [ -n "$pending_ts" ] \
+           && command -v coord_mediator_spawn >/dev/null 2>&1; then
+          # Synchronous Mediator spawn. Best-effort: failures
+          # surface via MEDIATOR_SPAWN_FAILED events; do not block
+          # the enqueue-caller.
+          coord_mediator_spawn "$pending_ts" 1 >/dev/null 2>&1 || true
+        fi
+      fi
+    fi
+    return 0
   fi
-  # Stub path — emit observability event; return empty (no cycle).
+  # Stub path — detector unavailable; emit observability event so the
+  # trigger wiring is still visible.
   coord_log_event kind=CYCLE_DETECTION_SKIPPED_T5_05_PENDING \
     source=wait_queue_enqueue session="$sid" file="$file" \
     depth_at_enqueue="$depth" \
-    note="cycle_detection.sh not yet implemented (T5.05 deferred)"
+    note="cycle_detection.sh not sourced; trigger fired but no detector available"
   return 0
 }
 

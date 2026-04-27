@@ -78,7 +78,9 @@ Every Validator invocation MUST write exactly one verdict file at
   "spawn_metadata": {
     "duration_ms": <int — spawn helper injects measured wall-clock>,
     "model": "<model name, e.g., claude-haiku-4-5-20251001>",
-    "spawn_mode": "no_bare"
+    "spawn_mode": "no_bare",
+    "spawn_session_id": "<UUID — spawn helper injects from claude -p top-level session_id>",
+    "total_cost_usd": <float — spawn helper injects from claude -p .total_cost_usd; Phase 7 cost-tracking source>
   }
 }
 ```
