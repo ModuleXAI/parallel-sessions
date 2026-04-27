@@ -40,6 +40,8 @@ LIB_DIR="$(cd "$HOOK_DIR/../lib" && pwd)"
 . "$LIB_DIR/notify_waiters.sh"
 # shellcheck disable=SC1091
 . "$LIB_DIR/lockdown.sh"
+# shellcheck disable=SC1091
+[ -f "$LIB_DIR/task_processor.sh" ] && . "$LIB_DIR/task_processor.sh"
 # T5.04 / PR-PHASE5-02 §5: notify_waiters' 4-tier diff_summary chain
 # uses validator_cache (tier 2), validator_prefilter + read_snapshots
 # (tier 3), and hash (tier 2/3 inputs). Source defensively — present
@@ -120,12 +122,21 @@ fi
 # §5).
 LOCK_TSV=$(jq -r --arg f "$TARGET" '
   (.locks[$f] // {}) as $L
-  | [($L.session // ""), ($L.acquired_at // ""), ($L.latest_validator_verdict_ts // "")]
+  | [
+      ($L.session // ""),
+      ($L.acquired_at // ""),
+      ($L.latest_validator_verdict_ts // ""),
+      (($L.tasks // []) | length)
+    ]
   | @tsv
 ' "$STATE" 2>/dev/null || printf '')
 LOCK_HOLDER=$(printf '%s' "$LOCK_TSV" | awk -F'\t' '{print $1}')
 LOCK_ACQUIRED=$(printf '%s' "$LOCK_TSV" | awk -F'\t' '{print $2}')
 LOCK_VERDICT_TS=$(printf '%s' "$LOCK_TSV" | awk -F'\t' '{print $3}')
+LOCK_TASK_COUNT=$(printf '%s' "$LOCK_TSV" | awk -F'\t' '{print $4}')
+case "$LOCK_TASK_COUNT" in
+  ''|*[!0-9]*) LOCK_TASK_COUNT=0 ;;
+esac
 
 if [ -z "$LOCK_HOLDER" ]; then
   # No lock to release — pre-hook may have failed atomic acquire; silent allow.
@@ -141,12 +152,41 @@ if [ "$LOCK_HOLDER" != "$SESSION_ID" ]; then
   exit 0
 fi
 
-# PHASE-6 UPGRADE POINT:
-#   Before deleting the lock, process locks[$TARGET].tasks[] in order:
-#     for each task: inject additionalContext describing it; capture
-#     Claude's Edit; record outcome (status / diff / affected_lines);
-#     archive into sessions_history. See plan §3.7.2 + §5 Phase 6.
-#   Phase 2's release path is task-less: locks[$TARGET].tasks is always [].
+# Phase 6 T6.05 task-processor invocation: process
+# locks[$TARGET].tasks[] BEFORE the lock-deletion atomic_edit so we
+# can read each task's anchor + opener while the lock entry still
+# exists. The processor removes processed tasks from .tasks[] in
+# its own atomic edits + appends per-task TASK_OUTCOME notifications
+# to .notifications[<opener>][$TARGET]. Errors inside the processor
+# are logged via TASK_PROCESSOR_RUN events; never block the post-
+# hook critical path. When task_processor.sh isn't sourced (minimal
+# install pre-T6.05), the function call below is skipped via the
+# command -v guard — preserves Phase 2 behavior intact.
+#
+# Performance: task_count was captured in LOCK_TSV's 4th column
+# above. When tasks[] is empty (the dominant case in normal flow),
+# skip the processor invocation entirely — saves 2 jq calls
+# (EDIT_START/END parse + processor's internal queue read) on the
+# post-hook critical path. Phase 5 timing-sensitive tests (e.g.,
+# T5.08 S2.b polling-fallback wake-up <600ms) flake under added
+# latency; the empty-queue fast-path eliminates the regression.
+if [ "$LOCK_TASK_COUNT" != "0" ] \
+   && command -v coord_task_processor_run >/dev/null 2>&1; then
+  EDIT_START=$(printf '%s' "$INPUT" | jq -r '
+    .tool_response.start_line
+    // .tool_input.start_line
+    // 0
+  ' 2>/dev/null || printf '0')
+  EDIT_END=$(printf '%s' "$INPUT" | jq -r '
+    .tool_response.end_line
+    // .tool_input.end_line
+    // 0
+  ' 2>/dev/null || printf '0')
+  case "$EDIT_START" in ''|*[!0-9]*) EDIT_START=0 ;; esac
+  case "$EDIT_END"   in ''|*[!0-9]*) EDIT_END=0   ;; esac
+  coord_task_processor_run "$TARGET" "$SESSION_ID" \
+    "$EDIT_START" "$EDIT_END" 2>/dev/null || true
+fi
 
 NOW=$(coord_now_iso8601)
 if ! coord_atomic_edit "$STATE" \
