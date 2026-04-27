@@ -84,9 +84,30 @@ coord_notify_lock_release_waiters() {
     return 0
   fi
 
-  # Collect unique denied-session IDs in the hold window. jq filter
-  # walks each line; treats missing/empty fields safely. Output is
-  # newline-separated session IDs, deduplicated.
+  # PR-PHASE5-02 §2: wait_queues[<path>] is the authoritative waiter
+  # source (Phase 5 pivot from Phase 2 events.jsonl LOCK_DENIED scan).
+  # The events.jsonl scan remains in place (commented below) ONLY as
+  # the fallback used by Phase 2 paths that have not yet enqueued —
+  # the union covers both queue-driven waiters AND legacy denied
+  # sessions whose presence in the queue cannot be guaranteed.
+  #
+  # T5.04 will:
+  #   - delete the events.jsonl scan entirely (full pivot)
+  #   - replace the wake_file `:` (touch) below with a real diff_summary
+  #     write via .coord/validator/verdict/<ts>.json lookup
+  #
+  # T5.03 ships the wake_file producer stub: every queued waiter on
+  # <path> gets a wake_file write with a fixed string so coord wait
+  # consumers can be exercised end-to-end before T5.04 lands.
+
+  local waiters_queue_json
+  waiters_queue_json=$(jq -c --arg p "$path" \
+      '[ .wait_queues[$p][]? | {session: .session_id, wake_file: .wake_file} ]' \
+      "$state" 2>/dev/null || printf '[]')
+
+  # Phase 2 events.jsonl scan (legacy producer side). KEPT in T5.03 as
+  # a complementary channel for non-queued denied sessions; T5.04
+  # deletes per pin-point (c-2).
   local waiters_json
   waiters_json=$(jq -sc \
       --arg path "$path" \
@@ -107,6 +128,27 @@ coord_notify_lock_release_waiters() {
   # Empty array → nothing to do.
   local n
   n=$(printf '%s' "$waiters_json" | jq -r 'length' 2>/dev/null || printf '0')
+  local n_queue
+  n_queue=$(printf '%s' "$waiters_queue_json" | jq -r 'length' 2>/dev/null || printf '0')
+
+  # T5.03 stub wake_file producer (T5.04 replaces with real
+  # diff_summary). Writes a fixed "modified by <holder>" line to every
+  # queued waiter's wake_file, exercising the consumer-side fswatch /
+  # inotifywait / polling path end-to-end.
+  if [ "${n_queue:-0}" -gt 0 ]; then
+    local stub_summary="modified by ${holder:0:8}"
+    local wq_idx wq_wake
+    wq_idx=0
+    while [ "$wq_idx" -lt "$n_queue" ]; do
+      wq_wake=$(printf '%s' "$waiters_queue_json" \
+        | jq -r --argjson i "$wq_idx" '.[$i].wake_file // ""' 2>/dev/null)
+      if [ -n "$wq_wake" ] && [ -e "$wq_wake" ]; then
+        printf '%s\n' "$stub_summary" >"$wq_wake" 2>/dev/null || true
+      fi
+      wq_idx=$((wq_idx + 1))
+    done
+  fi
+
   if [ "${n:-0}" -lt 1 ]; then
     return 0
   fi

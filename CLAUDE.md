@@ -417,16 +417,31 @@ The watchdog NEVER returns `alive` solely on activity/lock signals — Signal 1 
 
 **Passive reliability:** `[BEST-EFFORT]` — you must notice and act on the reminder. The hook will surface it, but whether you return to the file is your decision. Archive as `SKIPPED` is the fallback.
 
-### B.8 On passive waiting (polling cadence)
+### B.8 On passive waiting (event-driven wake-up)
 
 **Rule:** Passive wait is the fallback when delegation and self-delegation are not appropriate (e.g., the blocked edit is complex, you have no other productive work). Issue:
-> `Bash: coord wait <file> --timeout 600`
+> `Bash: coord wait <file> --timeout 570`
 
-**Enforcement:** `[HOOK-ENFORCED]` for the polling cadence (30s → 60s → 120s), the wake semantics (lock-release touches the wake file; `coord wait` exits), and the timeout.
+**Enforcement:** `[HOOK-ENFORCED]` for the FIFO ordering, the event-driven wake (lock-release writes diff_summary to your wake_file; `coord wait` exits with that text on stdout), and the timeout.
 
-**What happens on timeout:** `coord wait` exits non-zero; you receive "timeout after Ns" on stdout. Next step is usually to ask the user (the coordination system has done everything it can; the problem is human-scale).
+**Phase 5 / PR-PHASE5-02 wake-up backend (T5.03):**
+1. `coord wait <path>` enqueues your session into `wait_queues[<path>]` (FIFO; per-file flock); the CLI captures the per-(session, file) wake_file path.
+2. The wake_file is watched via the platform-appropriate backend, auto-detected at install time and recorded in `.coord/config.json::wait_backend`:
+   - **macOS:** `fswatch` (preferred); polling fallback if absent.
+   - **Linux:** `inotifywait` (preferred); `fswatch` second; polling fallback if neither installed.
+   - **Other Unix:** 250 ms wake_file mtime polling.
+3. On lock release, the holder's hook (`post_tool_use_write.sh` / `stop.sh` via `lib/notify_waiters.sh`) writes a one-line diff_summary into your wake_file. The watcher fires; `coord wait` reads the content (with a 50 ms grace re-read for the create-vs-write race) and prints it on stdout for your `additionalContext`.
+4. If the wake_file is empty on read, the fallback string is `"modified by <session_id_prefix>"` — semantically correct (you know the file changed) even when the diff_summary computation is degraded.
 
-**Cadence rationale:** Starts at 30s to avoid tight polling; doubles at 5 min (wait counter ≥ 10), doubles again at 15 min (counter ≥ 20) to be nice to other work. Max wait defaults to 30 min (`wait_max_seconds`).
+**SessionStart polling-mode warning:** if `wait_backend` resolves to `polling`, the SessionStart banner appends an `additionalContext` line recommending `brew install fswatch` (macOS) or `apt install inotify-tools` (Linux) for sub-100 ms wake-up latency. F-001 precedent: graceful degradation with operator guidance, never a silent regression.
+
+**What happens on timeout:** `coord wait` exits non-zero with `WAIT_TIMEOUT(reason=deadline)`; you receive "timeout after Ns" on stdout, dequeued automatically. Next step is usually to ask the user (the coordination system has done everything it can; the problem is human-scale).
+
+**SIGINT/SIGTERM:** dequeues your session from the wait_queue, kills any backend watcher PID, emits `WAIT_TIMEOUT(reason=interrupted)`, exits 130. Clean shutdown.
+
+**Latency:** sub-100 ms with `fswatch` / `inotifywait`; ≤ 250 ms with the polling fallback. Phase 2's 30s/60s/120s polling cadence is fully superseded by the event-driven flow; the 250 ms cadence is preserved only in the no-tooling fallback.
+
+**`wait_max_seconds` bound:** clamped to [30, 570] per Decision 2.20; default 570 sits below Claude Code's 600 s Bash-tool ceiling.
 
 ### B.9 Edge-case rules
 

@@ -167,6 +167,8 @@ materialize_coord() {
            "$COORD_DIR/watchdog" \
            "$COORD_DIR/watchdog/checking" \
            "$COORD_DIR/read_snapshots" \
+           "$COORD_DIR/wait_queues" \
+           "$COORD_DIR/wakers" \
            "$COORD_DIR/hooks" \
            "$COORD_DIR/lib" \
            "$COORD_DIR/bin" \
@@ -236,7 +238,7 @@ materialize_coord() {
   # schema_version (single-line; Decision 2.9).
   printf '1.0\n' >"$COORD_DIR/schema_version"
 
-  # config.json (plan §3.6).
+  # config.json (plan §3.6 + PR-PHASE5-02 §D wait_backend).
   if [ ! -s "$COORD_DIR/config.json" ] || [ "$MODE" = repair ]; then
     cat >"$COORD_DIR/config.json" <<'JSON'
 {
@@ -248,6 +250,7 @@ materialize_coord() {
   "read_set_cap_per_session": 200,
   "wait_poll_schedule_seconds": [30, 60, 120],
   "wait_max_seconds": 570,
+  "wait_backend": "auto",
   "max_task_chain_depth": 3,
   "max_tasks_per_lock": 5,
   "max_anchor_window_lines": 10,
@@ -255,6 +258,34 @@ materialize_coord() {
   "mediator_enabled": true
 }
 JSON
+  fi
+
+  # PR-PHASE5-02 §4: detect wake-event backend (fswatch / inotifywait /
+  # polling) and bake the resolved value into config.json. Auto-detection
+  # runs at install + --repair so an admin install on a fresh host gets
+  # the right backend without an extra step. Records WAIT_BACKEND_DETECTED
+  # for the audit trail (idempotent at repair: re-emits with current
+  # detection result).
+  if [ -f "$COORD_DIR/lib/wait_backend.sh" ] && [ -f "$COORD_DIR/lib/log_event.sh" ]; then
+    local _wb_backend _wb_platform _wb_tmp
+    # shellcheck disable=SC1091
+    . "$COORD_DIR/lib/log_event.sh"
+    # shellcheck disable=SC1091
+    . "$COORD_DIR/lib/wait_backend.sh"
+    _wb_backend=$(coord_wait_backend_detect)
+    _wb_platform=$(coord_wait_backend_platform)
+    _wb_tmp="$COORD_DIR/config.json.wb.$$"
+    if jq --arg b "$_wb_backend" '.wait_backend = $b' \
+         "$COORD_DIR/config.json" >"$_wb_tmp" 2>/dev/null; then
+      mv "$_wb_tmp" "$COORD_DIR/config.json"
+    else
+      rm -f "$_wb_tmp" 2>/dev/null || true
+    fi
+    coord_log_event kind=WAIT_BACKEND_DETECTED \
+      source=install \
+      backend="$_wb_backend" \
+      platform="$_wb_platform" \
+      mode="$MODE" 2>/dev/null || true
   fi
 
   # sessions.json — initialize only if missing or repair.

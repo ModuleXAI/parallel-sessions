@@ -252,24 +252,29 @@ cmd_install() {
   exec "$src_install" "$@"
 }
 
-# Phase 2 T2.03: passive wait for a lock to release.
+# Phase 2 T2.03 + Phase 5 T5.03: passive wait for a lock to release.
 #   coord wait <path> [--timeout N]
-# Behavior:
+# Behavior (Phase 5 / PR-PHASE5-02):
 #   - Clamps --timeout to [30, 570] per Decision 2.20 / PR-PHASE0-01;
 #     a clamped request emits a WAIT_CLAMPED event with requested + applied.
-#   - Polls every 250 ms (4 polls/sec) until either: (a) the lock on
-#     <path> is gone or held by THIS session → exit 0, emit WAIT_RELEASED;
-#     (b) the timeout deadline is reached → exit 1, emit WAIT_TIMEOUT.
+#   - Phase 5 event-driven flow:
+#       1. Enqueue self into wait_queues[<path>] via lib/wait_queue.sh;
+#          obtain the wake_file path that the lock-release-side producer
+#          will write to.
+#       2. Dispatch on .config.json wait_backend (fswatch / inotifywait /
+#          250 ms polling fallback per PR-PHASE5-02 §4); first invocation
+#          per process emits WAIT_BACKEND.
+#       3. On wake-up, read wake_file content with 50 ms grace re-read
+#          and "modified by <unknown>" empty-fallback (pin-point c-3).
+#       4. Dequeue self; print diff_summary on stdout for caller.
 #   - Instant exits without waiting:
 #       * file is not locked → exit 0 silently (stdout: "lock free")
 #       * file is locked by THIS session → exit 0 silently
-#         (you cannot wait on yourself)
 #   - SIGINT / SIGTERM trap: emit WAIT_TIMEOUT with reason=interrupted,
-#     exit 130 (standard SIGINT exit code) without state corruption.
-#   - Subagent policy (A): coord wait works for any caller. The CLI runs
-#     in the caller's process and reads sessions.json directly; there is
-#     no parent-vs-subagent enforcement here. F-015 captures the
-#     alternative (B) for future-Phase-6 review.
+#     exit 130 (standard SIGINT exit code); SIGINT cleanup dequeues
+#     the waiter from the queue + kills any backend watcher pid.
+#   - Subagent policy (A): coord wait works for any caller. F-015
+#     captures the alternative (B) for Phase 6 review.
 cmd_wait() {
   local path="" timeout_req=570
   while [ $# -gt 0 ]; do
@@ -294,14 +299,18 @@ cmd_wait() {
     timeout_applied=570; clamped=1
   fi
 
-  # Resolve session_id for event logging best-effort. The CLI may run
-  # outside a hook context, in which case SESSION_ID is unset and
-  # log_event will tag events as session=unknown.
+  # shellcheck disable=SC1091
+  . "$LIB_DIR/atomic_write.sh"
   # shellcheck disable=SC1091
   . "$LIB_DIR/log_event.sh"
   # shellcheck disable=SC1091
   . "$LIB_DIR/state_query.sh"
-  : "${SESSION_ID:=unknown}"
+  # shellcheck disable=SC1091
+  . "$LIB_DIR/wait_queue.sh"
+  # shellcheck disable=SC1091
+  . "$LIB_DIR/wait_backend.sh"
+
+  : "${SESSION_ID:=coord-wait-$$}"
   export SESSION_ID
 
   if [ "$clamped" -eq 1 ]; then
@@ -309,22 +318,11 @@ cmd_wait() {
       requested="$timeout_req" applied="$timeout_applied"
   fi
 
-  # Trap SIGINT/SIGTERM for clean exit.
-  local started_iso started_epoch interrupted=0
+  local started_iso started_epoch
   started_iso=$(coord_now_iso8601)
   started_epoch=$(date -u +%s)
-  cleanup_interrupt() {
-    interrupted=1
-    coord_log_event kind=WAIT_TIMEOUT file="$path" \
-      requested="$timeout_req" applied="$timeout_applied" \
-      reason=interrupted \
-      waited_for=$(( $(date -u +%s) - started_epoch ))
-    info "coord wait: interrupted"
-    exit 130
-  }
-  trap cleanup_interrupt INT TERM
 
-  # Instant-exit branches (before any sleep).
+  # Instant-exit branches (before any enqueue / wake_file work).
   local holder
   holder=$(coord_lock_holder "$path")
   if [ -z "$holder" ]; then
@@ -336,33 +334,60 @@ cmd_wait() {
     return 0
   fi
 
-  # Poll loop. 250 ms interval = 4 polls/sec; bounded by timeout_applied.
-  local deadline=$(( started_epoch + timeout_applied ))
-  while :; do
-    local now
-    now=$(date -u +%s)
-    if [ "$now" -ge "$deadline" ]; then
-      coord_log_event kind=WAIT_TIMEOUT file="$path" \
-        requested="$timeout_req" applied="$timeout_applied" \
-        reason=deadline waited_for="$timeout_applied"
-      info "coord wait: timeout after ${timeout_applied}s on $path"
-      return 1
-    fi
+  # Phase 5 enqueue. Returns the wake_file path that the lock-release
+  # producer will write to. Idempotent: re-issuing coord wait for the
+  # same (sid, path) returns the existing wake_file.
+  local wake_file
+  if ! wake_file=$(coord_wait_queue_enqueue "$SESSION_ID" "$path"); then
+    info "coord wait: failed to enqueue on $path (wait_queue rc=$?)" >&2
+    return 1
+  fi
 
-    holder=$(coord_lock_holder "$path")
-    if [ -z "$holder" ] || [ "$holder" = "${SESSION_ID}" ]; then
-      local now_iso waited
-      now_iso=$(coord_now_iso8601)
-      waited=$(( now - started_epoch ))
-      coord_log_event kind=WAIT_RELEASED file="$path" \
-        waited_for="$waited" applied="$timeout_applied" \
-        started_at="$started_iso" released_at="$now_iso"
-      info "coord wait: released after ${waited}s on $path"
-      return 0
-    fi
+  # SIGINT/SIGTERM trap: dequeue self + kill any backend watcher pid.
+  cleanup_interrupt() {
+    coord_log_event kind=WAIT_TIMEOUT file="$path" \
+      requested="$timeout_req" applied="$timeout_applied" \
+      reason=interrupted \
+      waited_for=$(( $(date -u +%s) - started_epoch ))
+    coord_wait_queue_dequeue "$SESSION_ID" "$path" 2>/dev/null || true
+    info "coord wait: interrupted"
+    exit 130
+  }
+  trap cleanup_interrupt INT TERM
 
-    sleep 0.25
-  done
+  # Backend dispatch. coord_wait_for_release reads the resolved
+  # wait_backend from .coord/config.json and runs the matching
+  # event-driven wait loop. First-use event is emitted once per shell
+  # process.
+  local backend
+  backend=$(coord_wait_backend_get)
+  coord_wait_emit_first_use_event "$backend"
+
+  if coord_wait_for_release "$wake_file" "$timeout_applied"; then
+    # Wake-up event observed. Read wake_file content (50 ms grace +
+    # "modified by <unknown>" empty fallback per PR-PHASE5-02 §3).
+    local diff_summary now_iso waited
+    diff_summary=$(coord_wait_read_content "$wake_file" "${holder:0:8}")
+    now_iso=$(coord_now_iso8601)
+    waited=$(( $(date -u +%s) - started_epoch ))
+    coord_log_event kind=WAIT_RELEASED file="$path" \
+      waited_for="$waited" applied="$timeout_applied" \
+      backend="$backend" \
+      started_at="$started_iso" released_at="$now_iso"
+    coord_wait_queue_dequeue "$SESSION_ID" "$path" 2>/dev/null || true
+    # Print diff_summary on stdout for caller's additionalContext.
+    info "coord wait: released after ${waited}s on $path"
+    info "$diff_summary"
+    return 0
+  fi
+
+  # Timeout.
+  coord_log_event kind=WAIT_TIMEOUT file="$path" \
+    requested="$timeout_req" applied="$timeout_applied" \
+    reason=deadline waited_for="$timeout_applied" backend="$backend"
+  coord_wait_queue_dequeue "$SESSION_ID" "$path" 2>/dev/null || true
+  info "coord wait: timeout after ${timeout_applied}s on $path"
+  return 1
 }
 
 usage() {
