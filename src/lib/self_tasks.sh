@@ -18,19 +18,29 @@
 # no slashes; the sanitization is defensive parity with wait_queue.
 #
 # self_tasks[<sid>] schema (sessions.json top-level slot;
-# Decision 2.13 + PR-PHASE6-05 §7):
+# Decision 2.13 + PR-PHASE6-05 §7 + T6.06 additive
+# last_reminded_at field for reminder throttling):
 #   {
 #     "self_tasks": {
 #       "<sid>": [
 #         {
-#           "file":         "/absolute/path/to/file",
-#           "instruction":  "human-readable task description",
-#           "created_at":   "<ISO8601 with ms>",
-#           "prompt_id":    "<sid>-self-<created_at_ms>-<random_4_hex>"
+#           "file":              "/absolute/path/to/file",
+#           "instruction":       "human-readable task description",
+#           "created_at":        "<ISO8601 with ms>",
+#           "prompt_id":         "<sid>-self-<created_at_ms>-<random_4_hex>",
+#           "last_reminded_at":  null | "<ISO8601 with ms>"
 #         }
 #       ]
 #     }
 #   }
+#
+# T6.06 additive field: last_reminded_at — null until first
+# reminder injection by pre_tool_use_any.sh; updated to ISO
+# timestamp on each reminder emission. Throttle window: 5
+# minutes (300s) — coord_self_task_check_reminder_due returns
+# rc 0 only when null OR more than 5 minutes have elapsed.
+# Schema additive; schema_version stays at 1.0 per user T6.04
+# binding (Phase 6 additive-only).
 #
 # Events emitted:
 #   SELF_TASK_OPENED         — coord_self_task_open new entry
@@ -200,14 +210,17 @@ coord_self_task_open() {
       exit 0
     fi
 
-    # Append new entry. Field order per Decision 2.13.
+    # Append new entry. Field order per Decision 2.13 +
+    # T6.06 additive last_reminded_at (null until first
+    # reminder).
     if ! coord_atomic_edit "$state" '
           .self_tasks[$s] = (.self_tasks[$s] // [])
           | .self_tasks[$s] += [{
-              file:        $f,
-              instruction: $ins,
-              created_at:  $cat,
-              prompt_id:   $pid
+              file:             $f,
+              instruction:      $ins,
+              created_at:       $cat,
+              prompt_id:        $pid,
+              last_reminded_at: null
             }]
         ' \
         --arg s   "$sid" \
@@ -468,4 +481,136 @@ coord_self_task_cleanup_session() {
   done <"$out_tmp"
   rm -f "$out_tmp"
   return 0
+}
+
+# ---------------------------------------------------------------
+# Phase 6 T6.06 — Reminder throttling helpers
+# ---------------------------------------------------------------
+
+# coord_self_task_check_reminder_due <sid> <prompt_id>
+#   Decide whether the self-task identified by <prompt_id> in
+#   self_tasks[<sid>] is due for a reminder injection. Throttle
+#   window: 5 minutes (300s). null last_reminded_at OR
+#   (now_ms - last_reminded_at_ms > 300_000) → due.
+#
+#   Returns: 0 due (caller should inject reminder)
+#            1 not due (within throttle window)
+#            2 prompt_id not found
+coord_self_task_check_reminder_due() {
+  local sid="$1" prompt_id="$2"
+  if [ -z "$sid" ] || [ -z "$prompt_id" ] \
+     || [ -z "${COORD_DIR:-}" ]; then
+    return 2
+  fi
+  local state
+  state=$(_coord_st_state) || return 2
+  [ -f "$state" ] || return 2
+
+  # Lookup the entry. Returns "absent" / "null" / <ISO timestamp>.
+  local last
+  last=$(jq -r --arg s "$sid" --arg pid "$prompt_id" '
+    (.self_tasks[$s] // [])
+    | map(select(.prompt_id == $pid))
+    | if length == 0 then "absent"
+      elif (.[0].last_reminded_at // null) == null then "null"
+      else .[0].last_reminded_at
+      end
+  ' "$state" 2>/dev/null) || last="absent"
+
+  case "$last" in
+    absent) return 2 ;;
+    null)   return 0 ;;
+  esac
+
+  local now_ms last_ms diff
+  now_ms=$(_coord_st_now_ms)
+  last_ms=$(printf '%s' "$last" \
+    | jq -Rr 'sub("\\.\\d+Z$"; "Z") | fromdateiso8601 * 1000' 2>/dev/null) \
+    || last_ms=0
+  case "$last_ms" in
+    ''|*[!0-9]*) last_ms=0 ;;
+  esac
+  diff=$(( now_ms - last_ms ))
+  if [ "$diff" -gt 300000 ]; then
+    return 0
+  fi
+  return 1
+}
+
+# coord_self_task_record_reminder <sid> <prompt_id>
+#   Update self_tasks[<sid>][?(.prompt_id == <pid>)].last_reminded_at
+#   to the current ISO ms timestamp. Idempotent (same caller can
+#   set repeatedly; throttle gate is in check_reminder_due).
+#
+#   Returns: 0 success
+#            1 args missing / atomic_edit failure / prompt_id not found
+#            2 flock timeout
+coord_self_task_record_reminder() {
+  local sid="$1" prompt_id="$2"
+  if [ -z "$sid" ] || [ -z "$prompt_id" ]; then
+    return 1
+  fi
+  if [ -z "${COORD_DIR:-}" ] || [ ! -d "${COORD_DIR}" ]; then
+    return 1
+  fi
+  if ! _coord_st_ensure_dirs; then
+    return 1
+  fi
+
+  local state lock_path timeout
+  state=$(_coord_st_state) || return 1
+  lock_path=$(_coord_st_lock_path "$sid")
+  timeout=$(_coord_st_flock_timeout)
+
+  local now_iso
+  now_iso=$(coord_now_iso8601)
+
+  local out_tmp
+  out_tmp="${COORD_DIR}/self_tasks/.reminder.$$.$(_coord_st_sanitize "$sid").out"
+  : >"$out_tmp"
+
+  (
+    flock -x -w "$timeout" 9 || exit 2
+
+    # Confirm the prompt_id exists.
+    local present
+    present=$(jq -r --arg s "$sid" --arg pid "$prompt_id" \
+      '(.self_tasks[$s] // []) | map(select(.prompt_id == $pid)) | length' \
+      "$state" 2>/dev/null) || present=0
+    case "$present" in
+      ''|*[!0-9]*) present=0 ;;
+    esac
+    if [ "$present" = "0" ]; then
+      printf 'not_found\n' >"$out_tmp"
+      exit 0
+    fi
+
+    if ! coord_atomic_edit "$state" '
+          .self_tasks[$s] = (.self_tasks[$s] // [])
+          | .self_tasks[$s] |= map(
+              if .prompt_id == $pid
+              then .last_reminded_at = $now
+              else .
+              end
+            )
+        ' \
+        --arg s "$sid" --arg pid "$prompt_id" --arg now "$now_iso"; then
+      printf 'atomic_fail\n' >"$out_tmp"
+      exit 0
+    fi
+    printf 'recorded\n' >"$out_tmp"
+    exit 0
+  ) 9>"$lock_path"
+  local rc=$?
+  if [ "$rc" -ne 0 ]; then
+    rm -f "$out_tmp"
+    return "$rc"
+  fi
+  local mode
+  mode=$(awk 'NR==1{print $1}' "$out_tmp" 2>/dev/null)
+  rm -f "$out_tmp"
+  case "$mode" in
+    recorded) return 0 ;;
+    *) return 1 ;;
+  esac
 }

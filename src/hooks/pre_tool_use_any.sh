@@ -51,6 +51,8 @@ LIB_DIR="$(cd "$HOOK_DIR/../lib" && pwd)"
 . "$LIB_DIR/verdict_apply.sh"
 # shellcheck disable=SC1091
 . "$LIB_DIR/mediator_spawn.sh"
+# shellcheck disable=SC1091
+[ -f "$LIB_DIR/self_tasks.sh" ] && . "$LIB_DIR/self_tasks.sh"
 
 coord_resolve_root() {
   if [ -n "${COORD_DIR:-}" ] && [ -d "$COORD_DIR" ]; then
@@ -82,6 +84,36 @@ if COORD_DIR=$(coord_resolve_root 2>/dev/null); then
   export COORD_DIR
 fi
 if coord_subagent_filter "PreToolUse" "$INPUT"; then
+  # Phase 6 T6.06 F-015 disposition (PR-PHASE6-01 + Decision 1):
+  # In subagent context, normally exit 0 silently per Decision
+  # 2.17. The narrow F-015 case is a `Bash: coord wait …`
+  # invocation issued from within a spawned subagent — we
+  # surface a soft-deprecation educational banner pointing the
+  # subagent at parent-session task delegation primitives, then
+  # exit 0. Banner is informational; NO third deny location is
+  # introduced (Decision 6 invariant preserved).
+  F015_TOOL=$(printf '%s' "$INPUT" | jq -r '.tool_name // ""' 2>/dev/null || printf '')
+  if [ "$F015_TOOL" = "Bash" ]; then
+    F015_CMD=$(printf '%s' "$INPUT" | jq -r '.tool_input.command // ""' 2>/dev/null || printf '')
+    # Strip leading whitespace and check for "coord wait" prefix
+    # (case-sensitive). Match either "coord wait" alone or
+    # "coord wait <args>".
+    F015_CMD_TRIM="${F015_CMD#"${F015_CMD%%[! 	]*}"}"
+    case "$F015_CMD_TRIM" in
+      "coord wait"|"coord wait "*)
+        emit_additional_context $'Subagent context detected; `coord wait` is allowed but Phase 6 task delegation primitives via parent session are recommended for tracked workflow. See `coord task-open` and `coord self-delegate` for the parent-session equivalents.'
+        # Read session_id + agent_type directly from INPUT —
+        # SESSION_ID env var has not been populated yet at this
+        # point in the hook flow (the parse happens after the
+        # subagent_filter branch).
+        F015_PARENT=$(printf '%s' "$INPUT" | jq -r '.session_id // ""' 2>/dev/null || printf '')
+        F015_AGENT=$(printf '%s' "$INPUT" | jq -r '.agent_type // ""' 2>/dev/null || printf '')
+        coord_log_event kind=SUBAGENT_COORD_WAIT_BANNER_EMITTED \
+          agent_type="$F015_AGENT" parent_session="$F015_PARENT" \
+          source=pre_tool_use_any 2>/dev/null || true
+        ;;
+    esac
+  fi
   exit 0
 fi
 
@@ -191,6 +223,54 @@ if [ "$HEAD_DRIFTED" = "1" ]; then
     BANNER="$HEAD_NOTE"
   fi
   coord_log_event kind=HEAD_CHANGE source=pre_tool_use_any old_head="$PRIOR_HEAD" new_head="$CURRENT_HEAD"
+fi
+
+# --- Phase 6 T6.06 self-task reminder injection -------------------------
+# PR-PHASE6-02 + Decision 2.13: for each unlocked self-task (file
+# currently unheld OR held by self), emit a reminder banner. Throttled
+# per-task by last_reminded_at field with 5min window to avoid
+# reminder spam on rapid-fire PreToolUse calls. Tasks listed in
+# chronological order (oldest first) for predictability — Decision
+# 2.13 silent on order; chronological is the natural FIFO of the
+# self_tasks[<sid>] array.
+SELF_REMINDER_BANNER=""
+if command -v coord_self_task_check_unlocked >/dev/null 2>&1; then
+  UNLOCKED_JSON=$(coord_self_task_check_unlocked "$SESSION_ID" 2>/dev/null || printf '[]')
+  UNLOCKED_COUNT=$(printf '%s' "$UNLOCKED_JSON" | jq -r 'length' 2>/dev/null || printf '0')
+  case "$UNLOCKED_COUNT" in
+    ''|*[!0-9]*) UNLOCKED_COUNT=0 ;;
+  esac
+  if [ "$UNLOCKED_COUNT" != "0" ]; then
+    SR_IDX=0
+    while [ "$SR_IDX" -lt "$UNLOCKED_COUNT" ]; do
+      SR_TASK=$(printf '%s' "$UNLOCKED_JSON" | jq -c --argjson i "$SR_IDX" '.[$i]' 2>/dev/null)
+      SR_PID=$(printf '%s' "$SR_TASK" | jq -r '.prompt_id' 2>/dev/null)
+      SR_FILE=$(printf '%s' "$SR_TASK" | jq -r '.file' 2>/dev/null)
+      SR_INSTR=$(printf '%s' "$SR_TASK" | jq -r '.instruction' 2>/dev/null)
+      if coord_self_task_check_reminder_due "$SESSION_ID" "$SR_PID" 2>/dev/null; then
+        SR_LINE="reminder: ${SR_FILE} is now free, your self-task pending: '${SR_INSTR}'"
+        if [ -z "$SELF_REMINDER_BANNER" ]; then
+          SELF_REMINDER_BANNER="$SR_LINE"
+        else
+          SELF_REMINDER_BANNER="${SELF_REMINDER_BANNER}"$'\n'"${SR_LINE}"
+        fi
+        coord_self_task_record_reminder "$SESSION_ID" "$SR_PID" 2>/dev/null || true
+        coord_log_event kind=SELF_TASK_REMINDER \
+          session="$SESSION_ID" prompt_id="$SR_PID" \
+          file="$SR_FILE" source=pre_tool_use_any \
+          2>/dev/null || true
+      fi
+      SR_IDX=$((SR_IDX + 1))
+    done
+  fi
+fi
+
+if [ -n "$SELF_REMINDER_BANNER" ]; then
+  if [ -n "$BANNER" ]; then
+    BANNER="$BANNER"$'\n\n'"$SELF_REMINDER_BANNER"
+  else
+    BANNER="$SELF_REMINDER_BANNER"
+  fi
 fi
 
 if [ -n "$BANNER" ]; then
