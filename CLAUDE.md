@@ -157,9 +157,17 @@ You MUST maintain `FINDINGS.md` at the project root. This file captures everythi
 
 **FINDINGS.md is gitignored.**
 
-### A.13 Testing, portability, and subagent-invocation notes (Phase 3 lessons)
+### A.13 Testing, portability, and subagent-invocation notes (Phase 3 + Phase 4 lessons)
 
-These three patterns accumulated during Phase 3 construction. Each surfaced from a real bug and must be the default for future work. They are operational guidance, not architectural decisions — no plan-revision required.
+These patterns accumulated during Phase 3 + Phase 4 construction. Each surfaced from a real bug and must be the default for future work. They are operational guidance, not architectural decisions — no plan-revision required.
+
+**Pre-implementation audit checklist (Phase 4 reinforcement, T4.09 disposition).** Lesson #2 (pipefail capture) hit FOUR times during Phase 4 construction (T4.04 ×2, T4.06 ×1, T4.07 ×1) — all caught pre-commit by tests but the repeat suggests retrospective awareness is not enough. When implementing **spawn helpers, pipeline-integration code, or ship-gate fixtures**, audit the following BEFORE running tests:
+
+- **Pipefail patterns** (lesson #2 below): `ls | sort | wc`, `cat | jq`, `var=$(cmd)` followed by `rc=$?`, `var=$(cmd) || alt` — the last form always reads `rc=0` from the `||` branch in bash 3.2 with set -e + pipefail propagated from sourced libraries. Use `if var=$(cmd); then ...; else ...; fi` for true rc capture, OR explicit `|| <fallback>` per-call. Inspect every `$()`/`|` for the failure modes set -e + pipefail can take.
+- **Event-emission completeness**: when adding pipeline-completion or lifecycle events, ensure every code path (success, partial, failure) emits the appropriate event. Silent paths often miss the audit emission and the gap is only caught when a ship-gate fixture asserts the event count. Surface as a checklist item: "does every return / exit branch emit the lifecycle event?"
+- **Heuristic ambiguity in test assertions**: when assertions match specific sub-cases of broader heuristic categories (e.g., `prefilter_reason=whitespace_only` vs `blank_only` — both indicate trivial-drift SAFE), accept multiple valid outcomes. Otherwise heuristic ordering changes silently break tests.
+
+Four hits during Phase 4 build (T4.04 dead `pre_snapshot=$(ls...)` pipeline + missing jq fallbacks; T4.06 `var=$()` rc-capture + missing `VALIDATOR_PIPELINE_COMPLETED` on SAFE silent path; T4.07 prefilter_reason ambiguity). Pattern requires active checklist application, not retrospective reading.
 
 **1. `perl utime` for portable mtime manipulation in tests** (T3.04 lesson, F-016 family).
 
@@ -225,6 +233,55 @@ Hook scripts or libraries that spawn `claude -p` (today: only the Mediator; futu
 
 These rules apply to any future use of `claude -p` from coord scripts, not just the Mediator. See `src/lib/MEDIATOR_REFERENCE.md` (installed at `.coord/mediator/MEDIATOR_REFERENCE.md`) for the full Mediator-specific contract.
 
+**5. `if var=$(cmd); then ...; else ...; fi` pattern for rc capture under set -e + pipefail** (T4.06 lesson, Phase 4 reinforcement).
+
+The `var=$(failing_command) || alt; rc=$?` form is broken under bash 3.2 + set -e + pipefail (inherited from sourced log_event.sh / atomic_write.sh). The `||` branch always succeeds (rc=0), so the subsequent `rc=$?` reads `0` even when the command failed. The function then proceeds as if the call succeeded, silently dropping the failure path.
+
+```bash
+# WRONG — rc captured from || branch is always 0; failure path never fires:
+result=$(coord_validator_spawn ... 2>/dev/null) || result=""
+rc=$?
+if [ "$rc" -ne 0 ]; then handle_failure; fi   # never executes
+
+# RIGHT — `if var=$(...)` exempts from set -e and dispatches on the
+# subshell's actual rc:
+if result=$(coord_validator_spawn ... 2>/dev/null); then
+  : # success path
+else
+  handle_failure
+fi
+```
+
+Use `if var=$(cmd)` whenever you need to BOTH capture stdout AND act on rc. For commands where stdout is not needed, `if cmd; then ...; else ...; fi` works directly. Per-stage `|| <fallback>` is acceptable when you only need a default value (no failure-path branching needed).
+
+**6. Event-emission audit at every return path** (T4.07 lesson).
+
+When adding lifecycle events to a multi-branch function, the silent-success path is the easiest to miss. Audit by enumerating every `return` / function-exit / loop-iteration-end and confirming each emits the lifecycle event with appropriate payload flags. Test scenarios that assert event counts (not just presence) are the canonical verification.
+
+```bash
+# WRONG — COMPLETED event only fires when banner is non-empty:
+if [ -n "$BANNER_LINES" ]; then
+  STALE_BANNER=...
+  coord_log_event kind=VALIDATOR_PIPELINE_COMPLETED ...
+fi
+
+# RIGHT — emit COMPLETED inside the per-iteration branch with payload
+# flags carrying the disposition; outer banner block only composes
+# the banner from BANNER_LINES.
+case "$drift_kind" in
+  modified)
+    pipeline_ok=1
+    if line=$(_coord_phase4_run_pipeline ...); then : ; else pipeline_ok=0; ...; fi
+    coord_log_event kind=VALIDATOR_PIPELINE_COMPLETED \
+      pipeline_ok="$pipeline_ok" had_banner=$([ -n "$line" ] && printf 1 || printf 0) ...
+    ;;
+esac
+```
+
+The lifecycle-event-completeness audit is part of the lesson #2 pre-implementation checklist above.
+
+These rules apply to any future hook / pipeline / spawn-helper construction. The Phase 4 implementations of `pre_tool_use_write.sh` (T4.06), `lib/validator_spawn.sh` (T4.04), and `phase4_ship_gate` fixtures (T4.07) are the canonical references for the patterns.
+
 ---
 
 ## Part B — Runtime Rules for Coordinated Sessions
@@ -261,9 +318,12 @@ If this banner is absent, you are not in a coordinated session and none of the r
 1. **No lock on the target file:**
    - Validate your `read_sets[<self>].reads[]` for any file where `is_latest: true` and `superseded_by_head_change: false`: compute current `sha256`, compare to stored hash.
      - **All match** → acquire lock (`locks[target] = {session:self, acquired_at, last_refresh_at, tasks:[]}`), update `sessions[self].last_activity_at`, exit 0 (allow).
-     - **Some mismatch** → write `.coord/validation/<self>.json` payload; exit with `permissionDecision: "deny"` + reason `"stale-read-suspected: <files>"`. The validator agent hook runs on the next PreToolUse and sets verdict SAFE/MINOR/CRITICAL:
-       - SAFE/MINOR → remove validation flag; next write attempt proceeds normally.
-       - CRITICAL → remains denied until you `Read` the listed files again (which resets the hash).
+     - **Some mismatch (Phase 4 / T4.06 pipeline)** → for each drifted file, run the 3-stage validator pipeline (cache lookup → pre-filter → validator agent spawn). Per-file disposition:
+       - **SAFE** (silent): no banner contribution; pipeline writes a SAFE entry to `.coord/validator/cache.json` (1h TTL) so subsequent identical drifts are recognized cheaply.
+       - **MINOR**: banner line appended ("Drift on `<file>`: `<diff_summary>`. Validator classified as MINOR. Proceeding."); cache write MINOR with diff_summary.
+       - **CRITICAL**: write `kind=critical_drift` pending entry to `pending.jsonl`; spawn Mediator INLINE (synchronous; ~20–35 s); apply Mediator verdict's `actions[]` via `verdict_apply.sh` (release_lock / evict_session / clear_read_set); advance per-session `last_consumed_verdict` pointer; banner line composed from Mediator's `action_type` + `message_to_caller`. CRITICAL is NEVER cached.
+       - **Pipeline failure** (cache error, validator spawn fail, Mediator spawn fail): per-file Phase 1 fallback line ("Drift on `<file>` (modified since read; pipeline failed). Pipeline unavailable; consider re-reading before proceeding.") — fail-open per CLAUDE.md §A.5.
+   - The hook then continues to lock acquisition. **Phase 4 invariant: validator pipeline emits NO `permissionDecision: deny`.** CRITICAL → Mediator → lockdown (when scope is system-wide) routes through the existing Phase 3 lockdown gate. The two-location deny invariant (lock-held + lockdown active) is preserved through Phase 4.
 
 2. **Lock held by another session:**
    - Exit with `permissionDecision: "deny"` and a `permissionDecisionReason` like:
@@ -280,9 +340,22 @@ If this banner is absent, you are not in a coordinated session and none of the r
 
 ### B.3 Before taking final action (stale-read validation)
 
-**Rule:** There is no separate "before final action" hook. Stale-read validation runs at every write. If you intend to produce a final answer that does not involve a write but is nonetheless consequential (e.g., a report whose content implies file contents unchanged), you may invoke `coord validate-reads` explicitly (Phase 4+).
+**Rule:** There is no separate "before final action" hook. Stale-read validation runs at every write via the Phase 4 pipeline (B.2). If you intend to produce a final answer that does not involve a write but is nonetheless consequential (e.g., a report whose content implies file contents unchanged), you may invoke `coord validate-reads` explicitly (Phase 7+).
 
 **Enforcement:** `[HOOK-ENFORCED]` on writes (see B.2). `[BEST-EFFORT]` on non-write final answers — the hook cannot intercept a plain text response.
+
+### B.3a Validator pipeline operational details (Phase 4 / T4.06)
+
+The 3-stage pipeline at `pre_tool_use_write.sh` is `[HOOK-ENFORCED]` end-to-end. You do not invoke it; it runs automatically when stale-read drift is detected. Operational details for context:
+
+- **Stage 1 — Cache** (`lib/validator_cache.sh`): keyed by `(file, read_hash, current_hash)` triple. TTL: 1 hour for SAFE/MINOR. **CRITICAL is never cached** (every CRITICAL drift must trigger fresh Mediator escalation per PR-PHASE4-04). Opportunistic GC drops expired entries on each write.
+- **Stage 2 — Pre-filter** (`lib/validator_prefilter.sh`): pure-bash deterministic classifier. SAFE on `whitespace_only` / `blank_only` / `comment_only` (the last requires no `"""` / `'''` / triple-backtick markers anywhere in the file — conservative doctrine prevents false-SAFE on lines that may be inside a multi-line string). Files >1 MB or pre-filter timeout >5 s → ESCALATE_TO_AGENT. Doctrine: false-positive ESCALATE on trivial drift is acceptable; false-negative SAFE on real drift is dangerous.
+- **Stage 3 — Validator agent spawn** (`lib/validator_spawn.sh`): `claude -p` subprocess in subscription mode (no `--bare`), with `CLAUDE_COORD=0` + `CLAUDE_CODE_VALIDATOR=1` env. Recursion guard refuses spawn from within a Validator context (depth-1 only — Phase 4 does not exercise peer review; Mediator's depth-2 escalation handles disagreement resolution). Tool restrictions: `--allowedTools "Bash" "Read"` + `--disallowedTools "Write" "Edit" "NotebookEdit" "Task"`. Validator returns SAFE/MINOR/CRITICAL via verdict file at `.coord/validator/verdict/<ts>.json`.
+- **CRITICAL synchronous pathway** (PR-PHASE4-02 + Concern B disposition): when Validator emits CRITICAL, the hook synchronously invokes the Mediator inline; total wall-clock ~60–100 s worst case (validator ~30–60 s + Mediator ~20–35 s). The Bash-tool 600 s ceiling and CLAUDE.md §A.6's 2-second hook-latency target are intentionally exceeded for CRITICAL drift events (~5–10% of stale-read attempts). Justification: a CRITICAL verdict means intervention is needed before the Write proceeds; letting it land defeats the validator's purpose.
+- **Read-snapshot store** (`lib/read_snapshots.sh` / PR-PHASE4-05): `pre_tool_use_read.sh` captures file content at Read time to `.coord/read_snapshots/<sid>/<hash>.txt`. Validator pipeline consumes this content for diff computation + agent prompt context. Files >10 MB (existing `SKIPPED_LARGE` cap) skip snapshot; pre-filter ESCALATEs unconditionally. Snapshots GCed on supersede / session_end / Mediator `evict_session`.
+- **Reference doc**: `.coord/validator/VALIDATOR_REFERENCE.md` (~545 lines) is the canonical technical reference for the spawned Validator. It documents the verdict JSON schema, classification heuristics with worked examples, diff-summary conventions (no apostrophes per F-014), hand-off to Mediator (critical_drift pending entry payload), tool restrictions, and recursion guard rationale.
+
+**What you do:** nothing different. The pipeline runs transparently. If you see a banner like "Drift on `<file>`: ... MINOR. Proceeding." → consider whether the change affects your plan. If you see "Critical drift on `<file>` -> Mediator: ..." → the Mediator has already analyzed; act on its `message_to_caller` text. If you see "Drift on `<file>` (modified since read; pipeline failed). Pipeline unavailable; consider re-reading before proceeding." → the validator infrastructure is degraded; treat as Phase 1 warning and re-read before the operation if the change matters.
 
 ### B.4 Before releasing a lock (task processing + wait-queue notification)
 
@@ -442,7 +515,8 @@ These are cases where Claude sometimes tries to "help" in ways that undermine co
 - **Do not bypass lock denials by using `Bash` to write the file (`echo > foo.ts`, `sed -i`, etc.).** Bash-mediated writes are not tracked and will silently clash with the coordinated lock-holder. The deny message explicitly warns against this.
 - **Do not `rm`, `mv`, or `cp` over a file that is locked by another session.** The coordination system does not hook these. The result is a silent conflict.
 - **Do not invoke `coord reset` reflexively** when a coordination message is confusing. `coord reset` is destructive (clears locks, read-sets). The right response to confusion is `coord status` first, then `coord mediate` if the situation truly is anomalous.
-- **Do not spawn your own validation subagent via the Agent tool to bypass the validator agent hook.** The validator hook runs automatically on hash mismatch; calling your own subagent duplicates cost.
+- **Do not spawn your own validation subagent via the Agent tool to bypass the validator pipeline (Phase 4 / T4.06).** The pipeline (cache → pre-filter → agent spawn) runs automatically on hash mismatch in `pre_tool_use_write.sh`; calling your own subagent duplicates cost AND bypasses the cache + pre-filter cheap paths. The pipeline is `[HOOK-ENFORCED]` end-to-end; trust it.
+- **Do not bypass the validator pipeline by editing `.coord/validator/cache.json` or `verdict/<ts>.json` directly.** The cache + verdict files are the audit record; manual edits break idempotency (the per-session `last_consumed_verdict` pointer expects the verdict files to be additive). Use `coord_validator_cache_clear` from a script if you genuinely need to reset; otherwise leave the validator state alone.
 - **Do not store session state in your own memory across turns as a substitute for `sessions.json`.** Your memory is advisory; `sessions.json` is authoritative.
 - **Do not spawn a subagent as a workaround to evade coordination.** Subagent tool calls are invisible to the coord layer by design (Decision 2.17: the `agent_type` filter in `pre_tool_use_*`, `post_tool_use_*`, and `stop.sh` causes those hooks to exit 0 without mutating state, emitting only a `SUBAGENT_ACTIVITY_SKIPPED` observability event). A subagent writing a file not locked by its parent can race silently with another session. If you need a bounded deferral, prefer `coord self-delegate` (which IS tracked) over a subagent.
 
@@ -454,7 +528,8 @@ These are cases where Claude sometimes tries to "help" in ways that undermine co
 | Write, no lock | Invoke `Write`/`Edit` | Validate read-set + acquire lock | [HOOK-ENFORCED] |
 | Write, locked by other | See deny reason; pick (a) task / (b) self-delegate / (c) wait | Deny with actionable reason | [HOOK-ENFORCED] |
 | Write, lock by self | Invoke normally | Refresh TTL | [HOOK-ENFORCED] |
-| Stale read detected | Re-read the file | Deny until re-read OR validator verdict allows | [HOOK-ENFORCED] |
+| Stale read detected (Phase 4 pipeline) | Continue with the operation; respond to the banner per its classification | Run cache → pre-filter → validator agent; SAFE silent / MINOR banner / CRITICAL synchronous Mediator inline → apply verdict's actions[]. NEVER deny on stale read alone (deny routes through the existing lockdown gate when Mediator chooses lockdown). | [HOOK-ENFORCED] |
+| Validator pipeline failure | Treat as Phase 1 warning; re-read if change matters | Emit Phase 1 fallback banner ("Pipeline unavailable; consider re-reading"); fail-open (Write proceeds rc=0, no permissionDecision) | [HOOK-ENFORCED] |
 | Other session dead | Nothing | Watchdog evicts after consensus | [HOOK-ENFORCED] |
 | Corrupt state | Retry the op | Hook resets + flags Mediator | [HOOK-ENFORCED] |
 | Anomaly | Report to user if Mediator escalates | Mediator remediates or escalates | [HOOK-ENFORCED] + [BEST-EFFORT] on escalation acknowledgment |
@@ -489,6 +564,22 @@ These are cases where Claude sometimes tries to "help" in ways that undermine co
 ### C.4 What to do when this file is silent
 
 If Part A is silent on a construction question: follow the Section 10 decision tree in `IMPLEMENTATION_PLAN.md`. If Part B is silent on a runtime question: act conservatively (do not write; ask the user; prefer `coord status` over guessing).
+
+### C.4a Phase 4 architectural invariant (carry-forward from Phase 3)
+
+**`permissionDecision: "deny"` appears in EXACTLY two architectural locations** (unchanged through Phase 4 — the validator pipeline introduces NO new deny location):
+
+1. `pre_tool_use_write.sh` lock-held-by-other branch (existing Phase 2).
+2. Any hook reading `.coord/mediator/lockdown.json` with `active=true` via `lib/lockdown.sh::coord_lockdown_emit_deny` (existing Phase 3).
+
+Phase 4 adds 2 architectural guards to the Phase 3 invariant set:
+
+3. `lib/validator_spawn.sh` contains zero `permissionDecision` strings — the Validator classifies but does not deny. CRITICAL escalates via Mediator → routes through the existing lockdown gate when Mediator chooses lockdown.
+4. `lib/validator_prefilter.sh` contains zero `permissionDecision` strings — the deterministic pre-filter never denies; only returns SAFE or ESCALATE_TO_AGENT.
+
+Total: **8 architectural guards** in `phase4_invariant.bats` (Phase 3's 6 + Phase 4's 2), plus 1 bonus guard for `lib/validator_cache.sh` (also zero permissionDecision; the cache is a validator component and must not deny). The static-grep gate fails the test if any other code path emits `permissionDecision` outside the two allowed locations.
+
+When future phases (5+) extend the system, every new lib/ or hooks/ file MUST be added to the invariant test's enumeration and pass the zero-deny grep — UNLESS it is the Mediator's lockdown gate (which has an explicit allowlist).
 
 ### C.5 Version
 
