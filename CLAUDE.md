@@ -282,6 +282,138 @@ The lifecycle-event-completeness audit is part of the lesson #2 pre-implementati
 
 These rules apply to any future hook / pipeline / spawn-helper construction. The Phase 4 implementations of `pre_tool_use_write.sh` (T4.06), `lib/validator_spawn.sh` (T4.04), and `phase4_ship_gate` fixtures (T4.07) are the canonical references for the patterns.
 
+**7. Bash 3.2 parser fragility on `out=$( ( cmd ) 9>"lock" )` form** (T5.02 lesson, F-018 portability family).
+
+The `out=$( ( cmd ) 9>"$lock" )` pattern fails to parse under Bash 3.2 when the inner subshell contains nested `$(cmd "arg")` inside double-quoted strings. Bash reports `syntax error near unexpected token`)'`on the outer `)`. macOS's default Bash (3.2.57) is the binding version per CLAUDE.md §A.5. The pattern is convenient because it captures stdout AND holds flock simultaneously, but it is unsupportable under Bash 3.2.
+
+```bash
+# WRONG — bash 3.2 syntax error on inner $(cmd "...") nesting:
+out=$(
+  (
+    flock -x -w "$timeout" 9 || exit 2
+    : > "${COORD_DIR}/wakers/${sid}-$(_coord_wq_sanitize "$file").wake"
+    printf 'appended\t%s\n' "$sz"
+  ) 9>"$lock_path"
+)
+```
+
+RIGHT — temp-file inter-subshell communication; mirrors `lib/atomic_write.sh`, `lib/log_event.sh`, `lib/mediator_spawn.sh`:
+
+```bash
+local out_tmp="${COORD_DIR}/wait_queues/.enq.$$.${sid}.out"
+: >"$out_tmp"
+(
+  flock -x -w "$timeout" 9 || exit 2
+  printf 'appended\t%s\n' "$sz" >"$out_tmp"
+) 9>"$lock_path"
+local rc=$?
+local out
+out=$(cat "$out_tmp" 2>/dev/null || printf '')
+rm -f "$out_tmp"
+```
+
+Surfaced in T5.02 `coord_wait_queue_enqueue` + `coord_wait_queue_dequeue`. Caught at bats setup phase before any test ran. Pre-sanitize the file path into a local variable BEFORE entering the flock-wrapped subshell to keep nested `$()` interactions outside the outer command-substitution boundary.
+
+**8. bats PATH manipulation is fragile cross-host** (T5.03 lesson, F-018 family).
+
+A bats helper that strips PATH directories to fake-absent host binaries (e.g., `fswatch` to test polling fallback) breaks on hosts where `/usr/bin` contains other essentials. On Linux with `inotify-tools` installed at `/usr/bin/inotifywait`, stripping `/usr/bin` from PATH ALSO strips `chmod`, `rm`, `sleep`. Tests that run after the strip silently fail with cascading "command not found" errors.
+
+```bash
+# WRONG — strips /usr/bin if it contains inotifywait → chmod/rm/sleep break:
+_isolate_path() {
+  local kept=""
+  IFS=':'
+  for entry in $PATH; do
+    if ! { [ -x "$entry/fswatch" ] || [ -x "$entry/inotifywait" ]; }; then
+      kept="${kept:+$kept:}$entry"
+    fi
+  done
+  PATH="$TMP/bin${kept:+:$kept}"
+}
+```
+
+RIGHT — skip-based tests using `command -v` against the live host:
+
+```bash
+@test "wait_backend: fswatch present + macOS -> backend=fswatch" {
+  [ "$(uname -s)" = "Darwin" ] || skip "macOS-only"
+  command -v fswatch >/dev/null 2>&1 || skip "fswatch not installed"
+  run coord_wait_backend_detect
+  [ "$output" = "fswatch" ]
+}
+```
+
+Skip-based tests reflect the host configuration honestly without breaking the test environment. Use `skip "..."` whenever you cannot reproduce a binary's absence without breaking other tools.
+
+**9. Helper stdout bleeds into `$()` captures of higher-order functions** (T5.04 lesson).
+
+When a function captures another function's stdout via `$()` and the inner function calls helpers that print to stdout under rc=0 (e.g., `coord_validator_prefilter` prints `safe:whitespace_only`, `coord_validator_cache_lookup` prints `MINOR\t<source>\t<diff>`), the helper output bleeds into the outer capture. The captured value is the concatenation of all writes during the call. ALSO, globals set in the captured function are LOST because `$()` runs in a subshell.
+
+```bash
+# WRONG — prefilter prints "safe:whitespace_only" to stdout under rc=0;
+# this bleeds into $diff_summary captured by the caller:
+_coord_notify_compute_diff_summary() {
+  if coord_validator_prefilter "$holder" "$path" "$prev_hash" "$current_hash" 2>/dev/null; then
+    _COORD_NOTIFY_LAST_TIER='prefilter_safe'   # LOST in subshell
+    printf 'trivial change (whitespace/comment)'
+  fi
+}
+diff_summary=$(_coord_notify_compute_diff_summary ...)  # = "safe:whitespace_only\ntrivial change..."
+```
+
+RIGHT — explicit stdout suppression on inner helpers + TSV stdout protocol for tier propagation:
+
+```bash
+_coord_notify_compute_diff_summary() {
+  if coord_validator_prefilter "$holder" "$path" "$prev_hash" "$current_hash" >/dev/null 2>&1; then
+    printf 'prefilter_safe\ttrivial change (whitespace/comment)'
+    return 0
+  fi
+  printf 'fallback\tmodified by %s' "${holder:0:8}"
+}
+local _ds_tsv
+_ds_tsv=$(_coord_notify_compute_diff_summary ...)
+diff_tier=$(printf '%s' "$_ds_tsv" | awk -F'\t' '{print $1}')
+diff_summary=$(printf '%s' "$_ds_tsv" | awk -F'\t' '{print $2}')
+```
+
+Two patterns to remember: (a) explicit `>/dev/null 2>&1` on inner helpers when their stdout is not part of the outer capture contract, and (b) TSV stdout protocol with awk-split for multi-value returns from `$()`-captured functions.
+
+**10. `jq --argjson` requires valid JSON, not jq's bare-key syntax** (T5.05 lesson).
+
+jq's object-construction syntax allows bare keys (`{from:"x"}` is valid jq). But `--argjson` is a JSON parser, not a jq parser — bare keys are rejected. Build edges + nested objects via TSV stdin → `jq -Rsc 'split("\n") | ...'` with QUOTED keys for `--argjson` consumption.
+
+```bash
+# WRONG — jq bare-key syntax fails --argjson parse:
+local edges_jq_lines=""
+for k in ...; do
+  edges_jq_lines+="{from:\"$from_sid\", type:\"waits_for\", to:\"$f\"},"
+done
+jq -nc --argjson edges "[${edges_jq_lines%,}]" '...'
+# → jq: invalid JSON text passed to --argjson
+```
+
+RIGHT — TSV stdin → jq map construction with quoted JSON keys:
+
+```bash
+local edges_tsv=""
+for k in ...; do
+  edges_tsv+=$'\n'"${from_sid}"$'\t'"waits_for"$'\t'"$f"
+done
+local edges_json
+edges_json=$(printf '%s\n' "${edges_tsv#$'\n'}" | jq -Rsc '
+  [ split("\n")[] | select(length > 0) | split("\t")
+    | {from: .[0], type: .[1], to: .[2]} ]
+')
+jq -nc --argjson edges "$edges_json" '...'
+```
+
+Surfaced in T5.05 `cycle_detection.sh` edges builder. Caught at bats setup phase. The TSV intermediate also forces explicit field-position discipline (`split("\t")[0/1/2]`), reducing risk of misordered concatenation.
+
+**Lesson #4 reinforcement (T5.05 case study).** `head -n -1` is a GNU extension; macOS BSD `head` rejects negative line counts (`illegal line count -- -1`). Initial `cycle_path` session-array dedup used `head -n -1` to drop the closing duplicate of `start_sid`. Fix: use `jq unique` instead of `head -n -1` for natural deduplication. Pattern: prefer pure-jq pipelines over CLI-tool composition where deduplication / sorting is needed; jq is portable and feature-complete for these operations.
+
+These rules apply to any future hook / pipeline / spawn-helper / fixture construction. The Phase 5 implementations of `lib/wait_queue.sh` (T5.02), `lib/wait_backend.sh` (T5.03), `lib/notify_waiters.sh` extension (T5.04), `lib/cycle_detection.sh` (T5.05), and `phase5_ship_gate` fixtures (T5.09) are the canonical references for these new patterns.
+
 ---
 
 ## Part B — Runtime Rules for Coordinated Sessions
@@ -619,21 +751,34 @@ These are cases where Claude sometimes tries to "help" in ways that undermine co
 
 If Part A is silent on a construction question: follow the Section 10 decision tree in `IMPLEMENTATION_PLAN.md`. If Part B is silent on a runtime question: act conservatively (do not write; ask the user; prefer `coord status` over guessing).
 
-### C.4a Phase 4 architectural invariant (carry-forward from Phase 3)
+### C.4a Phase 5 architectural invariant (carry-forward from Phase 3+4)
 
-**`permissionDecision: "deny"` appears in EXACTLY two architectural locations** (unchanged through Phase 4 — the validator pipeline introduces NO new deny location):
+**`permissionDecision: "deny"` appears in EXACTLY two architectural locations** (UNCHANGED through Phases 3+4+5 — the wait queue + cycle detection layers introduce NO new deny location):
 
 1. `pre_tool_use_write.sh` lock-held-by-other branch (existing Phase 2).
-2. Any hook reading `.coord/mediator/lockdown.json` with `active=true` via `lib/lockdown.sh::coord_lockdown_emit_deny` (existing Phase 3).
+2. Any hook reading `.coord/mediator/lockdown.json` with `active=true` via `lib/lockdown.sh::coord_lockdown_emit_deny` (existing Phase 3 — Mediator lockdown verdicts on `cycle_detected` payloads route through this gate).
 
-Phase 4 adds 2 architectural guards to the Phase 3 invariant set:
+Phase 5 adds **2 NEW architectural guards** + **3 NEW bonus guards** on top of Phase 4's carry-forward set:
 
-3. `lib/validator_spawn.sh` contains zero `permissionDecision` strings — the Validator classifies but does not deny. CRITICAL escalates via Mediator → routes through the existing lockdown gate when Mediator chooses lockdown.
-4. `lib/validator_prefilter.sh` contains zero `permissionDecision` strings — the deterministic pre-filter never denies; only returns SAFE or ESCALATE_TO_AGENT.
+**Phase 5 NEW architectural guards:**
 
-Total: **8 architectural guards** in `phase4_invariant.bats` (Phase 3's 6 + Phase 4's 2), plus 1 bonus guard for `lib/validator_cache.sh` (also zero permissionDecision; the cache is a validator component and must not deny). The static-grep gate fails the test if any other code path emits `permissionDecision` outside the two allowed locations.
+7. **Mediator dispatch is kind-agnostic.** `lib/mediator_spawn.sh`, `lib/mediator_pending.sh`, and `lib/verdict_apply.sh` contain ZERO `case ... cycle_detected` or `if ... critical_drift` branches in production code. Decision 4 binding (PR-PHASE5-04): cycle_detected is handled by the same kind-agnostic 3-action contract (advice / surgical_fix / lockdown) that Phase 3 established. Future kinds (Phase 6+) MUST also fit this contract without code changes.
+8. **Watchdog probe enforces 3-signal conservative model.** `lib/watchdog.sh` calls `ps -p` for Signal 1 (PID liveness) — mandatory for the alive verdict per PR-PHASE3-02 §A. Signals 2 (`last_activity_at` staleness) and 3 (lock-context unrefreshed) alone cannot promote to alive; only suspicion. Cross-references `watchdog.bats` for full 3-outcome semantics.
 
-When future phases (5+) extend the system, every new lib/ or hooks/ file MUST be added to the invariant test's enumeration and pass the zero-deny grep — UNLESS it is the Mediator's lockdown gate (which has an explicit allowlist).
+**Phase 4+5 bonus guards (zero permissionDecision in component libs):**
+
+9.  `lib/validator_spawn.sh` (Phase 4 carry-forward).
+10. `lib/validator_prefilter.sh` (Phase 4 carry-forward).
+11. `lib/validator_cache.sh` (Phase 4 carry-forward bonus).
+12. `lib/wait_queue.sh` (Phase 5 T5.02 NEW — queue ops are advisory; deny happens at the existing lock-acquire path).
+13. `lib/cycle_detection.sh` (Phase 5 T5.05 NEW — cycle detection routes through the Mediator pending pipeline; lockdown is the deny mechanism if scope is global).
+14. `lib/wait_backend.sh` (Phase 5 T5.03 NEW — backend abstraction is mechanical; deny is not a backend concern).
+
+Total: **8 architectural guards + 6 bonus guards = 14 guards** in `phase5_invariant.bats`. The static-grep gate fails the test if (a) any other code path emits `permissionDecision` outside the two allowed locations, OR (b) Mediator dispatch grows kind-branching, OR (c) the watchdog regresses to non-Signal-1-mandatory alive verdicts.
+
+When future phases (6+) extend the system, every new `lib/` or `hooks/` file MUST be added to the invariant test's enumeration and pass the zero-deny grep — UNLESS it is the Mediator's lockdown gate (which has an explicit allowlist). New pending kinds MUST flow through the existing kind-agnostic dispatch and 3-action contract; any addition of `case ... <new_kind>)` branching in `mediator_spawn.sh` / `mediator_pending.sh` / `verdict_apply.sh` is a Phase 5 invariant violation.
+
+`phase4_invariant.bats` deleted at T5.07 (superseded by `phase5_invariant.bats`); mirrors the Phase 3 → Phase 4 transition pattern (T4.06 deleted `phase3_invariant.bats`). Phase 6+ will continue the rolling supersession.
 
 ### C.5 Version
 
