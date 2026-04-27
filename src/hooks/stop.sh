@@ -46,6 +46,15 @@ LIB_DIR="$(cd "$HOOK_DIR/../lib" && pwd)"
 . "$LIB_DIR/notify_waiters.sh"
 # shellcheck disable=SC1091
 . "$LIB_DIR/lockdown.sh"
+# T5.04 / PR-PHASE5-02 §5: notify_waiters' 4-tier diff_summary chain.
+# shellcheck disable=SC1091
+[ -f "$LIB_DIR/hash.sh" ] && . "$LIB_DIR/hash.sh"
+# shellcheck disable=SC1091
+[ -f "$LIB_DIR/validator_cache.sh" ] && . "$LIB_DIR/validator_cache.sh"
+# shellcheck disable=SC1091
+[ -f "$LIB_DIR/validator_prefilter.sh" ] && . "$LIB_DIR/validator_prefilter.sh"
+# shellcheck disable=SC1091
+[ -f "$LIB_DIR/read_snapshots.sh" ] && . "$LIB_DIR/read_snapshots.sh"
 
 coord_resolve_root() {
   if [ -n "${COORD_DIR:-}" ] && [ -d "$COORD_DIR" ]; then
@@ -107,13 +116,15 @@ if coord_lockdown_check && coord_lockdown_emit_deny "Stop"; then
   exit 0
 fi
 
-# Collect all locks held by this session, with their acquired_at, before
-# touching state. TSV: "<path>\t<acquired_at>".
+# Collect all locks held by this session, with acquired_at + verdict_ts,
+# BEFORE deletion (T5.04: notify_waiters' tier-1 verdict-file lookup
+# needs the verdict_ts captured pre-delete). TSV:
+# "<path>\t<acquired_at>\t<verdict_ts>".
 HELD_TSV=$(jq -r --arg sid "$SESSION_ID" '
   .locks
   | to_entries[]
   | select(.value.session == $sid)
-  | [.key, (.value.acquired_at // "")]
+  | [.key, (.value.acquired_at // ""), (.value.latest_validator_verdict_ts // "")]
   | @tsv
 ' "$STATE" 2>/dev/null || printf '')
 
@@ -135,6 +146,7 @@ IFS="$OLD_IFS"
 for entry in "$@"; do
   path=$(printf '%s' "$entry" | awk -F'\t' '{print $1}')
   acquired_at=$(printf '%s' "$entry" | awk -F'\t' '{print $2}')
+  verdict_ts=$(printf '%s' "$entry" | awk -F'\t' '{print $3}')
   [ -z "$path" ] && continue
 
   if ! coord_atomic_edit "$STATE" \
@@ -150,7 +162,10 @@ for entry in "$@"; do
     released_at="$NOW" acquired_at="$acquired_at"
 
   # Populate notifications for any sessions denied during the hold.
-  coord_notify_lock_release_waiters "$SESSION_ID" "$path" "$acquired_at" "$NOW"
+  # T5.04: pass verdict_ts captured before deletion so notify_waiters'
+  # 4-tier chain can resolve the diff_summary via the validator
+  # verdict file when stage 3 produced one this turn.
+  coord_notify_lock_release_waiters "$SESSION_ID" "$path" "$acquired_at" "$NOW" "$verdict_ts"
 done
 
 exit 0

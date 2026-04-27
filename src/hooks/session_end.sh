@@ -35,6 +35,15 @@ LIB_DIR="$(cd "$HOOK_DIR/../lib" && pwd)"
 . "$LIB_DIR/subagent_filter.sh"
 # shellcheck disable=SC1091
 . "$LIB_DIR/notify_waiters.sh"
+# T5.04 / PR-PHASE5-02 §5: notify_waiters' 4-tier diff_summary chain.
+# shellcheck disable=SC1091
+[ -f "$LIB_DIR/hash.sh" ] && . "$LIB_DIR/hash.sh"
+# shellcheck disable=SC1091
+[ -f "$LIB_DIR/validator_cache.sh" ] && . "$LIB_DIR/validator_cache.sh"
+# shellcheck disable=SC1091
+[ -f "$LIB_DIR/validator_prefilter.sh" ] && . "$LIB_DIR/validator_prefilter.sh"
+# shellcheck disable=SC1091
+[ -f "$LIB_DIR/read_snapshots.sh" ] && . "$LIB_DIR/read_snapshots.sh"
 # shellcheck disable=SC1091
 . "$LIB_DIR/lockdown.sh"
 # shellcheck disable=SC1091
@@ -98,7 +107,7 @@ HELD_TSV=$(jq -r --arg sid "$SESSION_ID" '
   .locks
   | to_entries[]
   | select(.value.session == $sid)
-  | [.key, (.value.acquired_at // "")]
+  | [.key, (.value.acquired_at // ""), (.value.latest_validator_verdict_ts // "")]
   | @tsv
 ' "$STATE" 2>/dev/null || printf '')
 
@@ -111,6 +120,7 @@ if [ -n "$HELD_TSV" ]; then
   for entry in "$@"; do
     path=$(printf '%s' "$entry" | awk -F'\t' '{print $1}')
     acquired_at=$(printf '%s' "$entry" | awk -F'\t' '{print $2}')
+    verdict_ts=$(printf '%s' "$entry" | awk -F'\t' '{print $3}')
     [ -z "$path" ] && continue
 
     if ! coord_atomic_edit "$STATE" \
@@ -123,7 +133,7 @@ if [ -n "$HELD_TSV" ]; then
     fi
     coord_log_event kind=LOCK_RELEASED source=session_end tool="" file="$path" \
       released_at="$NOW" acquired_at="$acquired_at"
-    coord_notify_lock_release_waiters "$SESSION_ID" "$path" "$acquired_at" "$NOW"
+    coord_notify_lock_release_waiters "$SESSION_ID" "$path" "$acquired_at" "$NOW" "$verdict_ts"
   done
 fi
 

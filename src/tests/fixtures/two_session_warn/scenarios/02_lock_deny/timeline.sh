@@ -38,6 +38,17 @@ scenario_run() {
 
   sleep 0.3   # let LOCK_DENIED event flush
 
+  # 3a. (Phase 5 / T5.04) Session B enqueues itself into wait_queues
+  # via the public API. In production this is what happens when B's
+  # session invokes `coord wait <path>` after the deny. Phase 5
+  # T5.04 made wait_queues the authoritative waiter source — Phase
+  # 2's events.jsonl LOCK_DENIED scan is gone — so the fixture must
+  # populate wait_queues explicitly to exercise the notify path.
+  ( . "$COORD_DIR/lib/atomic_write.sh"
+    . "$COORD_DIR/lib/log_event.sh"
+    . "$COORD_DIR/lib/wait_queue.sh"
+    coord_wait_queue_enqueue "$sid_b" "$WORKDIR/foo.ts" >/dev/null )
+
   # 4. Session A's Post-hook releases the lock + populates notification.
   printf '%s' '{"session_id":"'"$sid_a"'","cwd":"'"$WORKDIR"'","hook_event_name":"PostToolUse","tool_name":"Write","tool_input":{"file_path":"'"$WORKDIR"'/foo.ts"}}' \
     | CLAUDE_COORD=1 CLAUDE_PROJECT_DIR="$WORKDIR" "$hooks/post_tool_use_write.sh" >/dev/null

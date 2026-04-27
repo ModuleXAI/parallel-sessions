@@ -256,6 +256,13 @@ _coord_phase4_handle_critical() {
 _coord_phase4_run_pipeline() {
   local file="$1" rhash="$2" chash="$3"
 
+  # T5.04 / PR-PHASE5-02 §5: per-call output for verdict_ts so the
+  # caller can populate locks[<file>].latest_validator_verdict_ts.
+  # Reset to empty at every entry; only stage-3 (validator agent
+  # spawn) and the CRITICAL inline path produce a fresh verdict
+  # file — stages 1 (cache hit) + 2 (pre-filter SAFE) leave it empty.
+  _COORD_PHASE4_LAST_VERDICT_TS=""
+
   coord_log_event kind=VALIDATOR_PIPELINE_STARTED \
     file="$file" read_hash="$rhash" current_hash="$chash" || true
 
@@ -307,6 +314,9 @@ _coord_phase4_run_pipeline() {
       reason=validator_spawn_failed || true
     return 1
   fi
+  # T5.04: capture verdict_ts for caller to bake into the lock record.
+  _COORD_PHASE4_LAST_VERDICT_TS=$(basename "$verdict_path" .json 2>/dev/null) \
+    || _COORD_PHASE4_LAST_VERDICT_TS=""
 
   local agent_verdict agent_summary
   agent_verdict=$(jq -r '.verdict // ""' "$verdict_path" 2>/dev/null) || agent_verdict=""
@@ -470,6 +480,11 @@ ENTRIES_TSV=$(jq -r --arg sid "$SESSION_ID" '
 
 STALE_BANNER=""
 BANNER_LINES=""
+# T5.04 / PR-PHASE5-02 §5: capture verdict_ts produced by the
+# pipeline IF $TARGET drifted and stage 3 ran. Empty when $TARGET
+# was unchanged or short-circuited at cache/pre-filter; populated
+# into locks[$TARGET].latest_validator_verdict_ts at lock-acquire.
+TARGET_VERDICT_TS=""
 if [ -n "$ENTRIES_TSV" ]; then
   OLD_IFS="$IFS"
   IFS='
@@ -516,6 +531,11 @@ if [ -n "$ENTRIES_TSV" ]; then
         else
           pipeline_ok=0
           line=$(_coord_phase4_phase1_fallback "$path" "modified since read; pipeline failed")
+        fi
+        # T5.04: capture verdict_ts when this iteration was for
+        # $TARGET and stage 3 produced a fresh verdict.
+        if [ "$path" = "$TARGET" ] && [ -n "${_COORD_PHASE4_LAST_VERDICT_TS:-}" ]; then
+          TARGET_VERDICT_TS="$_COORD_PHASE4_LAST_VERDICT_TS"
         fi
         # One COMPLETED event per pipeline invocation regardless of
         # outcome (SAFE silent / MINOR banner / CRITICAL handled /
@@ -602,10 +622,21 @@ if [ "$LOCK_HOLDER" = "$SESSION_ID" ]; then
 fi
 
 # 4(c) Unheld — acquire atomically.
+# T5.04 / PR-PHASE5-02 §5: bake latest_validator_verdict_ts into the
+# lock record when this hook turn produced a fresh verdict for the
+# target file. JSON null when stages 1+2 short-circuited or no drift
+# was detected (the common case).
 if ! coord_atomic_edit "$STATE" \
-      '.locks[$f] = {session: $sid, acquired_at: $now, last_refresh_at: $now, tasks: []}
+      '.locks[$f] = {
+          session: $sid,
+          acquired_at: $now,
+          last_refresh_at: $now,
+          tasks: [],
+          latest_validator_verdict_ts: ($vts | select(. != "") // null)
+        }
        | .sessions[$sid].last_activity_at = $now' \
-      --arg f "$TARGET" --arg sid "$SESSION_ID" --arg now "$NOW"; then
+      --arg f "$TARGET" --arg sid "$SESSION_ID" --arg now "$NOW" \
+      --arg vts "$TARGET_VERDICT_TS"; then
   # Atomic edit failed — fail-open per CLAUDE.md §A.5 / §B.9.3. Log + allow.
   warn_stderr "atomic_edit failed during lock acquire; allowing write uncoordinated"
   [ -n "$STALE_BANNER" ] && emit_additional_context "$STALE_BANNER"
