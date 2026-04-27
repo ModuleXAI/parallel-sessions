@@ -510,11 +510,19 @@ if [ -n "$ENTRIES_TSV" ]; then
         # pattern always reads rc=0 from the `||` branch in
         # bash 3.2; CLAUDE.md §A.13 lesson #2).
         line=""
+        pipeline_ok=1
         if line=$(_coord_phase4_run_pipeline "$path" "$stored" "$current"); then
           :
         else
+          pipeline_ok=0
           line=$(_coord_phase4_phase1_fallback "$path" "modified since read; pipeline failed")
         fi
+        # One COMPLETED event per pipeline invocation regardless of
+        # outcome (SAFE silent / MINOR banner / CRITICAL handled /
+        # failure fallback). Carries the per-file disposition.
+        coord_log_event kind=VALIDATOR_PIPELINE_COMPLETED \
+          tool="$TOOL_NAME" file="$path" \
+          pipeline_ok="$pipeline_ok" had_banner=$([ -n "$line" ] && printf 1 || printf 0) || true
         if [ -n "$line" ]; then
           BANNER_LINES="$BANNER_LINES- $line"$'\n'
         fi
@@ -542,7 +550,6 @@ if [ -n "$ENTRIES_TSV" ]; then
 
   if [ -n "$BANNER_LINES" ]; then
     STALE_BANNER="Coord drift report ($TOOL_NAME on $TARGET):"$'\n'"${BANNER_LINES%$'\n'}"
-    coord_log_event kind=VALIDATOR_PIPELINE_COMPLETED tool="$TOOL_NAME" file="$TARGET" || true
   fi
 fi
 
