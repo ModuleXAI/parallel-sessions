@@ -443,6 +443,45 @@ The watchdog NEVER returns `alive` solely on activity/lock signals — Signal 1 
 
 **`wait_max_seconds` bound:** clamped to [30, 570] per Decision 2.20; default 570 sits below Claude Code's 600 s Bash-tool ceiling.
 
+### B.8a Phase 5 end-to-end pipeline + cycle detection (operational guidance, T5.08)
+
+**End-to-end flow when you `coord wait <path>`:**
+
+1. **Enqueue.** Your session is appended to `wait_queues[<path>]` under per-file flock (`.coord/wait_queues/<sanitized_path>.lock`; sanitization: `tr / __`). An empty wake_file is touched at `.coord/wakers/<sid>-<sanitized>.wake`.
+2. **Cycle-detection trigger.** If post-append queue depth ≥ 2, `coord_cycle_detect` runs a bipartite session/file DFS from your session as the start. If a cycle is found, a `cycle_detected` pending entry is written to `.coord/mediator/pending.jsonl` and the Mediator is spawned inline (synchronous, ~50-100 s worst case, mirroring Phase 4 `critical_drift` pattern).
+3. **Backend dispatch.** Your `coord wait` blocks on the wake_file via the resolved backend (`fswatch` on macOS, `inotifywait` on Linux, 250 ms polling fallback otherwise — auto-detected at install). First-use emits `WAIT_BACKEND` event.
+4. **Lock release on the holder side.** The holder's `post_tool_use_write.sh` (or `stop.sh` / `session_end.sh`) calls `notify_waiters.sh`, which:
+   - Reads `locks[<path>].latest_validator_verdict_ts` (Phase 5 schema field; populated when the Phase 4 validator pipeline produced a fresh verdict during the holder's write turn).
+   - Computes the `diff_summary` via the **4-tier priority chain**:
+     - **Tier 1** (verdict-file): jq lookup of `.coord/validator/verdict/<ts>.json::.diff_summary`.
+     - **Tier 2** (cache hit): `coord_validator_cache_lookup` on `(file, prev_hash, current_hash)`. SAFE → "trivial change (no semantic drift)"; MINOR → cached diff_summary text.
+     - **Tier 3** (pre-filter SAFE): `coord_validator_prefilter` on the holder's read snapshot vs current file. SAFE → "trivial change (whitespace/comment)".
+     - **Tier 4** (fallback): `"modified by <holder_id_prefix>"`.
+   - Writes the resolved diff_summary to every queued waiter's wake_file via `printf "%s\n" "$diff_summary" > "$wake_file"`.
+   - Emits one `NOTIFICATION_PRODUCED` event with `diff_summary_source=<tier>` for the audit trail.
+5. **Wake-up.** Your backend fires; `coord wait` reads wake_file content (with a 50 ms grace re-read for the create-vs-write race), exits with the `diff_summary` on stdout for your `additionalContext`.
+
+**Operator commands:**
+- `coord status` shows `wait_queues: N waiter(s)` and per-file queue lengths via `coord status --reads` (extended in Phase 5 T5.02).
+- `coord wait <path>` is the primary user-facing command (blocks until release or timeout; prints diff_summary on success).
+- `coord mediate` and `coord mediate --resume` cover Mediator escalations including `cycle_detected` lockdown verdicts (Phase 3 carry-forward).
+
+**When you encounter a long `coord wait`:**
+- If a `polling` backend warning surfaced at SessionStart, install `fswatch` (macOS: `brew install fswatch`) or `inotify-tools` (Linux: `apt install inotify-tools`) and re-run `coord install --repair` to switch backends. The 250 ms polling fallback is correct but adds ~150-200 ms wake-up latency vs the event-driven path.
+- If `coord wait` times out (`WAIT_TIMEOUT(reason=deadline)`), the lock holder is likely stuck or the cycle detector missed a silent 2-cycle (depth ≤ 1 on both queues — see §B.8a "Silent 2-cycle case" below). Surface to the user; the human-scale problem is beyond what the coordination system can resolve alone.
+
+**When you encounter a `cycle_detected` Mediator verdict:**
+- The Mediator's `message_to_caller` describes which session was evicted and why (3-tier priority: oldest activity → fewest locks → youngest session age — see `MEDIATOR_REFERENCE.md` §4.X.1).
+- The evicted session loses its locks, wait_queue entries, read-set, read-snapshots, and wake_files in one atomic step. Other waiters in the cycle wake up via the standard lock-release notification path.
+- A `lockdown` verdict on `cycle_detected` indicates a global deadlock (cycle spans all active sessions, OR ≥ 4 sessions, OR `recent_cycle_count` ≥ 2 within 60 s — Mediator can't surgical-fix). Operator runs `coord mediate --resume` after investigating.
+
+**Silent 2-cycle case (architectural note from T5.05).** When session A holds `/p/foo` and waits for `/p/bar`, AND session B holds `/p/bar` and waits for `/p/foo`, each queue has depth 1 and the depth ≥ 2 trigger doesn't fire. The cycle is silent until either:
+1. A third session enqueues on one of the cycle's files (depth 2 → trigger fires).
+2. A cycle session re-enqueues on the other's file with another waiter already there.
+3. The `wait_max_seconds` clamp expires (570 s) and Phase 7 will add follow-up cleanup detection from the timed-out session's perspective.
+
+For Phase 5, the depth ≥ 2 trigger is sufficient for the done-when criterion. Silent-2-cycle handling is deferred to Phase 7.
+
 ### B.9 Edge-case rules
 
 #### B.9.1 Missing state file
