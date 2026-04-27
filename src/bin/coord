@@ -12,7 +12,8 @@
 #   install                  — re-run the installer (delegates to src/install.sh).
 #
 # Later phases wire in:
-#   wait, task-open, self-delegate, tasks, locks, mediate, mediate --retry.
+#   wait (Phase 5), task-open (Phase 6 T6.03), self-delegate (Phase 6 T6.04),
+#   tasks, locks, mediate (Phase 3), mediate --retry.
 
 set -euo pipefail
 
@@ -390,6 +391,247 @@ cmd_wait() {
   return 1
 }
 
+# cmd_task_open --file <path> --complexity <SIMPLE|MODERATE|COMPLEX>
+#               --anchor '<json>' --instruction '<text>' [--rationale '<text>']
+#
+# Phase 6 T6.03: persists a task into locks[<file>].tasks[] for the
+# lock-holder to process at release time. CLI-level rejection paths
+# preserve the 2-location deny invariant (Decision 6) — chain depth /
+# cycle / anchor uniqueness / toggle disabled all exit 1 with stderr,
+# never permissionDecision.
+#
+# Per PR-PHASE6-05 §1-§7 + ambiguity dispositions A (--rationale
+# optional) and B (file-not-exists → "anchor not found").
+#
+# Persisted task record schema (PR-PHASE6-05 §7):
+#   task_id, opener, file, instruction, complexity, anchor,
+#   rationale (nullable), created_at, affected_lines_at_open,
+#   status=PENDING, outcome_diff/rationale/at (null until completion).
+cmd_task_open() {
+  local file="" complexity="" anchor_json="" instruction="" rationale=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --file)         file="${2:-}"; shift 2 ;;
+      --file=*)       file="${1#--file=}"; shift ;;
+      --complexity)   complexity="${2:-}"; shift 2 ;;
+      --complexity=*) complexity="${1#--complexity=}"; shift ;;
+      --anchor)       anchor_json="${2:-}"; shift 2 ;;
+      --anchor=*)     anchor_json="${1#--anchor=}"; shift ;;
+      --instruction)  instruction="${2:-}"; shift 2 ;;
+      --instruction=*) instruction="${1#--instruction=}"; shift ;;
+      --rationale)    rationale="${2:-}"; shift 2 ;;
+      --rationale=*)  rationale="${1#--rationale=}"; shift ;;
+      -*)             die "unknown flag: $1" ;;
+      *)              die "unexpected arg: $1" ;;
+    esac
+  done
+
+  # Required-flag validation.
+  [ -z "$file" ]        && die 'usage: coord task-open --file <path> --complexity SIMPLE|MODERATE|COMPLEX --anchor <json> --instruction <text> [--rationale <text>]'
+  [ -z "$complexity" ]  && die '--complexity is required (SIMPLE|MODERATE|COMPLEX)'
+  [ -z "$anchor_json" ] && die '--anchor is required'
+  [ -z "$instruction" ] && die '--instruction is required'
+
+  # Complexity enum validation.
+  case "$complexity" in
+    SIMPLE|MODERATE|COMPLEX) ;;
+    *) printf 'Error: invalid complexity (must be SIMPLE/MODERATE/COMPLEX)\n' >&2
+       return 1 ;;
+  esac
+
+  # task_delegation toggle check (config.json). Default true if config
+  # is missing or field absent (graceful degradation). NOTE: jq's `//`
+  # operator triggers on BOTH null AND false (jq spec: "alternative"
+  # operator returns RHS when LHS is null or false). So
+  # `.task_delegation // true` returns `true` when the value IS
+  # literally `false` — which would silently bypass the toggle check.
+  # Use explicit `has(...)` to distinguish absent-key from
+  # present-and-false.
+  local toggle="true"
+  if [ -f "$(config_file)" ]; then
+    if toggle_raw=$(jq -r 'if has("task_delegation") then .task_delegation else true end' "$(config_file)" 2>/dev/null); then
+      toggle="$toggle_raw"
+    fi
+  fi
+  if [ "$toggle" != "true" ]; then
+    printf 'Error: task_delegation disabled per repo (config.json task_delegation: false)\n' >&2
+    return 1
+  fi
+
+  # Anchor JSON parse + key validation.
+  local anchor_search anchor_window
+  if ! anchor_search=$(printf '%s' "$anchor_json" | jq -r '.search // empty' 2>/dev/null); then
+    printf 'Error: invalid --anchor JSON (jq parse failed)\n' >&2
+    return 1
+  fi
+  if [ -z "$anchor_search" ]; then
+    printf 'Error: --anchor missing required key "search"\n' >&2
+    return 1
+  fi
+  anchor_window=$(printf '%s' "$anchor_json" | jq -r '.window_lines // empty' 2>/dev/null)
+  if [ -z "$anchor_window" ]; then
+    printf 'Error: --anchor missing required key "window_lines"\n' >&2
+    return 1
+  fi
+  # window_lines: "<start>-<end>" range, integers, start <= end.
+  case "$anchor_window" in
+    *-*) ;;
+    *)   printf 'Error: --anchor.window_lines must be range "start-end" (e.g. "42-67")\n' >&2
+         return 1 ;;
+  esac
+  local win_start="${anchor_window%-*}"
+  local win_end="${anchor_window#*-}"
+  case "$win_start" in
+    ''|*[!0-9]*) printf 'Error: --anchor.window_lines start must be an integer; got: %s\n' "$win_start" >&2; return 1 ;;
+  esac
+  case "$win_end" in
+    ''|*[!0-9]*) printf 'Error: --anchor.window_lines end must be an integer; got: %s\n' "$win_end" >&2; return 1 ;;
+  esac
+  if [ "$win_start" -gt "$win_end" ]; then
+    printf 'Error: --anchor.window_lines start (%s) must be <= end (%s)\n' "$win_start" "$win_end" >&2
+    return 1
+  fi
+
+  # Anchor uniqueness check (ambiguity B: file-not-exists OR 0 matches
+  # both unify under "anchor not found"). grep -F for fixed-string
+  # match; -c counts. CLAUDE.md §A.13 lesson #5: `if var=$(cmd)` for
+  # rc capture under set -e + pipefail. The `var=$(cmd) || printf '0'`
+  # form is broken — `||` runs INSIDE the command substitution and
+  # APPENDS its stdout to grep's existing "0" output, producing
+  # "0\n0" which fails [-gt] integer comparison.
+  local match_count
+  if [ ! -f "$file" ]; then
+    printf 'Error: anchor not found in %s\n' "$file" >&2
+    return 1
+  fi
+  if match_count=$(grep -F -c -- "$anchor_search" "$file" 2>/dev/null); then
+    : # rc 0: grep found ≥1 match; match_count holds the count
+  else
+    : # rc 1 (no match) → match_count="0" from stdout already;
+      # rc 2 (read error) → match_count may be "" — sanitize below
+    :
+  fi
+  case "$match_count" in
+    ''|*[!0-9]*) match_count=0 ;;
+  esac
+  if [ "$match_count" = "0" ]; then
+    printf 'Error: anchor not found in %s\n' "$file" >&2
+    return 1
+  fi
+  if [ "$match_count" -gt 1 ]; then
+    printf 'Error: anchor matches %s candidates (expected 1)\n' "$match_count" >&2
+    return 1
+  fi
+
+  # Resolve session ID (caller supplies via SESSION_ID env; fall back
+  # to a deterministic synthetic id if absent — matches cmd_wait's
+  # discipline).
+  : "${SESSION_ID:=coord-task-open-$$}"
+  export SESSION_ID
+
+  # shellcheck disable=SC1091
+  . "$LIB_DIR/atomic_write.sh"
+  # shellcheck disable=SC1091
+  . "$LIB_DIR/log_event.sh"
+  # shellcheck disable=SC1091
+  . "$LIB_DIR/cycle_detection.sh"
+
+  # Chain depth + task_graph cycle check (T6.02 lib function).
+  # rc 0 ok / rc 1 chain_depth_exceeded / rc 2 task_cycle_detected /
+  # rc 3 usage error. stderr from the lib surfaces verbatim to caller.
+  local cycle_rc=0
+  if coord_cycle_detect_task_graph "$SESSION_ID" "$file"; then
+    cycle_rc=0
+  else
+    cycle_rc=$?
+  fi
+  if [ "$cycle_rc" -ne 0 ]; then
+    return 1
+  fi
+
+  # task_id synthesis (PR-PHASE6-05 §4 + Q4 pattern reused for tasks).
+  local created_at_ms random_4_hex task_id
+  created_at_ms=$(perl -MTime::HiRes=time -e 'printf "%d\n", time*1000' 2>/dev/null || date -u +%s000)
+  if random_4_hex=$(openssl rand -hex 2 2>/dev/null); then
+    :
+  else
+    random_4_hex=$(printf '%04x' $((RANDOM*RANDOM)) | tail -c 4)
+  fi
+  task_id="${SESSION_ID}-task-${created_at_ms}-${random_4_hex}"
+
+  # ISO8601 ms timestamp for created_at.
+  local created_at_iso
+  if command -v coord_now_iso8601 >/dev/null 2>&1; then
+    created_at_iso=$(coord_now_iso8601)
+  else
+    created_at_iso=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  fi
+
+  # Persist into locks[<file>].tasks[] via atomic_write. The lock must
+  # already exist (the holder acquired it via pre_tool_use_write); if
+  # absent, we surface a clean error rather than silently materialize
+  # the lock entry.
+  local state="$COORD_DIR/sessions.json"
+  if [ ! -f "$state" ]; then
+    die 'no .coord/sessions.json found; run install'
+  fi
+  local lock_present
+  lock_present=$(jq -r --arg f "$file" '.locks[$f].session // ""' "$state" 2>/dev/null)
+  if [ -z "$lock_present" ]; then
+    printf 'Error: file %s is not currently locked; nothing to delegate to\n' "$file" >&2
+    return 1
+  fi
+
+  # Task record per PR-PHASE6-05 §7. Optional rationale persisted as
+  # null when caller omits the flag.
+  if ! coord_atomic_edit "$state" \
+       '.locks[$f].tasks += [{
+          task_id: $tid,
+          opener: $op,
+          file: $f,
+          instruction: $instr,
+          complexity: $cx,
+          anchor: {search: $asearch, window_lines: $awin},
+          rationale: (if $rat == "" then null else $rat end),
+          created_at: $cat,
+          affected_lines_at_open: [($wstart|tonumber), ($wend|tonumber)],
+          status: "PENDING",
+          outcome_diff: null,
+          outcome_rationale: null,
+          outcome_at: null
+        }]' \
+       --arg f "$file" \
+       --arg tid "$task_id" \
+       --arg op "$SESSION_ID" \
+       --arg instr "$instruction" \
+       --arg cx "$complexity" \
+       --arg asearch "$anchor_search" \
+       --arg awin "$anchor_window" \
+       --arg rat "$rationale" \
+       --arg cat "$created_at_iso" \
+       --arg wstart "$win_start" \
+       --arg wend "$win_end"; then
+    printf 'Error: failed to persist task to locks[%s].tasks[]\n' "$file" >&2
+    return 1
+  fi
+
+  coord_log_event kind=TASK_OPENED \
+    file="$file" \
+    task_id="$task_id" \
+    opener="$SESSION_ID" \
+    complexity="$complexity" \
+    anchor_window="$anchor_window" \
+    has_rationale=$([ -n "$rationale" ] && printf 1 || printf 0) \
+    2>/dev/null || true
+
+  info "coord task-open: task created"
+  info "  task_id:    $task_id"
+  info "  file:       $file"
+  info "  complexity: $complexity"
+  info "  anchor:     $anchor_search [$anchor_window]"
+  return 0
+}
+
 usage() {
   cat <<'USAGE'
 usage: coord <subcommand> [args]
@@ -405,11 +647,15 @@ Available subcommands:
   uninstall [--purge]  remove hook entries (and optionally .coord/)
   wait <path> [--timeout N]   block until lock on <path> is released or
                               timeout (clamped to [30, 570] seconds)
+  task-open --file <p> --complexity SIMPLE|MODERATE|COMPLEX
+            --anchor <json> --instruction <text> [--rationale <text>]
+                              delegate a task to the lock-holder of <p>;
+                              processed at lock release (Phase 6)
   mediate <subcommand>        operator interface to the Mediator agent.
                               Run `coord mediate --help` for details.
 
 Subcommands coming in later phases:
-  task-open, self-delegate, tasks, locks, mediate --retry
+  self-delegate, tasks, locks, mediate --retry
 USAGE
 }
 
@@ -444,11 +690,13 @@ case "$sub" in
     coord_mediate_dispatch "$@"
     ;;
   help|-h|--help) usage ;;
-  task-open|self-delegate)
-    # Phase 6 deliverables — currently disabled but emit *educational*
-    # guidance so a Claude session that tried option (a) or (b) from the
-    # §B.2 deny prompt loses minimum context. Point them at option (c)
-    # explicitly with concrete syntax.
+  task-open)   cmd_task_open "$@" ;;
+  self-delegate)
+    # Phase 6 T6.04 deliverable — currently disabled but emits
+    # educational guidance so a Claude session that tried option (b)
+    # from the §B.2 deny prompt loses minimum context. Points them at
+    # option (a) `coord task-open` (now real per T6.03) or option (c)
+    # `coord wait`.
     target=""
     while [ $# -gt 0 ]; do
       case "$1" in
@@ -458,24 +706,15 @@ case "$sub" in
       esac
     done
     cat >&2 <<EOF
-coord $sub: not yet enabled.
-
-This subcommand is a Phase 6 deliverable (task delegation / self-delegation)
-and is intentionally disabled in Phase 2.
+coord self-delegate: not yet enabled (Phase 6 T6.04 deliverable).
 
 Currently-available alternatives:
+  (a) Delegate a task to the lock-holder:
+        coord task-open --file ${target:-<path>} --complexity SIMPLE \\
+            --anchor '{"search":"…","window_lines":"…"}' \\
+            --instruction '…' [--rationale '…']
   (c) Passively wait for the lock to release:
         coord wait${target:+ $target} --timeout 570
-
-  Or, if waiting is too long for this turn:
-    - Re-read the file on your next read-set boundary; the lock holder
-      may already have released.
-    - Switch to editing a different file you are not blocked on.
-    - Surface the contention to the user explicitly so they can decide
-      whether to pause one of the sessions.
-
-Phase 2 enables only option (c). Options (a) and (b) become available
-when Phase 6 lands.
 EOF
     exit 1
     ;;
