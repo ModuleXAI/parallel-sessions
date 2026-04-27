@@ -77,27 +77,37 @@ scenario_assert() {
     fails=$((fails + 1))
   fi
 
-  # A.3 — A's stdout contains "stale-read warning".
-  if ! printf '%s' "$STDOUT_OF_FINAL_HOOK" | grep -q 'stale-read warning'; then
-    printf '  FAIL: Session A stdout does not contain "stale-read warning"\n' >&2
+  # A.3 — A's stdout contains the Phase 4 drift report banner.
+  # (Phase 1 used "stale-read warning"; Phase 4 / T4.06 changed the
+  # banner to "Coord drift report" because the per-file pipeline now
+  # produces classified outcomes rather than a single warning line.)
+  if ! printf '%s' "$STDOUT_OF_FINAL_HOOK" | grep -q 'Coord drift report'; then
+    printf '  FAIL: Session A stdout does not contain "Coord drift report"\n' >&2
     printf '    got: %s\n' "$STDOUT_OF_FINAL_HOOK" >&2
     fails=$((fails + 1))
   fi
 
-  # A.4 — Phase 1 ship gate: NO permissionDecision in stdout.
+  # A.4 — Phase 1 ship gate (preserved through Phase 4): NO
+  # permissionDecision in stdout. The validator pipeline never denies
+  # directly; CRITICAL routes through Mediator → existing lockdown gate.
   if printf '%s' "$STDOUT_OF_FINAL_HOOK" | grep -q 'permissionDecision'; then
-    printf '  FAIL: Session A stdout contains "permissionDecision" (Phase 1 ship-gate violation)\n' >&2
+    printf '  FAIL: Session A stdout contains "permissionDecision" (Phase 1+4 ship-gate violation)\n' >&2
     printf '    got: %s\n' "$STDOUT_OF_FINAL_HOOK" >&2
     fails=$((fails + 1))
   fi
 
-  # A.5 — STALE_READ_WARNED event for SID_A in events.jsonl.
+  # A.5 — VALIDATOR_PIPELINE_STARTED event for SID_A in events.jsonl.
+  # (Phase 1 emitted STALE_READ_WARNED; Phase 4 / T4.06 replaced it
+  # with VALIDATOR_PIPELINE_STARTED for the modified-path. The
+  # deleted/skipped_large/hash_failed paths still emit STALE_READ_WARNED
+  # with payload.stale_kind, but the modified case goes through the
+  # validator pipeline.)
   local count
   count=$(jq -rs --arg sid "$SID_A" \
-    '[.[] | select(.kind == "STALE_READ_WARNED" and .session == $sid)] | length' \
+    '[.[] | select(.kind == "VALIDATOR_PIPELINE_STARTED" and .session == $sid)] | length' \
     "$events" 2>/dev/null || printf 0)
   if [ "$count" -lt 1 ]; then
-    printf '  FAIL: events.jsonl has no STALE_READ_WARNED event for session %s\n' "$SID_A" >&2
+    printf '  FAIL: events.jsonl has no VALIDATOR_PIPELINE_STARTED event for session %s\n' "$SID_A" >&2
     printf '    found %s such event(s); want >= 1\n' "$count" >&2
     fails=$((fails + 1))
   fi

@@ -43,6 +43,8 @@ LIB_DIR="$(cd "$HOOK_DIR/../lib" && pwd)"
 . "$LIB_DIR/hash.sh"
 # shellcheck disable=SC1091
 . "$LIB_DIR/lockdown.sh"
+# shellcheck disable=SC1091
+. "$LIB_DIR/read_snapshots.sh"
 
 coord_resolve_root() {
   if [ -n "${COORD_DIR:-}" ] && [ -d "$COORD_DIR" ]; then
@@ -137,9 +139,17 @@ STATE="$COORD_DIR/sessions.json"
 # write (immediately below), then clear them INSIDE the atomic write.
 
 PENDING_NOTIFS=""
+PRIOR_HASH=""
 if [ -f "$STATE" ]; then
   PENDING_NOTIFS=$(jq -r --arg sid "$SESSION_ID" --arg path "$FILE_PATH" '
     (.notifications[$sid][$path] // []) | if length == 0 then "" else (map("- " + .) | join("\n")) end
+  ' "$STATE" 2>/dev/null || printf '')
+  # Capture prior is_latest hash for this path so we can supersede the
+  # snapshot file after atomic_edit flips is_latest:false (PR-PHASE4-05).
+  PRIOR_HASH=$(jq -r --arg sid "$SESSION_ID" --arg path "$FILE_PATH" '
+    (.read_sets[$sid].reads // [])
+    | map(select(.path == $path and ((.is_latest // true) == true)))
+    | if length == 0 then "" else .[0].hash end
   ' "$STATE" 2>/dev/null || printf '')
 fi
 
@@ -167,6 +177,16 @@ then
     reason=atomic_edit_failed
   exit 0
 fi
+
+# Phase 4 / PR-PHASE4-05 — read-snapshot capture. Write content to
+# .coord/read_snapshots/<sid>/<hash>.txt for validator pipeline
+# consumption. Idempotent (re-Read of unchanged file → no-op).
+# SKIPPED_LARGE skips silently (logged separately by helper). Prior
+# snapshot superseded if a different hash existed for this file.
+if [ -n "$PRIOR_HASH" ] && [ "$PRIOR_HASH" != "$HASH" ]; then
+  coord_read_snapshot_supersede "$SESSION_ID" "$PRIOR_HASH" || true
+fi
+coord_read_snapshot_write "$SESSION_ID" "$HASH" "$FILE_PATH" || true
 
 # Log READ event (non-blocking).
 coord_log_event kind=READ tool=Read file="$FILE_PATH" hash="$HASH"

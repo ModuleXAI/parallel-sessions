@@ -1472,4 +1472,1669 @@ PR-PHASE3-03 cross-PR dependency noted.
 
 ---
 
+## PR-PHASE4-01 — Validator agent design contract (Decision 2)
+
+**Date:** 2026-04-26
+**Author:** Phase 4 builder (draft per user-resolved Decision 2 +
+Concern A/E/F dispositions from Phase 4 startup halt-report).
+**Status:** APPROVED 2026-04-26 at T4.01 close — gates T4.02 (pre-filter), T4.04 (validator
+spawn), T4.05 (VALIDATOR_REFERENCE.md + install.sh extension), and
+T4.06 (pipeline integration). Final merge into IMPLEMENTATION_PLAN.md
+/ CLAUDE.md folds into phase-4-signoff.md per CLAUDE.md §A.4 pattern.
+**Driver:** User direction (Phase 4 resume prompt, Decision 2
+verbatim; Concern A/E/F dispositions confirmed at T4.01 go-ahead).
+
+### Observed gap requiring change
+
+Plan §5 Phase 4 names the Validator scope as "validator_agent.md
+agent hook + flag file `.coord/validation/<session_id>.json` written
+by `pre_tool_use_write.sh` when hash mismatch found" but does not
+specify the agent's prompt structure, verdict JSON schema, spawn
+flags, recursion-guard mechanism, or relationship to the Mediator
+spawn pattern (which evolved during Phase 3). Plan §3.2 places
+Validator state at `.coord/validation/`; user Decision 2 mirrors the
+Mediator namespace at `.coord/validator/`. Plan §5 also implies a
+flag-file pattern (write a flag, agent hook reads + classifies);
+user Decision 2 supersedes with an inline-call pattern (pre-filter
++ validator spawn called directly from `pre_tool_use_write.sh`'s
+stale-read branch). Implementation needs the contract pinned before
+T4.02/T4.04/T4.05/T4.06 land.
+
+### User-resolved decision (verbatim distillation)
+
+Validator is a subagent that classifies file drift between two
+versions of a file: the version a session read, and the current
+state. Returns ONE of three verdicts: SAFE / MINOR / CRITICAL.
+
+**Two-stage pipeline (Phase 4 design):**
+
+Stage 1 — Pre-filter (`lib/validator_prefilter.sh`):
+- Lightweight Bash + diff analysis
+- Triggered when stale-read detected in `pre_tool_use_write.sh`
+  (the stale-read walk at lines 195–241; NOT the `# PHASE-4
+  UPGRADE POINT` comment at lines 304–312, which is a marker
+  block to be removed during T4.06 — see Concern A disposition)
+- Returns: SAFE | ESCALATE_TO_AGENT
+- Heuristics for SAFE:
+  - Whitespace-only changes (`diff -w` produces empty)
+  - Comment-only changes (every changed line matches comment
+    syntax: `^[\s]*(#|//|/\*|\*|<!--|"""|''')`) AND no
+    multi-line-string ambiguity in the surrounding context
+    (Concern C disposition — when in doubt, ESCALATE)
+  - Blank-line-only changes (every changed line empty)
+- Always-ESCALATE conditions:
+  - File >1 MB
+  - Pre-filter elapsed time exceeds 5 s
+  - Any uncertainty about multi-line-string context for
+    comment-classification
+- Doctrine: "false-negative SAFE on real drift is dangerous;
+  false-positive ESCALATE on trivial drift is acceptable" —
+  confirmed at T4.01 go-ahead per Concern F disposition.
+
+Stage 2 — Validator agent (`lib/validator_spawn.sh`):
+- Spawns `claude -p` with validator prompt + 3-section context
+- Mirrors the Phase 3 Mediator spawn paradigm (subscription
+  mode, no-bare; T3.06/T3.07 lessons captured in CLAUDE.md
+  §A.13 lesson #4 apply)
+- Tool restrictions: `--allowedTools "Bash Read"`,
+  `--disallowedTools "Write Edit NotebookEdit Task"`
+- Recursion guard: `CLAUDE_CODE_VALIDATOR=<depth>` env marker
+  (parallel to Phase 3's `CLAUDE_CODE_MEDIATOR`). Spawn helper
+  refuses to spawn from within a session that already has this
+  marker set. Phase 4 uses depth=1 only (validator does not
+  spawn peer validators); the depth field is reserved for
+  Phase 5+ extensibility, not exercised in Phase 4.
+- Wall-clock estimate: ~30–60 s subscription mode; 120 s
+  hard timeout per CLAUDE.md §A.13 lesson #4
+- Mock-binary support for Phase 4 unit tests per Decision 1.1
+  (real `claude -p` spawn exercised at Phase 7 integration
+  harness)
+
+**Validator prompt structure (3-section, mirrors Mediator):**
+
+Section 1 — Identity (~80 words, fixed text):
+
+> You are a Validator agent in a Claude Code coordination system.
+> Your role is to classify file drift between two versions: the
+> version a session read, and the current state. You return ONE
+> of three verdicts: SAFE / MINOR / CRITICAL. Your judgment
+> determines whether a session's pending Write should proceed
+> silently, with a warning, or be escalated to the Mediator. You
+> do not take actions; you classify.
+
+Section 2 — System Constraints (HYBRID — short core rules + pointer
+to `VALIDATOR_REFERENCE.md`):
+
+The prompt contains 5 core rules:
+1. Use `Bash` and `Read` tools only. NEVER use `Edit`, `Write`,
+   or `NotebookEdit`.
+2. You are not a tracked session. You operate as a temporary
+   classifier.
+3. Write your verdict to `.coord/validator/verdict/<ts>.json`.
+4. If `CLAUDE_CODE_VALIDATOR=1` in env, you are nested. Do NOT
+   spawn another Validator. (Recursion guard.)
+5. You DO NOT take actions on state. You only classify.
+   Mediator handles CRITICAL escalation actions.
+
+For detailed mechanics (verdict schema, drift classification
+heuristics, diff-summary format), the prompt instructs the
+Validator to read `.coord/validator/VALIDATOR_REFERENCE.md` when
+needed.
+
+Section 3 — Drift Context (HYBRID — embedded snapshot + live read
+allowed):
+
+The prompt embeds:
+- (a) File path
+- (b) Read snapshot: `sha256` + file content as the session saw it
+  at read time (truncated with marker if file >100 KB)
+- (c) Current state: `sha256` + current file content from disk
+  (truncated with marker if file >100 KB)
+- (d) Diff between (b) and (c) (unified diff format, truncated
+  with marker if diff >50 KB)
+- (e) Verdict contract restated (SAFE/MINOR/CRITICAL definitions
+  + JSON output instruction)
+
+The Validator may use `Bash` + `Read` to inspect related files
+(imports, dependencies) when context-aware classification is
+needed. The embedded snapshot/current is initial context; live
+read is permitted within the spawned session's `cwd`.
+
+**Verdict JSON schema:**
+
+```json
+{
+  "verdict_id": "<UUID v4>",
+  "ts": "<ISO 8601 UTC>",
+  "for_pending_entry": null,
+  "validator_session_id": "<spawn session UUID from claude -p>",
+
+  "file": "<path>",
+  "session": "<caller session_id>",
+  "verdict": "SAFE" | "MINOR" | "CRITICAL",
+
+  "reasoning": "<Validator explanation, 1-3 sentences, plain text, no apostrophes per F-014 lesson>",
+  "diff_summary": "<concise drift description, 1-3 sentences, plain text, no apostrophes>",
+
+  "spawn_metadata": {
+    "duration_ms": <int>,
+    "model": "<model_name>",
+    "spawn_mode": "no_bare"
+  }
+}
+```
+
+Field constraints:
+- `for_pending_entry` is always `null` for Validator verdicts
+  (this field is reserved for Mediator verdicts whose
+  `for_pending_entry` references the triggering pending entry).
+- Validator does NOT include `actions[]`, `confidence`,
+  `severity`, `message_to_caller`, or `message_to_others`
+  fields — those are Mediator-specific (Decision 2 verbatim).
+  Validator classifies; Mediator decides actions.
+- `verdict` enum is exactly `{SAFE, MINOR, CRITICAL}`. No other
+  values permitted.
+- `validator_session_id` is the UUID assigned by `claude -p` to
+  the spawned process (captured from raw output JSON's
+  `.session_id` field per CLAUDE.md §A.13 lesson #4).
+
+**`VALIDATOR_REFERENCE.md` content (drafted in T4.05; lives in
+`src/lib/VALIDATOR_REFERENCE.md`; copied to
+`.coord/validator/VALIDATOR_REFERENCE.md` by `install.sh` per
+Concern G disposition):**
+
+Sections to include:
+1. Verdict JSON schema with full field reference
+2. Drift classification heuristics (when SAFE / MINOR / CRITICAL)
+3. Diff-summary format conventions (1–3 sentences, plain text,
+   no apostrophes per F-014 lesson)
+4. Examples of SAFE drifts (formatter, comments, blank lines,
+   unused imports reordered, license header updates)
+5. Examples of MINOR drifts (new function added elsewhere, string
+   literal changed, test added, typo fixed)
+6. Examples of CRITICAL drifts (function signature changed,
+   exported variable removed, type definition changed, database
+   schema migrated)
+7. Hand-off to Mediator: Validator writes pending entry
+   `kind=critical_drift`; Mediator picks up via existing
+   `pre_tool_use_any.sh` consumer (cross-references PR-PHASE4-03)
+
+### Plan section deltas required
+
+**A. `IMPLEMENTATION_PLAN.md` §3.1 (layer list)** — update layer 7
+"Validation subagent" description: replace "Agent-type hook guarded
+by `.coord/validation/<session_id>.json` flag file" with "Pre-filter
++ agent-spawn pipeline guarded by an inline call from
+`pre_tool_use_write.sh`'s stale-read branch. Pre-filter
+(`lib/validator_prefilter.sh`) classifies trivial drifts
+(whitespace/comment/blank-line-only) as SAFE without spawning;
+non-trivial drifts escalate to a `claude -p` spawn
+(`lib/validator_spawn.sh`) following the Phase 3 Mediator pattern.
+Verdicts are SAFE/MINOR/CRITICAL; CRITICAL produces a
+`kind=critical_drift` pending entry consumed by the existing
+Mediator pipeline."
+
+**B. `IMPLEMENTATION_PLAN.md` §3.2 (file structure on disk)** —
+revise the `validation/` block:
+
+```
+├── validator/                       # Phase 4 Validator state
+│   ├── VALIDATOR_REFERENCE.md       # technical reference (copied from src/lib by install.sh)
+│   ├── verdict/<ts>.json            # historical Validator decisions
+│   └── cache.json                   # SAFE/MINOR verdict cache (PR-PHASE4-04)
+```
+
+The legacy `validation/<session_id>.json` flag-file path is
+removed from §3.2 entirely — Phase 4 deviates from the original
+flag-file pattern in favor of inline-call (Concern E disposition).
+
+**C. `IMPLEMENTATION_PLAN.md` §3.5 events.jsonl kind list** — add:
+- `VALIDATOR_PREFILTER_SAFE` (payload: `file`, `session`,
+  `read_hash`, `current_hash`, `prefilter_reason` ∈
+  {whitespace_only, comment_only, blank_only}, `elapsed_ms`).
+- `VALIDATOR_PREFILTER_ESCALATED` (payload: `file`, `session`,
+  `read_hash`, `current_hash`, `escalation_reason` ∈
+  {non_trivial_diff, file_too_large, prefilter_timeout,
+  multiline_string_ambiguity}, `elapsed_ms`).
+- `VALIDATOR_SPAWN_STARTED` (payload: `file`, `session`,
+  `model`, `spawn_mode`, `budget_usd`, `timeout_sec`).
+- `VALIDATOR_VERDICT_SAFE` / `VALIDATOR_VERDICT_MINOR` /
+  `VALIDATOR_VERDICT_CRITICAL` (payload: `file`, `session`,
+  `verdict_path`, `validator_session_id`, `duration_ms`,
+  `total_cost_usd`, `diff_summary`).
+- `VALIDATOR_SPAWN_FAILED` (payload: `file`, `session`,
+  `reason` ∈ {empty_output, is_error_true, no_verdict_written,
+  recursion_guard, claude_binary_missing, timeout},
+  `spawn_session_id` (nullable), `duration_ms`).
+- `VALIDATOR_SPAWN_REFUSED` (payload: `file`, `session`,
+  `reason` ∈ {recursion_guard, critical_bypass_active,
+  claude_binary_missing}).
+
+**D. `IMPLEMENTATION_PLAN.md` §3.6 config.json defaults** — add:
+- `validator_enabled: true` (emergency override mirroring
+  `mediator_enabled`; falls back to Phase 1 stale-read warning
+  text when false).
+- `validator_prefilter_max_file_kb: 1024` (1 MB ceiling for
+  pre-filter; bounds [16, 65536]).
+- `validator_prefilter_timeout_seconds: 5` (bounds [1, 30]).
+- `validator_spawn_budget_usd: 0.50` (matches Mediator default;
+  bounds [0.05, 5.00]).
+- `validator_spawn_timeout_seconds: 120` (matches Mediator
+  default; bounds [30, 300]).
+- `validator_model: "claude-haiku-4-5-20251001"` (matches
+  Mediator default; install-time tunable, no enforced bounds).
+
+`coord health` validates the bounds.
+
+**E. `IMPLEMENTATION_PLAN.md` §4 component specs** — add:
+
+- `lib/validator_prefilter.sh`:
+  - `coord_validator_prefilter <file> <read_content_path> <current_content_path>`:
+    returns 0 on SAFE, 1 on ESCALATE_TO_AGENT, 2 on internal
+    error (treated as ESCALATE by caller).
+    Stdout on SAFE: `safe:<reason>` where reason ∈
+    {whitespace_only, comment_only, blank_only}.
+    Stdout on ESCALATE: `escalate:<reason>` where reason ∈
+    {non_trivial_diff, file_too_large, prefilter_timeout,
+    multiline_string_ambiguity}.
+- `lib/validator_spawn.sh`:
+  - `coord_validator_spawn <file> <session_id> <read_content_path> <current_content_path>`:
+    returns 0 on completion (verdict written, path on stdout),
+    1 on refusal (recursion guard, critical bypass) or failure.
+    Mirrors `coord_mediator_spawn` structure.
+  - Internal helpers: `_coord_validator_build_identity_section`,
+    `_coord_validator_build_constraints_section <ref_path>`,
+    `_coord_validator_build_context_section <file> <read_content_path> <current_content_path>`,
+    `_coord_validator_assemble_prompt <file> <read_path> <current_path> <depth>`.
+- `lib/VALIDATOR_REFERENCE.md`: technical reference per the
+  content outline above. T4.05 deliverable.
+- `install.sh` extension (T4.05 sub-task per Concern G):
+  - Create `.coord/validator/` and `.coord/validator/verdict/`
+    directories.
+  - Copy `src/lib/VALIDATOR_REFERENCE.md` →
+    `.coord/validator/VALIDATOR_REFERENCE.md` (idempotent;
+    overwrites if existing copy is older than source).
+  - `install.sh --uninstall` cleanup removes `.coord/validator/`
+    along with the rest of `.coord/`.
+
+**F. `IMPLEMENTATION_PLAN.md` §5 Phase 4 Scope** — replace
+"`validator_agent.md` agent hook" with the pre-filter + spawn
+pattern; replace "Flag file `.coord/validation/<session_id>.json`
+written by `pre_tool_use_write.sh` when hash mismatch found" with
+"Inline call from `pre_tool_use_write.sh`'s stale-read walk:
+pre-filter classifies trivial drifts to SAFE; non-trivial drifts
+escalate to `claude -p` spawn"; update CRITICAL bullet to
+reference `kind=critical_drift` pending entry per PR-PHASE4-03.
+
+**G. `IMPLEMENTATION_PLAN.md` §5 Phase 4 Done-when** — preserve
+the four ship-gate items as listed; the cache item (#4) is
+implemented per PR-PHASE4-04 (Concern D disposition;
+not deferred).
+
+**H. `CLAUDE.md` §B.6 (Mediator invocation protocol)** — add a
+runtime sub-rule for Validator spawn behavior (the §B.6 section
+covers anomaly invocation generally; Phase 4 adds Validator as a
+sibling layer):
+- "Validator runs synchronously inside the
+  `pre_tool_use_write.sh` hook on stale-read drift; you do not
+  invoke it directly. The spawn paradigm matches the Mediator's
+  (subscription mode, `claude -p`, restricted tools, recursion
+  guard via `CLAUDE_CODE_VALIDATOR=1`)."
+- Phase 4 updates §B.11 quick-reference table to include
+  Validator rows.
+
+**I. `CLAUDE.md` §B.10 anti-patterns** — add:
+- "**Do not invoke `coord` validator/mediator/lockdown CLIs by
+  reading the verdict files yourself.** Verdict files are an
+  audit record consumed by the hook layer; reading them directly
+  is fine for inspection, but don't try to act on a verdict by
+  hand — the hook layer handles routing."
+
+### Implementation-task dependencies
+
+- T4.02 (`lib/validator_prefilter.sh`) implements §E pre-filter
+  spec. **Gated on this PR approval.**
+- T4.03 (validator spawn POC) is a 15 min uncommitted POC to
+  verify spawn flag compatibility (mock claude binary) and
+  CLAUDE_CODE_VALIDATOR env propagation. **Gated on this PR
+  approval.**
+- T4.04 (`lib/validator_spawn.sh`) implements §E spawn helper
+  spec, with mock-binary support per Decision 1.1. **Gated on
+  this PR approval AND T4.03 POC closure.**
+- T4.05 (`lib/VALIDATOR_REFERENCE.md` + `install.sh` extension)
+  delivers the reference doc + install integration. **Gated on
+  this PR approval; can run parallel to T4.04 if useful.**
+- T4.06 (pipeline integration in `pre_tool_use_write.sh`) is
+  gated on this PR + PR-PHASE4-02 + PR-PHASE4-04.
+- T4.07 (ship-gate fixtures) verifies §G done-when criteria
+  end-to-end.
+
+### Ambiguity dispositions (resolved 2026-04-26 at T4.01 go-ahead)
+
+1. **PHASE-4 UPGRADE POINT actual location.** **RESOLVED —
+   stale-read walk at lines 195–241 of pre_tool_use_write.sh.**
+   The comment block at lines 304–312 (post-acquire) is a
+   marker, not the integration site. T4.06 relocates the
+   integration into the stale-read walk and removes the
+   marker block. Per Concern A disposition.
+
+2. **`.coord/validator/` vs `.coord/validation/` namespace.**
+   **RESOLVED — `.coord/validator/`** mirroring `.coord/mediator/`
+   per Decision 2. Plan §3.2 deviation documented in §B above.
+   The legacy `validation/` path is removed from the file-
+   structure spec entirely. Per Concern E disposition.
+
+3. **Pre-filter heuristic conservatism level.** **RESOLVED —
+   conservative**: SAFE only when every changed line matches the
+   comment regex AND no multi-line-string ambiguity in the
+   surrounding context (3 lines above/below). Any uncertainty
+   → ESCALATE_TO_AGENT. Per Concern C disposition. T4.02
+   implements with bats coverage for dangerous patterns
+   (multi-line string with `#` inside, markdown heading change,
+   heredoc embedding).
+
+4. **Validator depth field exercise in Phase 4.** **RESOLVED —
+   depth=1 only.** The depth field is reserved for Phase 5+
+   extensibility but not exercised in Phase 4 (Validator does
+   not spawn peer validators; if peer-review-equivalent logic
+   is later wanted, it would be a Phase 5+ addition with its
+   own PR).
+
+### Cross-references
+
+- PR-PHASE4-02 (pipeline behavior + synchronous CRITICAL) — sibling
+  PR; this PR defines the validator interface, PR-PHASE4-02
+  defines the caller-side routing.
+- PR-PHASE4-03 (Mediator-Validator integration) — sibling PR;
+  this PR's CRITICAL pathway produces the `critical_drift`
+  pending entry that PR-PHASE4-03 documents the Mediator
+  consumption of.
+- PR-PHASE4-04 (Validator cache) — sibling PR; cache lookup
+  precedes pre-filter + spawn in the pipeline (Concern D
+  disposition).
+- PR-PHASE3-01 (Mediator) — Validator's spawn mechanics mirror
+  Mediator's; CLAUDE.md §A.13 lesson #4 spawn discipline applies.
+- FINDINGS — F-014 (apostrophe-fragility) is RESOLVED but its
+  doctrine (no apostrophes in user-facing text) applies to
+  Validator's `reasoning` and `diff_summary` fields.
+
+### Non-changes (deliberate)
+
+- Mediator code (`lib/mediator_spawn.sh`,
+  `lib/mediator_pending.sh`, `lib/lockdown.sh`,
+  `hooks/pre_tool_use_any.sh` Mediator-consumption branch)
+  unchanged. Per Decision 4 / PR-PHASE4-03.
+- `subagent_filter.sh` extends naturally to Validator subagent
+  tool calls (Validator's `claude -p` spawn gets a fresh
+  session_id; its tool calls' `agent_type` field will not
+  collide with the parent's coordination).
+- Phase 3 invariant (two-location deny: lock-held + lockdown)
+  unchanged. Validator does not introduce a third deny location.
+- `coord_consume_corrupt_state_flag` unchanged; pending.jsonl
+  consumer reads `kind=critical_drift` naturally per
+  PR-PHASE3-03's pending-kind-agnostic design.
+
+### Acknowledgement
+
+APPROVED 2026-04-26 at T4.01 close (user sign-off after halt-report).
+Status DRAFT → APPROVED. Final merge
+into IMPLEMENTATION_PLAN.md / CLAUDE.md folds into
+phase-4-signoff.md.
+
+---
+
+## PR-PHASE4-02 — Pipeline behavior + synchronous CRITICAL semantics (Decision 3 + Concern B)
+
+**Date:** 2026-04-26
+**Author:** Phase 4 builder (draft per user-resolved Decision 3 +
+Concern B disposition: synchronous mode, Interpretation B).
+**Status:** APPROVED 2026-04-26 at T4.01 close — gates T4.06 (pipeline integration) and T4.07
+(ship-gate fixtures, particularly the critical-drift-escalated
+scenario). Final merge into IMPLEMENTATION_PLAN.md / CLAUDE.md
+folds into phase-4-signoff.md.
+**Driver:** User direction (Phase 4 resume prompt, Decision 3
+verbatim + Concern B disposition at T4.01 go-ahead).
+
+### Observed gap requiring change
+
+Plan §5 Phase 4 specifies the Validator's verdict outcomes
+(SAFE/MINOR/CRITICAL → silent / context / deny) but predates the
+Phase 3 Mediator pipeline (pending entry, three action types,
+lockdown). The interaction between Validator CRITICAL verdict and
+Mediator's intervention path is not specified by the plan; user
+Decision 3 fills the gap. Concern B (raised at Phase 4 startup)
+identified a semantic ambiguity: "Hook caller's Write BLOCKS
+(synchronous wait for Mediator)" admits two interpretations
+(event-driven vs synchronous-inline). User dispositioned to
+synchronous-inline (Interpretation B). This PR pins both Decision 3
+and the synchronous-mode disposition.
+
+### User-resolved decision (verbatim distillation)
+
+**Pipeline behavior post-verdict (Decision 3):**
+
+SAFE:
+- Verdict logged to `.coord/validator/verdict/<ts>.json`
+- Hook caller proceeds with Write (no banner, no escalation)
+- Phase 1+2+3 stale-read warning suppressed for THIS file
+  (other files in the same Write may still produce a stale
+  banner — suppression is per-file, not per-Write)
+- Event: `VALIDATOR_VERDICT_SAFE`
+
+MINOR:
+- Verdict logged
+- Hook caller's `additionalContext` gets banner: "Drift on
+  `<file>`: `<diff_summary>`. Validator classified as MINOR.
+  Proceeding."
+- Write proceeds immediately (lock acquired, exit 0)
+- Event: `VALIDATOR_VERDICT_MINOR`
+
+CRITICAL:
+- Verdict logged
+- Validator writes pending entry `kind=critical_drift` to
+  `.coord/mediator/pending.jsonl` (per PR-PHASE4-03 schema)
+- Hook caller's `additionalContext` gets banner: "Critical
+  drift on `<file>`: `<diff_summary>`. Mediator analyzing..."
+- **Hook synchronously invokes Mediator INLINE** (per Concern B
+  disposition; see "Synchronous mode" section below)
+- Mediator decides advice / surgical_fix / lockdown per
+  PR-PHASE3-01's existing 3-action contract
+- Hook routes per Mediator verdict:
+  - Mediator chose `advice` → caller gets advice banner +
+    Write proceeds (lock acquired)
+  - Mediator chose `surgical_fix` → applied via existing
+    `verdict_apply.sh`; if applied actions cleared the stale
+    read (e.g., evicted the drift-causing session and updated
+    file state), hook re-validates the read-set; if read-set
+    is now consistent, Write proceeds; if still stale, hook
+    re-runs Validator (capped at depth=2 to prevent loops)
+  - Mediator chose `lockdown` → `lockdown.json` is now active;
+    existing lockdown gate at `pre_tool_use_write.sh` line 188
+    (`coord_lockdown_check && coord_lockdown_emit_deny`) fires
+    on the SAME hook invocation's downstream code path,
+    emitting deny via the existing two-location deny invariant
+    (Phase 3 invariant preserved)
+- Event chain: `VALIDATOR_VERDICT_CRITICAL` →
+  `MEDIATOR_PENDING_DELIVERED` (or equivalent Phase 3 event) →
+  `MEDIATOR_VERDICT` → (one of `LOCKDOWN_ACTIVATED` |
+  `LOCK_RELEASED`/`SESSION_EVICTED`/`READ_SET_CLEARED` |
+  `MEDIATOR_VERDICT` advice-only) → optionally
+  `HOOK_DENIED_BY_LOCKDOWN`
+
+**Synchronous mode (Concern B disposition):**
+
+> "Synchronous mode is intentional, not a deferred optimization.
+> Validator agent's purpose is to gate Write decisions; if Write
+> proceeds before Mediator can intervene, validator serves no
+> protective function. CRITICAL verdict explicitly means
+> 'intervention needed' — intervention after Write is meaningless."
+
+**Latency budgets (Concern B disposition):**
+
+| Stage | Latency budget | Frequency (estimated) |
+|---|---|---|
+| Cache hit (PR-PHASE4-04) | <50 ms | Recurring same-drift events |
+| Pre-filter SAFE | <100 ms | 50–70% of stale-read events |
+| Validator MINOR | ~30–60 s | 25–45% of stale-read events |
+| Validator CRITICAL → Mediator advice/surgical_fix | ~60–90 s | 5–10% of stale-read events |
+| Validator CRITICAL → Mediator lockdown | ~60–100 s + deny | <5% of stale-read events |
+
+The CRITICAL latency budget (~60–100 s) intentionally exceeds
+CLAUDE.md §A.6's 2-second p99 hook target. This is bounded to
+CRITICAL drift events (5–10% of stale-read attempts; stale-read
+attempts are themselves a small fraction of all writes), and
+justified by the safety contract: a CRITICAL verdict means the
+validator believes intervention is needed before the Write
+proceeds. Letting the Write land while Mediator deliberates
+would defeat the validator's purpose.
+
+The Bash-tool 600 s ceiling (per PR-PHASE0-01 / F-008) provides
+ample margin: 100 s worst case is well under the 600 s ceiling
+and well under the 570 s `wait_max_seconds` default.
+
+**`validator_spawn` caller contract (Concern B disposition):**
+
+> "validator_spawn captures claude -p output, parses verdict,
+> returns to pre_tool_use_write.sh which then routes per
+> Decision 3."
+
+`coord_validator_spawn` is synchronous: it blocks until the
+spawned `claude -p` completes (within the 120 s timeout from
+PR-PHASE4-01 §D), reads the verdict file written by the
+spawned process, and returns the verdict path on stdout (rc=0)
+or an empty stdout (rc=1) on failure. Caller (`pre_tool_use_write.sh`'s
+T4.06 integration) parses the verdict and routes per Decision 3.
+
+NOT fire-and-forget. NOT async. NOT background.
+
+**Phase 3 two-location deny invariant preservation:**
+
+Phase 4 introduces NO new deny location. The CRITICAL pathway:
+1. Validator returns CRITICAL → no deny.
+2. Validator writes `critical_drift` pending entry → no deny.
+3. Hook synchronously invokes Mediator → Mediator may write
+   lockdown.json.
+4. Hook's downstream path checks `coord_lockdown_check` (existing
+   line 188 gate) → deny via existing lockdown gate IF lockdown
+   is now active.
+5. Otherwise (advice / surgical_fix), the hook proceeds normally
+   and either acquires the lock or denies via the existing
+   lock-held gate (existing line 263 branch).
+
+Two deny locations remain: (1) `pre_tool_use_write.sh`
+lock-held-by-other branch, (2) any hook reading
+`.coord/mediator/lockdown.json` with `active=true`. Phase 4
+invariant guard #7 + #8 (per IMPLEMENTATION_LOG.md Phase 4
+section) assert `validator_spawn.sh` and
+`validator_prefilter.sh` do NOT emit `permissionDecision: "deny"`
+in any code path.
+
+**Hook re-entry and recursion considerations:**
+
+The synchronous CRITICAL pathway calls the Mediator from
+inside `pre_tool_use_write.sh`. Mediator's spawn helper
+(`coord_mediator_spawn`) is itself synchronous (Phase 3 design).
+Both spawns set `CLAUDE_COORD=0` in their child env per
+CLAUDE.md §A.13 lesson #4, so the spawned `claude -p` processes
+do not register as participants and do not re-enter coord hooks.
+The recursion guards (`CLAUDE_CODE_VALIDATOR=<depth>`,
+`CLAUDE_CODE_MEDIATOR=<depth>`) prevent nested spawns.
+
+A subtle case: if Mediator's surgical_fix completes and the
+hook re-validates the read-set, finds it's STILL stale, and
+re-runs Validator → that's a Validator-at-depth-2 invocation.
+The recursion guard refuses depth>1 in Phase 4 (Validator
+does not exercise peer review). The hook treats a refused
+re-spawn as MINOR (proceed with banner) to break the loop.
+This is documented in §B.6 of CLAUDE.md updates.
+
+### Plan section deltas required
+
+**A. `IMPLEMENTATION_PLAN.md` §5 Phase 4 Scope** — extend with the
+synchronous-CRITICAL pipeline description (cross-reference this PR).
+Update the existing bullet "CRITICAL verdict → enforced deny on
+next write attempt until session re-reads" to reflect the new
+synchronous semantics: "CRITICAL verdict → synchronous Mediator
+invocation in the same hook; Mediator decides advice /
+surgical_fix / lockdown; deny (if any) routes through the existing
+lockdown gate, preserving Phase 3 invariant."
+
+**B. `IMPLEMENTATION_PLAN.md` §5 Phase 4 "Done when"** — add:
+- "Validator SAFE verdict on a stale-read drift suppresses the
+  per-file stale-read banner; other files' banners (if any)
+  preserved."
+- "Validator MINOR verdict produces banner with diff summary;
+  Write proceeds without escalation."
+- "Validator CRITICAL verdict triggers synchronous Mediator
+  invocation in the same hook; Mediator's verdict routes per
+  PR-PHASE3-01's 3-action contract (advice / surgical_fix /
+  lockdown)."
+- "Validator CRITICAL → Mediator lockdown produces deny via
+  existing lockdown gate; Phase 4 invariant (8 architectural
+  guards) holds."
+
+**C. `IMPLEMENTATION_PLAN.md` §3.7 sequence diagrams** — add a
+new sequence diagram §3.7.X "Validator CRITICAL synchronous
+escalation":
+```
+Session A reads foo.ts (sha=abc123)
+[Other session writes foo.ts; current sha=def456]
+Session A → Write foo.ts
+  pre_tool_use_write.sh hook fires:
+    stale-read walk detects drift on foo.ts (abc123 != def456)
+    cache lookup (PR-PHASE4-04): MISS
+    pre-filter: ESCALATE (non-trivial diff)
+    spawn Validator (claude -p, ~45s)
+    Validator returns: CRITICAL
+    Validator writes verdict file
+    Hook writes pending entry kind=critical_drift
+    Hook synchronously invokes Mediator (claude -p, ~25s)
+    Mediator returns: surgical_fix (clear A's read-set entry for foo.ts)
+    Hook applies via verdict_apply.sh
+    Hook re-validates read-set: now consistent (entry cleared)
+    Hook proceeds with lock acquisition
+    Lock acquired; banner: "Drift on foo.ts resolved by Mediator. Re-read recommended."
+    exit 0 (allow)
+Total hook latency: ~75s
+```
+
+**D. `IMPLEMENTATION_PLAN.md` §3.5 events.jsonl kind list** — add:
+- `MEDIATOR_INVOKED_INLINE` (payload: `triggered_by` ∈
+  {validator_critical, manual, watchdog}, `caller_session`,
+  `caller_hook`, `pending_entry_id`).
+- (The existing `MEDIATOR_VERDICT` event applies; no new kind
+  needed for the verdict itself.)
+
+**E. `CLAUDE.md` §B.2 (write coordination)** — extend the rule
+text to reflect the Validator pathway. Currently §B.2 describes
+the lock-held-by-other deny + read-set validation flow. Add:
+- "On stale-read drift: hook runs Validator pipeline (cache →
+  pre-filter → agent spawn). Verdict drives behavior:
+  SAFE proceeds silently, MINOR proceeds with banner,
+  CRITICAL invokes Mediator inline. Deny (if any) routes
+  through the existing lockdown gate; Phase 3 two-location
+  deny invariant preserved."
+- "Validator pipeline latency: SAFE <100 ms, MINOR ~30–60 s,
+  CRITICAL ~60–100 s. The latency budget exceptions are
+  bounded to drift events (5–10% of stale-read attempts;
+  stale-read attempts are themselves a small fraction of
+  writes)."
+
+**F. `CLAUDE.md` §B.6 (Mediator invocation protocol)** — add:
+- "Mediator may also be invoked inline by `pre_tool_use_write.sh`'s
+  Validator-CRITICAL pathway (Phase 4). The mechanics are
+  identical to ambient-suspicion-triggered invocation: pending
+  entry written, Mediator spawned synchronously, verdict
+  applied. The only difference is the trigger (Validator
+  classification vs watchdog observation)."
+- "If a Validator-CRITICAL → Mediator surgical_fix → re-validate
+  → still-stale loop is detected (depth>1), Validator
+  re-spawn is refused by the recursion guard
+  (`CLAUDE_CODE_VALIDATOR=1`), and the hook treats the residual
+  drift as MINOR (proceed with banner). This bounds the
+  worst-case latency at ~75 s + ~30 s = ~105 s, well under
+  the 600 s Bash-tool ceiling."
+
+**G. `CLAUDE.md` §B.11 quick-reference table** — add rows:
+- Situation: "Stale read; Validator → SAFE." You do: "Proceed
+  normally; no banner." Hook does: "Suppresses per-file stale
+  banner; logs SAFE verdict." Enforcement: `[HOOK-ENFORCED]`.
+- Situation: "Stale read; Validator → MINOR." You do: "Proceed
+  with banner context." Hook does: "Emits MINOR banner; allows
+  write." Enforcement: `[HOOK-ENFORCED]`.
+- Situation: "Stale read; Validator → CRITICAL." You do: "Wait
+  through ~60–100 s synchronous escalation; act on Mediator's
+  verdict if surfaced." Hook does: "Synchronously invokes
+  Mediator; routes per Mediator verdict (advice /
+  surgical_fix / lockdown)." Enforcement: `[HOOK-ENFORCED]`.
+
+### Implementation-task dependencies
+
+- T4.06 (pipeline integration in `pre_tool_use_write.sh`)
+  implements the synchronous-CRITICAL routing per this PR.
+  **Gated on this PR approval AND PR-PHASE4-01 + PR-PHASE4-04
+  approval.**
+- T4.07 (ship-gate fixture 03_critical_drift_escalated)
+  exercises the synchronous-CRITICAL pathway end-to-end with
+  mock Validator + mock Mediator. **Gated on T4.06.**
+
+### Ambiguity dispositions (resolved 2026-04-26 at T4.01 go-ahead)
+
+1. **CRITICAL semantic — synchronous vs event-driven.**
+   **RESOLVED — synchronous (Interpretation B).** Per Concern B
+   disposition. validator_spawn returns verdict synchronously;
+   pre_tool_use_write.sh routes per verdict; Mediator (when
+   triggered for CRITICAL) is also called synchronously. Latency
+   budgets documented in §C above.
+
+2. **Re-validate loop bound on Mediator surgical_fix → still-stale.**
+   **RESOLVED — depth=1 ceiling for Validator re-spawn.** The
+   hook re-validates after Mediator surgical_fix; if still
+   stale, Validator re-spawn is refused by the recursion guard,
+   and the residual drift is treated as MINOR (proceed with
+   banner). Bounds worst-case latency at ~105 s.
+
+3. **Per-file vs per-Write SAFE-banner suppression.**
+   **RESOLVED — per-file.** SAFE verdict on `foo.ts`
+   suppresses ONLY foo.ts from the stale-read banner; other
+   files (e.g., `bar.ts` in the same Write request, also stale)
+   produce their own per-file Validator runs and contribute
+   their own banner entries (if MINOR) or are silenced
+   independently (if SAFE).
+
+4. **Mediator advice for CRITICAL drift outcome.**
+   **RESOLVED — caller proceeds with advice banner; lock
+   acquired.** Mediator advice for `critical_drift` means
+   "Validator's CRITICAL was overruled by Mediator with strong
+   evidence; the Write is safe to proceed." The advice text is
+   surfaced as `additionalContext`, the Write acquires the
+   lock, and the stale banner for that file is suppressed.
+
+### Cross-references
+
+- PR-PHASE4-01 (Validator agent design contract) — defines the
+  validator interface; this PR defines the caller-side routing.
+- PR-PHASE4-03 (Mediator-Validator integration) — defines the
+  `critical_drift` pending entry payload that this PR's CRITICAL
+  pathway produces.
+- PR-PHASE4-04 (Validator cache) — cache lookup precedes
+  pre-filter + spawn; cache hits return verdict immediately
+  (latency budget <50 ms) and route per Decision 3 without
+  spawning.
+- PR-PHASE3-01 (Mediator) — Mediator's 3-action contract is
+  the consumer of CRITICAL escalations; lockdown gate at
+  `pre_tool_use_write.sh` line 188 is the deny mechanism.
+- PR-PHASE3-03 (pending.jsonl unification) — `critical_drift`
+  joins the unified pending queue.
+- FINDINGS — F-014 doctrine (no apostrophes in user-facing
+  text) applies to banner text.
+
+### Non-changes (deliberate)
+
+- Phase 3 two-location deny invariant unchanged (lock-held +
+  lockdown). Phase 4 introduces NO third deny location.
+- Mediator spawn mechanics (`lib/mediator_spawn.sh`) unchanged.
+- Existing `pre_tool_use_any.sh` Mediator-pending consumer
+  unchanged; Phase 4's CRITICAL pathway invokes Mediator
+  inline from `pre_tool_use_write.sh`, BUT also writes the
+  pending entry so that subsequent operations see the audit
+  record. The pending consumer is idempotent: if the pending
+  entry's verdict has already been applied, consumer is a
+  no-op (consumer checks for an existing verdict matching
+  `for_pending_entry`).
+- Watchdog ambient-suspicion pathway unchanged.
+- Existing lock-held-by-other deny text (CLAUDE.md §B.2
+  three-options) unchanged.
+
+### Acknowledgement
+
+APPROVED 2026-04-26 at T4.01 close (user sign-off after halt-report).
+Status DRAFT → APPROVED. Concern B
+disposition (synchronous mode) is the load-bearing decision
+this PR pins.
+
+---
+
+## PR-PHASE4-03 — Mediator-Validator integration (Decision 4)
+
+**Date:** 2026-04-26
+**Author:** Phase 4 builder (draft per user-resolved Decision 4).
+**Status:** APPROVED 2026-04-26 at T4.01 close — informational + plan-deltas only; gates no
+code change in Phase 3 components, but must precede T4.06 so the
+expected Mediator behavior on `critical_drift` pending entries is
+documented. Bundles into T4.06 verification (no separate
+implementation task).
+**Driver:** User direction (Phase 4 resume prompt, Decision 4
+verbatim).
+
+### Observed gap requiring change
+
+PR-PHASE3-01 defined the Mediator's 3-action contract (advice /
+surgical_fix / lockdown) but predates the Validator. PR-PHASE3-03
+unified `pending.jsonl` such that any pending `kind` is consumed
+uniformly. Phase 4 introduces a new pending `kind=critical_drift`
+emitted by the Validator. The plan needs to document (a) the
+`critical_drift` payload schema, (b) that Mediator code paths
+require NO modification, and (c) the expected Mediator-action
+mapping for `critical_drift` so the spawned Mediator's prompt
+context is sufficient to produce the right verdict.
+
+### User-resolved decision (verbatim distillation)
+
+When Validator emits CRITICAL → `critical_drift` pending entry:
+
+The pending entry's payload includes:
+- `file` (the drifted file)
+- `validator_verdict` ("CRITICAL")
+- `validator_reasoning` (Validator's explanation, 1–3 sentences)
+- `your_read_hash` (the hash the caller stored in
+  `read_sets[<caller>].reads[]`)
+- `current_hash` (the file's current sha256)
+- `diff_summary` (Validator's concise drift description)
+- `validator_session_id` (audit; the spawn UUID for the
+  Validator that produced the verdict)
+
+Mediator's existing 3-action contract handles `critical_drift`:
+- **advice** — Mediator inspects, judges drift safe to proceed
+  despite Validator's CRITICAL → caller gets advice banner,
+  proceeds. (RARE — Mediator overrules Validator only with
+  strong evidence: e.g., Mediator can prove the drift is
+  semantically equivalent via deeper inspection that
+  Validator's snapshot lacked.)
+- **surgical_fix** — Mediator clears caller's read-set entry
+  for the drifted file (forcing re-read), or evicts a session
+  causing the drift, or releases an orphaned lock holding back
+  the actual current state, etc. The hook re-validates the
+  read-set after applying; if still stale, treats residual as
+  MINOR per PR-PHASE4-02 §B.2 disposition.
+- **lockdown** — system-wide drift incident (e.g., schema
+  migration in progress, infrastructure change underway) →
+  Mediator pauses everyone via existing lockdown gate.
+
+Mediator's existing peer-review hierarchy applies:
+needs_review verdicts trigger second Mediator at depth=2;
+same depth-2 ceiling per PR-PHASE3-01.
+
+NO NEW Mediator code paths. Mediator's existing pending entry
+consumer reads `kind=critical_drift` naturally; Mediator's
+prompt is pending-kind-agnostic (it analyzes whatever payload
+arrives, formatted as JSON in Section 3 — Incident Context of
+the prompt).
+
+### Plan section deltas required
+
+**A. `IMPLEMENTATION_PLAN.md` §3.5 events.jsonl kind list** —
+extend the existing `MEDIATOR_VERDICT` event documentation: the
+`pending_entry_kind` payload field already includes the kind name
+of the triggering pending entry; document that `critical_drift`
+is a valid value alongside `corrupt_state`, `flock_timeout`,
+`stale_active`, `pid_recycled`, `manual`.
+
+**B. `IMPLEMENTATION_PLAN.md` §4 component spec — `lib/mediator_pending.sh`** —
+extend the pending entry schema documentation with the
+`critical_drift` kind and its payload shape:
+
+```json
+{
+  "ts": "<ISO 8601 UTC>",
+  "kind": "critical_drift",
+  "session": "<caller session_id>",
+  "source": "validator",
+  "payload": {
+    "file": "<path>",
+    "validator_verdict": "CRITICAL",
+    "validator_reasoning": "<text>",
+    "your_read_hash": "<sha256>",
+    "current_hash": "<sha256>",
+    "diff_summary": "<text>",
+    "validator_session_id": "<spawn UUID>"
+  }
+}
+```
+
+The payload's `file` field is the canonical pivot for downstream
+Mediator action selection (e.g., release_lock targets this file;
+clear_read_set targets the `session` field's read-set entry for
+this file).
+
+**C. `lib/MEDIATOR_REFERENCE.md` cross-link extension** — add a
+new subsection under §4 "Pending queue (read + GC)":
+
+> ### Pending kind: `critical_drift` (Phase 4)
+>
+> Emitted by the Validator (Phase 4) when it classifies a
+> stale-read drift as CRITICAL. Payload schema documented in
+> IMPLEMENTATION_PLAN.md §4 lib/mediator_pending.sh.
+>
+> Action mapping (your decision; pending-kind-agnostic but
+> conventional):
+> - `advice`: drift is semantically safe despite CRITICAL
+>   classification (use only with strong evidence; Validator's
+>   snapshot was truncated, or deeper inspection reveals
+>   equivalence).
+> - `surgical_fix` (severity=brief): clear caller's read-set
+>   entry for the drifted file via `clear_read_set` action;
+>   caller will re-read and re-validate.
+> - `surgical_fix` (severity=extended): evict a drift-causing
+>   session via `evict_session`; release any locks blocking
+>   the actual current state via `release_lock`.
+> - `lockdown`: system-wide drift incident; pause everyone.
+
+This is purely documentation; no code change to Mediator.
+
+**D. `IMPLEMENTATION_PLAN.md` §5 Phase 4 Out-of-scope** — affirm
+explicitly:
+
+> "Mediator code (`lib/mediator_spawn.sh`,
+> `lib/mediator_pending.sh`, `lib/lockdown.sh`,
+> `hooks/pre_tool_use_any.sh` Mediator-consumption branch,
+> `hooks/session_start.sh` Mediator-consumption branch,
+> `lib/coord_mediate.sh`, `lib/verdict_apply.sh`,
+> `lib/critical_check.sh`) is unchanged in Phase 4. Mediator's
+> existing pending consumer reads `critical_drift` naturally;
+> the prompt is pending-kind-agnostic; the 3-action contract
+> handles all kinds."
+
+**E. `CLAUDE.md` §B.6** — extend the "Mediator inspects … and
+takes one of four action types" rule with a sub-bullet for
+Phase 4's contribution:
+
+> "When Mediator's pending entry has `kind=critical_drift`, the
+> payload contains `file`, `validator_verdict`,
+> `validator_reasoning`, `your_read_hash`, `current_hash`,
+> `diff_summary`, and `validator_session_id`. Mediator's
+> standard 3-action contract applies (advice / surgical_fix /
+> lockdown); the `file` field is the canonical pivot for
+> action targeting (e.g., `release_lock target=<file>`,
+> `clear_read_set session=<caller>`)."
+
+### Implementation-task dependencies
+
+- T4.04 (`lib/validator_spawn.sh`) emits the `critical_drift`
+  pending entry with the payload schema in §B above. **Gated on
+  this PR approval (along with PR-PHASE4-01).**
+- T4.05 (`lib/VALIDATOR_REFERENCE.md`) documents the hand-off
+  to Mediator with cross-references to this PR. **Gated on
+  this PR approval.**
+- T4.06 (pipeline integration) writes the pending entry +
+  invokes Mediator inline. **Gated on this PR approval (along
+  with PR-PHASE4-01 + PR-PHASE4-02 + PR-PHASE4-04).**
+- T4.07 (ship-gate fixture 03_critical_drift_escalated) verifies
+  the end-to-end flow with mock Validator + mock Mediator.
+  **Gated on T4.06.**
+
+NO separate implementation task in Phase 4 for this PR. The
+work is documentation only (plan section deltas + the
+MEDIATOR_REFERENCE.md subsection). T4.05 and T4.06 carry the
+implementation references.
+
+### Ambiguity dispositions (resolved 2026-04-26 at T4.01 go-ahead)
+
+1. **`critical_drift` payload schema field naming.**
+   **RESOLVED — verbatim per Decision 1.3.** Field names are
+   `file`, `validator_verdict`, `validator_reasoning`,
+   `your_read_hash`, `current_hash`, `diff_summary`,
+   `validator_session_id`. The "your_read_hash" naming
+   intentionally mirrors the second-person prompt voice used
+   in caller-facing banner text (e.g., "your earlier plan may
+   be based on outdated content").
+
+2. **Mediator's response to needs_review on `critical_drift`.**
+   **RESOLVED — depth=2 peer review applies normally.**
+   PR-PHASE3-01's max-depth-2 escalation hierarchy applies
+   without modification. If the depth=1 Mediator returns
+   needs_review, depth=2 Mediator is spawned with the
+   `critical_drift` pending entry + depth=1 verdict in
+   context. Action_type agreement → apply with more
+   conservative severity; disagreement → escalate to user.
+
+3. **Idempotency of inline Mediator + pending consumer.**
+   **RESOLVED — pending consumer is idempotent.** Per
+   PR-PHASE4-02 §"Non-changes": when `pre_tool_use_write.sh`
+   invokes Mediator inline (Phase 4) AND writes the pending
+   entry, the subsequent `pre_tool_use_any.sh` consumer firing
+   on the next tool call sees the pending entry but ALSO sees
+   that a verdict already exists matching `for_pending_entry`;
+   the consumer treats this as already-handled and does not
+   re-spawn. Implementation note for T4.06: ensure
+   `for_pending_entry` is set in the verdict file when invoked
+   from the inline Phase 4 pathway.
+
+### Cross-references
+
+- PR-PHASE4-01 (Validator agent design contract) — defines the
+  validator that produces `critical_drift`.
+- PR-PHASE4-02 (Pipeline behavior + synchronous CRITICAL) —
+  defines the inline Mediator invocation triggered by
+  `critical_drift`.
+- PR-PHASE3-01 (Mediator) — defines the 3-action contract that
+  consumes `critical_drift`.
+- PR-PHASE3-03 (pending.jsonl unification) — defines the unified
+  queue that `critical_drift` joins.
+- PR-PHASE3-04 (pending.jsonl GC) — `critical_drift` entries
+  participate in the same 24 h GC retention window.
+- FINDINGS — none currently OPEN against this PR.
+
+### Non-changes (deliberate)
+
+- Mediator code unchanged (per Decision 4 verbatim).
+- Mediator's `lib/MEDIATOR_REFERENCE.md` only gets a new
+  documentation subsection (no API change).
+- Mediator's prompt structure (Identity / Constraints / Context
+  three-section) unchanged. The Context section's pending entry
+  block naturally includes `critical_drift` payload as JSON.
+- `lib/verdict_apply.sh` unchanged; its action verbs
+  (release_lock / evict_session / clear_read_set) cover all
+  `critical_drift` action mappings.
+
+### Acknowledgement
+
+APPROVED 2026-04-26 at T4.01 close (user sign-off after halt-report).
+Status DRAFT → APPROVED. Documentation-
+only PR; no Mediator code change in Phase 4.
+
+---
+
+## PR-PHASE4-04 — Validator cache (Concern D disposition; ship-gate item 4)
+
+**Date:** 2026-04-26
+**Author:** Phase 4 builder (draft per Concern D disposition: in-
+scope for Phase 4; plan §5 ship-gate item 4 implemented, not
+deferred).
+**Status:** APPROVED 2026-04-26 at T4.01 close — gates T4.02 (pre-filter; cache lookup precedes
+pre-filter logic) and T4.04 (validator spawn; cache write follows
+spawn-completion). Final merge into IMPLEMENTATION_PLAN.md /
+CLAUDE.md folds into phase-4-signoff.md.
+**Driver:** Plan §5 Phase 4 ship-gate item 4 verbatim ("Repeated
+SAFE verdicts for the same file+diff are cached … to avoid token
+churn") + user direction at T4.01 go-ahead (Concern D
+disposition: in-scope, not deferred).
+
+### Observed gap requiring change
+
+Plan §5 Phase 4 ship-gate item 4 specifies a verdict cache to
+avoid token churn on repeated same-file+diff drift events, but
+the plan does not specify the cache schema, key, TTL, placement
+in the pipeline, or GC behavior. User Decision 2 (Validator
+contract) does not address the cache. At Phase 4 startup, the
+question of whether to keep the cache in scope vs. defer to
+Phase 7 measurement-driven tuning was raised as Concern D and
+dispositioned by the user as in-scope for Phase 4. This PR pins
+the design.
+
+### User-resolved decision (verbatim)
+
+> "In-scope for Phase 4. Plan §5 ship-gate item 4 implemented,
+> not deferred."
+
+> Cache design:
+>
+> Path: `.coord/validator/cache.json` (mirroring validator/
+> namespace per Decision 2; NOT plan §3.2's validation/).
+>
+> Schema:
+> ```
+> {
+>   "entries": [
+>     {
+>       "file": "<path>",
+>       "read_hash": "<sha256>",
+>       "current_hash": "<sha256>",
+>       "verdict": "SAFE" | "MINOR",
+>       "verdict_source": "prefilter" | "validator_agent",
+>       "cached_at": "<ISO>",
+>       "ttl_until": "<ISO>"
+>     }
+>   ]
+> }
+> ```
+>
+> Cache key: `(file, read_hash, current_hash)` triple. Same
+> drift recurring → cache hit.
+>
+> TTL: 1 hour for SAFE and MINOR. CRITICAL is NOT cached —
+> every CRITICAL spawn must trigger fresh Mediator escalation.
+>
+> Cache placement in pipeline: BEFORE pre-filter, BEFORE
+> validator agent.
+>
+> stale_read detected
+>   → cache_lookup(file, read_hash, current_hash)
+>     → cache HIT: return cached verdict (SAFE/MINOR), apply
+>       pipeline behavior per Decision 3
+>     → cache MISS: continue
+>   → pre_filter
+>     → SAFE: cache_write + return
+>     → ESCALATE: continue
+>   → validator agent (spawn)
+>     → verdict captured
+>     → cache_write (only if SAFE or MINOR)
+>     → return
+>
+> Cache GC: bundled with validator agent runs (mirrors
+> PR-PHASE3-04 pattern for pending.jsonl GC). Or simpler:
+> cache_lookup expires entries on read; cache_write
+> opportunistically purges expired entries.
+
+### Plan section deltas required
+
+**A. `IMPLEMENTATION_PLAN.md` §3.2 file structure on disk** —
+update PR-PHASE4-01 §B's `validator/` block to include
+`cache.json`:
+
+```
+├── validator/                       # Phase 4 Validator state
+│   ├── VALIDATOR_REFERENCE.md       # technical reference (copied from src/lib by install.sh)
+│   ├── cache.json                   # SAFE/MINOR verdict cache (PR-PHASE4-04)
+│   ├── cache.lock                   # flock sentinel for cache.json
+│   └── verdict/<ts>.json            # historical Validator decisions
+```
+
+**B. `IMPLEMENTATION_PLAN.md` §3.5 events.jsonl kind list** — add:
+- `VALIDATOR_CACHE_HIT` (payload: `file`, `session`,
+  `read_hash`, `current_hash`, `cached_verdict` ∈ {SAFE,
+  MINOR}, `verdict_source` ∈ {prefilter, validator_agent},
+  `cache_age_seconds`).
+- `VALIDATOR_CACHE_WRITE` (payload: `file`, `session`,
+  `read_hash`, `current_hash`, `verdict`, `verdict_source`,
+  `ttl_seconds`).
+- `VALIDATOR_CACHE_GC_RUN` (payload: `kept_count`,
+  `removed_count`, `before_size_bytes`, `after_size_bytes`,
+  `triggered_by` ∈ {validator_run_opportunistic,
+  validator_run_explicit}).
+
+**C. `IMPLEMENTATION_PLAN.md` §3.6 config.json defaults** — add:
+- `validator_cache_enabled: true` (emergency override; falls
+  back to spawn-every-time when false).
+- `validator_cache_ttl_seconds: 3600` (1 hour; bounds [60,
+  86400] — 1 minute minimum, 24 hours maximum).
+- `validator_cache_max_entries: 1000` (soft cap to bound
+  cache.json size; bounds [10, 100000]). When the cap is
+  exceeded, GC removes oldest expired entries first; if no
+  expired entries remain and cap is still exceeded, the oldest
+  unexpired entry is evicted (LRU).
+
+`coord health` validates the bounds.
+
+**D. `IMPLEMENTATION_PLAN.md` §4 component specs** — add:
+
+`lib/validator_cache.sh`:
+- `coord_validator_cache_lookup <file> <read_hash> <current_hash>`:
+  returns 0 on HIT (stdout: cached verdict JSON), 1 on MISS,
+  2 on cache file unreadable (treated as MISS by caller; logs
+  warning).
+  Implementation: `flock` on `cache.lock`; read `cache.json`;
+  filter entries matching the key triple AND `ttl_until > now`;
+  return first match (most recent if multiple).
+- `coord_validator_cache_write <file> <read_hash> <current_hash> <verdict> <verdict_source>`:
+  returns 0 on success, non-zero on failure (logs warning;
+  caller proceeds).
+  Implementation: `flock` on `cache.lock`; read `cache.json`;
+  remove any existing entry with same key; append new entry
+  with `cached_at = now`, `ttl_until = now + ttl_seconds`;
+  call `_coord_validator_cache_gc_opportunistic` (purges
+  expired entries during the same flock window); atomic
+  temp+rename to write `cache.json`.
+- `_coord_validator_cache_gc_opportunistic` (internal):
+  removes entries with `ttl_until < now`; if entry count still
+  exceeds `validator_cache_max_entries`, removes oldest
+  entries (by `cached_at`) until cap is met; emits
+  `VALIDATOR_CACHE_GC_RUN` event with counts. Called from
+  `coord_validator_cache_write` and on every
+  `coord_validator_cache_lookup` MISS (cheap because flock
+  is already held during the read).
+- `coord_validator_cache_clear`: removes all cache entries
+  (useful for `coord health --reset` or manual operator
+  intervention; not exposed as a CLI in Phase 4).
+
+**E. `IMPLEMENTATION_PLAN.md` §5 Phase 4 Scope** — add to the
+in-scope list:
+- "`lib/validator_cache.sh`: SAFE/MINOR verdict cache. Key
+  `(file, read_hash, current_hash)`. TTL 1 h. CRITICAL NOT
+  cached. Pipeline placement: cache lookup BEFORE pre-filter
+  + spawn. Cache write on SAFE/MINOR verdict completion. GC
+  opportunistic on read/write."
+
+**F. `IMPLEMENTATION_PLAN.md` §5 Phase 4 "Done when"** — keep
+ship-gate item 4 as listed; this PR makes it satisfiable.
+Add evidence pointer: "fixture 02_minor_drift_warned and
+01_safe_drift_silent both verify cache hit on second
+invocation with same file+drift."
+
+**G. `install.sh` extension** — fold into T4.05 along with
+the VALIDATOR_REFERENCE.md install (Concern G). Specifically:
+- Create `.coord/validator/cache.lock` (empty file for flock).
+- `cache.json` is created lazily on first cache_write
+  (no install-time creation needed; cache_lookup handles
+  the missing-file case as MISS).
+
+### Implementation-task dependencies
+
+- T4.02 (`lib/validator_prefilter.sh`) is gated on this PR
+  approval since the cache lookup precedes the pre-filter
+  call. Note: the cache lookup itself is implemented in
+  `lib/validator_cache.sh` (delivered alongside T4.02 or in a
+  preceding sub-task — sequencing decision is for T4.01 close).
+- T4.04 (`lib/validator_spawn.sh`) is gated on this PR approval
+  since cache write follows spawn-completion.
+- T4.05 (`install.sh` extension) creates the cache lock file.
+- T4.06 (pipeline integration) wires the cache lookup as the
+  first step in the stale-read handling block.
+- T4.07 (ship-gate fixtures) verifies cache hit on the second
+  identical drift event (no spawn fired).
+
+**Recommended sequencing:** T4.02 expands to deliver
+`lib/validator_cache.sh` + `lib/validator_prefilter.sh` as a
+single task (cache + pre-filter together; both are pre-spawn
+filtering layers). Alternatively, split into T4.02a (cache)
+and T4.02b (pre-filter). Decision deferred to T4.02 design
+checkpoint per the user's "halt at T4.01 close" instruction.
+
+### Ambiguity dispositions (resolved 2026-04-26 at T4.01 go-ahead)
+
+1. **GC trigger model: opportunistic vs bundled with validator runs.**
+   **RESOLVED — opportunistic (option B from user disposition).**
+   Cache GC fires on every cache_write and on every
+   cache_lookup MISS (under the same flock window — cheap).
+   This is simpler than the PR-PHASE3-04-style bundled GC:
+   cache writes are infrequent (only when validator produces
+   a verdict, which is itself rate-limited by the spawn cost
+   and the pre-filter), so opportunistic GC keeps cache.json
+   small without a separate trigger.
+
+2. **Cache eviction policy when `validator_cache_max_entries`
+   exceeded.**
+   **RESOLVED — TTL-first, then LRU.** GC first removes
+   expired entries (TTL elapsed); if the cap is still
+   exceeded, evicts oldest by `cached_at` (LRU). Prevents
+   pathological growth from a flood of unique drifts within
+   the TTL window.
+
+3. **Cache key collision: same file path with different content
+   versions across git checkouts.**
+   **RESOLVED — non-issue.** The key is
+   `(file, read_hash, current_hash)`. If git HEAD changes and
+   the file's current_hash changes, the cache key triple is
+   different, so the previous entry is not returned (it sits
+   in the cache until TTL expiry or GC eviction). Stale
+   cache entries cannot affect a different content state.
+
+4. **Cache lookup on MINOR verdict — does the cached banner
+   text still apply?**
+   **RESOLVED — banner regenerated on every hit.** The cache
+   stores the verdict (SAFE | MINOR) and verdict_source, but
+   NOT the diff_summary text (since `diff_summary` was
+   computed against a specific `(read_hash, current_hash)`
+   pair that matches the cache key — so the same drift
+   produces the same `diff_summary`). On MINOR cache hit, the
+   banner is regenerated from a stored `diff_summary` field
+   in the cache entry. (Schema addition: `diff_summary`
+   field added to cache entry — not in the original Concern D
+   schema but necessary for MINOR banner consistency.)
+   **Schema correction:** add `diff_summary` field to cache
+   entry schema:
+   ```json
+   {
+     "file": "<path>",
+     "read_hash": "<sha256>",
+     "current_hash": "<sha256>",
+     "verdict": "SAFE" | "MINOR",
+     "verdict_source": "prefilter" | "validator_agent",
+     "diff_summary": "<text — for MINOR banner regeneration; null for SAFE>",
+     "cached_at": "<ISO>",
+     "ttl_until": "<ISO>"
+   }
+   ```
+
+5. **Cache invalidation on git HEAD change.**
+   **RESOLVED — no explicit invalidation.** Per disposition
+   3, cache key includes both hashes; HEAD-change-driven
+   hash divergence naturally produces cache misses for the
+   new hashes. Old entries expire via TTL or LRU. NOT relying
+   on explicit `git_head` field in cache entries — the hashes
+   are sufficient.
+
+### Cross-references
+
+- PR-PHASE4-01 (Validator agent design contract) — defines
+  the validator that this PR caches the verdicts of.
+- PR-PHASE4-02 (Pipeline behavior + synchronous CRITICAL) —
+  defines the routing this PR's cache lookups feed into.
+- PR-PHASE4-03 (Mediator-Validator integration) — CRITICAL
+  is NOT cached, so this PR's cache does not interact with
+  the Mediator pathway directly.
+- PR-PHASE3-04 (pending.jsonl GC) — analogous GC pattern,
+  but this PR uses opportunistic GC instead of bundled.
+- FINDINGS — F-014 doctrine (no apostrophes) applies to
+  cached `diff_summary` text (already enforced at validator
+  output time; cache stores the text as-is).
+
+### Non-changes (deliberate)
+
+- Validator agent code (`lib/validator_spawn.sh`) is not
+  changed by this PR; the spawn helper writes the verdict
+  file as before, and the caller (`pre_tool_use_write.sh`)
+  is responsible for cache_write after capturing the verdict.
+  This keeps `validator_spawn.sh` cache-agnostic and easier
+  to test.
+- Pre-filter (`lib/validator_prefilter.sh`) is not changed by
+  this PR; the cache lookup is a separate code path called
+  before pre-filter.
+- Mediator code unchanged.
+- The CRITICAL pathway (PR-PHASE4-02) is unchanged: CRITICAL
+  is not cached, so every CRITICAL drift triggers fresh
+  Mediator escalation.
+
+### Acknowledgement
+
+APPROVED 2026-04-26 at T4.01 close (user sign-off after halt-report).
+Status DRAFT → APPROVED. Concern D
+disposition (in-scope for Phase 4) is the load-bearing
+decision; Schema-correction disposition #4 (adding
+`diff_summary` to cache entry) is a clarification of the
+user's verbatim schema.
+
+---
+
+## PR-PHASE4-05 — Read-snapshot capture for validator pipeline
+
+**Date:** 2026-04-26
+**Author:** Phase 4 builder (T4.01 amendment; surfaced at T4.02
+pre-implementation halt — read-snapshot content gap not addressed
+in Decision 2 / PR-PHASE4-01).
+**Status:** APPROVED 2026-04-26 at T4.01-amendment close — gates
+T4.02a (snapshot capture in `pre_tool_use_read.sh`), T4.02b
+(validator cache + pre-filter consuming snapshots), T4.04
+(validator spawn whose Section 3 prompt embeds the read snapshot
+content).
+**Driver:** User direction at T4.02 halt-report (Option A
+disposition; standalone PR per disposition (ii); T4.02 split into
+T4.02a + T4.02b per disposition (3)).
+
+### Observed gap requiring change
+
+The Phase 4 validator pipeline (per Decision 2 + PR-PHASE4-01 +
+PR-PHASE4-04) needs the *content* of the file as the session read
+it (the "read snapshot"), not just the hash:
+- **Pre-filter** (`lib/validator_prefilter.sh`) computes the diff
+  between read snapshot and current state for whitespace-only /
+  comment-only / blank-line-only heuristics. This requires both
+  contents.
+- **Validator agent prompt Section 3 (b)** (per PR-PHASE4-01)
+  embeds "Read snapshot: sha256 + file content as session saw it
+  at read time."
+
+The Phase 1 read-set (per Decision 2.18 / `pre_tool_use_read.sh`)
+stores only `{path, hash, at, is_latest}` — no content. There is
+no content-addressable cache. When stale-read is detected in
+`pre_tool_use_write.sh`, the on-disk file is the *current* state;
+the read snapshot's content is unrecoverable from existing data
+(non-git edits between Reads, the dominant multi-session
+coordination case, cannot be reconstructed via `git show`).
+
+T4.02 implementation cannot proceed without resolving this. T4.01
+documentation work did not surface the gap because PR-PHASE4-01 §E
+specifies `coord_validator_prefilter <file> <read_content_path>
+<current_content_path>` (content paths) without specifying where
+`<read_content_path>` comes from.
+
+### User-resolved decision
+
+**Option A — Snapshot at Read time, content-addressable storage:**
+
+`pre_tool_use_read.sh` writes the file content to
+`.coord/read_snapshots/<sid>/<hash>.txt` immediately after
+recording the hash in `read_sets`. Subsequent validator pipeline
+invocations resolve the read content via
+`.coord/read_snapshots/<sid>/<read_hash>.txt`.
+
+**Sizing + skip handling:**
+- Files >10 MB (existing Phase 1 hash cap; `coord_hash_file`
+  returns `SKIPPED_LARGE`) → no snapshot is written. Pre-filter
+  unconditionally ESCALATEs in this case (consistent with the
+  existing `>1 MB` rule from PR-PHASE4-01 — at the 10 MB
+  hash-cap level, Phase 1's `SKIPPED_LARGE` already masks the
+  read entry as un-comparable).
+- Snapshot file is exactly the read-time bytes; no transformation.
+  The on-disk filename uses the hash as-is (64 hex chars + `.txt`).
+- Phase 7 may revisit with size-bounded variant (Option C from
+  T4.02 halt-report) if storage pressure surfaces; mechanical
+  refinement only.
+
+**GC semantics:**
+- **On supersede** (next Read of same file with a different hash):
+  the prior snapshot is deleted in the same atomic edit that
+  supersedes the read-set entry. Idempotent.
+- **On supersede with same hash** (Read of an unchanged file):
+  no-op. Snapshot already correct.
+- **On `superseded_by_head_change` flag** (git HEAD change per
+  Decision 2.22): no snapshot deletion. The flag marks the
+  read-set entry as invalidated by HEAD, but the snapshot
+  content remains valid for diff computation if needed.
+- **On session end** (`session_end.sh`): `.coord/read_snapshots/
+  <sid>/` directory is removed entirely. Idempotent.
+- **On orphaned snapshots** (session crashed before
+  `session_end.sh` fired): cleaned up by the watchdog/Mediator
+  pathway when the session is evicted (action verb extension —
+  see §F below).
+
+**Concurrency:**
+- Per-session subdirectory (`<sid>/`) avoids cross-session
+  collisions; no flock needed for write because each session
+  owns its directory.
+- WITHIN a session, two simultaneous Reads of the same file with
+  different hashes (e.g., file changed between two PreToolUse
+  hooks firing on subagent activity) would race. Existing
+  Phase 1 design already excludes subagents from coord (Decision
+  2.17), so the race is bounded to one Read per session per file
+  per turn. `mv` from temp + atomic rename pattern handles any
+  residual race.
+- Per-snapshot atomic rename (temp + `mv`) ensures no partial
+  files visible to concurrent readers.
+
+**Failure modes:**
+- Snapshot write fails (disk full, permission) → log
+  `READ_SNAPSHOT_WRITE_FAILED` event; allow Read to proceed
+  (fail-open per CLAUDE.md §A.5). Pre-filter / validator agent
+  will see missing snapshot at consume time and ESCALATE
+  defensively.
+- Snapshot lookup at consume time finds missing file → pre-filter
+  ESCALATEs `escalate:read_snapshot_missing`; validator agent's
+  prompt notes "read snapshot unavailable; current content only"
+  in Section 3.
+
+### Plan section deltas required
+
+**A. `IMPLEMENTATION_PLAN.md` §3.1 layer 3 (Read-set tracking)** —
+extend description: "`PreToolUse(Read)` hook computes file
+sha256, appends entry to `read_sets[<session_id>].reads[]`,
+deduplicates (latest supersedes older). Phase 4 addition: also
+captures file content to `.coord/read_snapshots/<sid>/<hash>.txt`
+for the validator pipeline (Phase 4) to consume during stale-read
+classification. Files exceeding the 10 MB hash cap are recorded
+as `SKIPPED_LARGE` in the read-set with no snapshot written;
+validator pre-filter unconditionally ESCALATEs in that case."
+
+**B. `IMPLEMENTATION_PLAN.md` §3.2 file structure on disk** — add
+`read_snapshots/` block alongside `validator/` (the Phase 4
+container) and `validation/` (legacy stub-flag-file path,
+removed per PR-PHASE4-01 §B):
+
+```
+├── read_snapshots/                  # Phase 4 read-snapshot store
+│   └── <session_id>/
+│       └── <sha256>.txt             # exact read-time bytes; gone on session_end
+```
+
+**C. `IMPLEMENTATION_PLAN.md` §3.5 events.jsonl kind list** — add:
+- `READ_SNAPSHOT_WRITTEN` (payload: `file`, `session`, `hash`,
+  `bytes`, `path`).
+- `READ_SNAPSHOT_SKIPPED_LARGE` (payload: `file`, `session`,
+  `hash="SKIPPED_LARGE"`, `bytes`).
+- `READ_SNAPSHOT_WRITE_FAILED` (payload: `file`, `session`,
+  `hash`, `reason` ∈ {disk_full, permission_denied,
+  rename_failed, unknown}).
+- `READ_SNAPSHOT_SUPERSEDED` (payload: `file`, `session`,
+  `prior_hash`, `new_hash`).
+- `READ_SNAPSHOT_SESSION_CLEANUP` (payload: `session`,
+  `removed_count`, `bytes_freed`).
+
+**D. `IMPLEMENTATION_PLAN.md` §3.6 config.json defaults** — add:
+- `read_snapshots_enabled: true` (emergency override; falls
+  back to no-snapshot mode + validator pipeline ESCALATEs for
+  every stale-read).
+- `read_snapshots_max_per_session_mb: 100` (soft cap; bounds
+  [1, 1024] — 1 MB minimum, 1 GB maximum). When exceeded, oldest
+  snapshots are GCed via LRU on the snapshot-write path. (Phase 7
+  may relax this if measurement shows the cap is rarely hit; for
+  v1, defensive against runaway storage.)
+
+`coord health` validates the bounds.
+
+**E. `IMPLEMENTATION_PLAN.md` §4 component specs** — add:
+
+`lib/read_snapshots.sh`:
+- `coord_read_snapshot_path <sid> <hash>` — returns the canonical
+  filesystem path for a snapshot (string only; no I/O). Used by
+  consumers (validator pre-filter, validator spawn) to resolve
+  `<read_content_path>`.
+- `coord_read_snapshot_write <sid> <hash> <source_file>` —
+  copies `<source_file>` to `coord_read_snapshot_path <sid>
+  <hash>` via temp + atomic rename. Returns 0 on success, 1 on
+  failure (logs `READ_SNAPSHOT_WRITE_FAILED` event). Idempotent:
+  if the destination exists, no-op (re-Read of unchanged file).
+  Skips silently when `hash == "SKIPPED_LARGE"` (logs
+  `READ_SNAPSHOT_SKIPPED_LARGE` and returns 0).
+- `coord_read_snapshot_supersede <sid> <prior_hash>` — deletes
+  the prior snapshot file. Returns 0 on success or no-op (file
+  absent). Logs `READ_SNAPSHOT_SUPERSEDED` when a file was
+  actually removed.
+- `coord_read_snapshot_cleanup_session <sid>` — recursively
+  removes `.coord/read_snapshots/<sid>/`. Returns 0 idempotent.
+  Logs `READ_SNAPSHOT_SESSION_CLEANUP` with counts.
+- `coord_read_snapshot_lookup <sid> <hash>` — returns 0 if the
+  snapshot file exists and is readable; 1 otherwise. Used by
+  consumers to detect missing-snapshot fallback path.
+
+`pre_tool_use_read.sh` extension (T4.02a):
+- After existing atomic_edit recording the read-set entry, call
+  `coord_read_snapshot_write "$SESSION_ID" "$HASH" "$FILE_PATH"`.
+- The supersede behavior (deleting prior snapshot when the
+  read-set entry's `is_latest` flips to false) is handled inline
+  in the same atomic-edit step: detect prior hash via jq during
+  the supersede walk, then call
+  `coord_read_snapshot_supersede` after the atomic_edit returns.
+
+`session_end.sh` extension (T4.02a):
+- After existing session-row archive logic, call
+  `coord_read_snapshot_cleanup_session "$SESSION_ID"`.
+
+`install.sh` extension (T4.02a):
+- Create `.coord/read_snapshots/` (empty directory; per-session
+  subdirectories created lazily on first Read).
+- `install.sh --uninstall` cleanup removes the directory along
+  with the rest of `.coord/`.
+
+**F. `IMPLEMENTATION_PLAN.md` §4 `lib/verdict_apply.sh` (existing
+Mediator action helper)** — extend the `evict_session` action to
+ALSO call `coord_read_snapshot_cleanup_session <sid>` for the
+evicted session. Bundles snapshot GC into Mediator's
+session-eviction path (handles "session crashed before
+session_end.sh fired" case via watchdog → Mediator → eviction
+flow).
+
+**G. `IMPLEMENTATION_PLAN.md` §5 Phase 4 Scope** — add:
+
+> "`lib/read_snapshots.sh` and `pre_tool_use_read.sh` /
+> `session_end.sh` extensions: capture file content at Read
+> time to `.coord/read_snapshots/<sid>/<hash>.txt` for validator
+> pipeline consumption. Snapshots are GCed on read-set supersede,
+> session end, and Mediator session-eviction. Files >10 MB
+> (existing `SKIPPED_LARGE` handling) are not snapshotted;
+> validator pre-filter ESCALATEs unconditionally for those."
+
+**H. `CLAUDE.md` §B.1 (before reading any file)** — add a
+non-binding note (no rule change for the user; this is purely
+internal mechanism):
+
+> "Phase 4 addition: the hook ALSO captures the file content to
+> `.coord/read_snapshots/<sid>/<hash>.txt` for the validator
+> pipeline to consume on stale-read classification. This is
+> internal storage; you do not interact with it. Snapshots are
+> GCed automatically (on read-set supersede, on session end, on
+> Mediator session-eviction)."
+
+### Implementation-task dependencies
+
+- T4.02a (read-snapshot capture) implements §E + §F + §G. **Gated
+  on this PR approval.**
+- T4.02b (validator cache + pre-filter) consumes
+  `coord_read_snapshot_path` / `coord_read_snapshot_lookup`.
+  **Gated on T4.02a close.**
+- T4.04 (validator spawn) consumes the read snapshot file in
+  Section 3 prompt assembly. **Gated on T4.02a close (along with
+  PR-PHASE4-01 + PR-PHASE4-03 approval).**
+- T4.06 (pipeline integration) wires the consume side; not
+  affected directly by this PR (consumes via T4.02b's pre-filter
+  + T4.04's spawn helper).
+
+### Ambiguity dispositions (resolved 2026-04-26 at T4.01-amendment close)
+
+1. **Snapshot file naming.** **RESOLVED — `<hash>.txt`** with
+   hash being the full 64-hex sha256. The `.txt` suffix is
+   purely cosmetic (signals plaintext to operators inspecting
+   the directory); content is exact bytes from the source file
+   regardless of whether the source is text or binary. Binary
+   files would not normally be Read-tracked at v1 anyway, but
+   if they are, the snapshot stores their bytes faithfully.
+
+2. **Snapshot directory permission model.** **RESOLVED — inherit
+   from `.coord/`.** `mkdir` defaults apply. Explicit chmod
+   not specified; if shared-host permission concerns surface,
+   raise as a finding and revisit.
+
+3. **Storage cap behavior when exceeded.** **RESOLVED — LRU
+   eviction on snapshot-write path.** When a session's
+   `read_snapshots/<sid>/` directory exceeds
+   `read_snapshots_max_per_session_mb`, the oldest snapshots
+   (by `cached_at` mtime equivalent) are evicted until the cap
+   is met. Eviction logs `READ_SNAPSHOT_LRU_EVICTED` event
+   (added to §C event list). Consumer-side pre-filter ESCALATEs
+   defensively if a needed snapshot is evicted (rare; recent
+   reads stay in cache).
+
+4. **Snapshot encoding for non-UTF-8 files.** **RESOLVED — raw
+   bytes.** The snapshot is a byte-identical copy of the source
+   file. Validator agent's prompt (Section 3) MAY truncate the
+   embedded content if it exceeds 100 KB or contains
+   non-printable bytes (per PR-PHASE4-01 §"Validator prompt
+   structure" Section 3 truncation marker). The truncation is
+   the validator spawn helper's responsibility, not the
+   snapshot-write path's.
+
+5. **Race between snapshot write and stale-read detection in
+   another session.** **RESOLVED — accepted as-designed.**
+   When session A reads `foo.ts` and writes its snapshot, then
+   session B writes `foo.ts` (changing on-disk content), then
+   session A's `pre_tool_use_write.sh` detects stale-read on
+   `foo.ts`, the validator pipeline:
+   (a) Looks up A's snapshot at
+       `.coord/read_snapshots/<A>/<read_hash>.txt` (still
+       present — only A's own next-Read or session-end would
+       remove it).
+   (b) Compares against on-disk current content.
+   (c) Computes diff/heuristics correctly.
+   The snapshot is "frozen at A's read time," which is exactly
+   what we want for stale-read classification. No race here.
+
+6. **Handling of `SKIPPED_LARGE` reads in pre-filter consume
+   path.** **RESOLVED — pre-filter ESCALATEs unconditionally.**
+   When `read_set` entry's hash is `SKIPPED_LARGE`, no snapshot
+   exists. Pre-filter returns `escalate:read_snapshot_missing`
+   (or a more specific `escalate:source_skipped_large`).
+   Validator agent's prompt notes "the file was too large to
+   snapshot at read time; classify based on current content
+   alone." Validator agent's classification quality on these
+   files is degraded, but consistent with existing Phase 1
+   behavior (large files were already SKIPPED_LARGE).
+
+### Cross-references
+
+- PR-PHASE4-01 (Validator agent design contract) — defines the
+  consumer; this PR provides the read-snapshot resource. Update
+  PR-PHASE4-01 §E `coord_validator_prefilter` signature to
+  reference `coord_read_snapshot_path` for resolving
+  `<read_content_path>`.
+- PR-PHASE4-04 (Validator cache) — cache key is `(file,
+  read_hash, current_hash)`; this PR doesn't affect cache but
+  notes that on cache miss the pre-filter consume path
+  delegates to snapshot lookup.
+- PR-PHASE3-01 (Mediator) — `verdict_apply.sh` action verb
+  `evict_session` extends to call
+  `coord_read_snapshot_cleanup_session`. Documentation-level
+  extension; no Mediator code rewrite.
+- Decision 2.18 (read-set scope) — extended in spirit: the
+  read-set's "reads" entries now have a parallel content
+  store. The Decision text itself doesn't change; §3.1 layer 3
+  description is the canonical update site (per §A above).
+- Decision 2.22 (git HEAD tracking) — orthogonal.
+  `superseded_by_head_change` does NOT trigger snapshot
+  deletion (snapshot remains valid for diff use; only the
+  read-set entry's `is_latest` is invalidated).
+- FINDINGS — none currently OPEN against this PR.
+
+### Non-changes (deliberate)
+
+- `read_sets[<sid>].reads[]` schema unchanged — snapshots are a
+  parallel content store, not a schema field. Keeping the schema
+  unchanged means Phase 1 / Phase 2 / Phase 3 read-set logic is
+  byte-identical; Phase 4 only adds a side-effect.
+- `coord_hash_file` (`lib/hash.sh`) unchanged — the existing 10
+  MB cap + `SKIPPED_LARGE` handling apply to snapshot decisions
+  via `pre_tool_use_read.sh`'s call site.
+- Phase 3 invariant unchanged: `pre_tool_use_read.sh` still
+  emits no `permissionDecision: "deny"` (Phase 1 invariant
+  preserved through Phase 3 + 4).
+- Subagent filter unchanged — subagent Reads still no-op
+  (Decision 2.17 / `subagent_filter.sh`); their snapshots
+  would not be written either, since the filter exits 0
+  before the hook reaches snapshot capture.
+- Validator agent prompt (Section 3) format unchanged from
+  PR-PHASE4-01 §"Validator prompt structure" — this PR fills
+  the gap of WHERE the read snapshot content comes from
+  (`coord_read_snapshot_path`), not the prompt structure.
+
+### Acknowledgement
+
+APPROVED 2026-04-26 at T4.01-amendment close. Status
+DRAFT → APPROVED. Surfaced via T4.02 pre-implementation halt;
+discipline of halting before code-touch on ambiguity is what
+F-011 + the user's "halt and report" direction codify. Final
+merge into IMPLEMENTATION_PLAN.md / CLAUDE.md folds into
+phase-4-signoff.md.
+
+---
+
 *Future entries append below.*
+
+

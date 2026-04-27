@@ -1028,7 +1028,7 @@ This pattern applies uniformly across the architecture: enforcement lives in the
 
 ### Phase 7 — Test harness + comparative evaluation
 
-**Goal.** Deliver the four-configuration test harness demanded by the user's success criteria.
+**Goal.** Deliver the four-configuration test harness demanded by the user's success criteria. Verify Mediator + Validator real-`claude -p` semantics under cost + latency stress.
 
 **Scope.**
 - Test repo fixture with N (initially 3, parameterizable) scripted prompts aimed at overlapping file sets.
@@ -1040,14 +1040,20 @@ This pattern applies uniformly across the architecture: enforcement lives in the
 - Metrics per run: total tokens (scraped from transcript), wall-clock, git-diff-against-expected, correctness pass/fail, task-delegation counters (opened/completed/failed).
 - Output: `phase7-results.json` + `phase7-report.md`.
 - Manual regression checklist derived from the 23 stress-test scenarios in `04`.
+- **Real-Claude semantic verification of both Mediator and Validator (Phase 4 carry-forward / Decision 1.1):** Phase 4 unit tests use mock claude binary; Phase 7 integration harness exercises both agents against the real `claude -p` to confirm verdict accuracy on synthetic SAFE/MINOR/CRITICAL drifts and Mediator advice/surgical_fix/lockdown decisions.
+- **Cost-guard tunable formalization (Phase 4 carry-forward / Decision 1.2):** measure real-Claude cost + latency distribution under stress; formalize `mediator_min_seconds_between_invocations` and `mediator_max_invocations_per_hour` config schema with measurement-driven defaults.
+- **Auto-reset race condition fix (Phase 4 carry-forward / Decision 1.4):** Phase 7 stress check on `critical_check.sh` parse-fail counter logic under concurrent multi-session corruption-recovery scenarios.
+- **F-016 / F-017 resolution:** Phase 7 integration harness drives real `claude -p` processes outside bats's parallel-execution timing pressure; the watchdog hook-latency timing test (F-017) and `coord wait` SIGINT runtime test (F-016) get definitive resolution here.
 
 **Done when.**
 - Harness runs clean end-to-end in CI or a scripted `make bench`.
 - `phase7-report.md` shows the comparison with enough detail to evaluate abandonment conditions (cost multiple, correctness regressions).
+- Mediator + Validator real-Claude semantic verification: ≥90% verdict accuracy on a curated SAFE/MINOR/CRITICAL test corpus.
+- Cost guard tunables shipped with measurement-driven defaults and `coord health` validation bounds.
 
 **Risks.** Claude outputs vary run-to-run; metrics need statistical framing (min/median/max across N=5 runs per config), not single-run numbers.
 
-**Mediator thread note.** The Mediator is NOT a standalone phase. Its scope expands across Phases 2 (flag infrastructure), 3 (full agent hook + skill), 4 (validator-pattern mirror), 5 (cycle detection), and 6 (task-graph oversight). Phase 7 exercises the full assembly.
+**Mediator thread note.** The Mediator is NOT a standalone phase. Its scope expands across Phases 2 (flag infrastructure), 3 (full agent hook + skill), 4 (validator-pattern mirror — fully shipped at T4.04 with `lib/validator_spawn.sh` mirroring `lib/mediator_spawn.sh`; CRITICAL escalation via critical_drift pending entry consumed by existing Mediator pipeline per PR-PHASE4-03), 5 (cycle detection), and 6 (task-graph oversight). Phase 7 exercises the full assembly.
 
 ### Phase summary table
 

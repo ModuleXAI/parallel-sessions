@@ -91,30 +91,48 @@ _prime_read() {
   [ "$output" = "" ]
 }
 
-@test "pre_tool_use_write: drifted file → additionalContext warning, NO permissionDecision (Phase 2 still warns on stale read alone)" {
+@test "pre_tool_use_write: drifted file → Phase 4 pipeline runs, banner emitted, NO permissionDecision" {
   _prime_read "$READ_F1"
   # Modify alpha.txt on disk to simulate another session's change.
   printf 'alpha v2 drifted\n' >"$F1"
-  CLAUDE_COORD=1 run bash -c "echo '$WRITE_TARGET' | '$H'"
+  # Use a minimal PATH that EXCLUDES claude so the validator spawn
+  # falls through fast (claude_binary_missing → pipeline_failed →
+  # Phase 1 fallback). Without this the test would invoke real
+  # `claude -p` for ~30+ seconds.
+  local jq_bin flock_bin perl_bin shasum_bin
+  jq_bin=$(command -v jq | xargs dirname)
+  flock_bin=$(command -v flock | xargs dirname)
+  perl_bin=$(command -v perl | xargs dirname)
+  shasum_bin=$(command -v shasum | xargs dirname)
+  local minimal_path="$jq_bin:$flock_bin:$perl_bin:$shasum_bin:/usr/bin:/bin"
+  CLAUDE_COORD=1 run bash -c "
+    export PATH='$minimal_path'
+    echo '$WRITE_TARGET' | '$H'
+  "
   [ "$status" -eq 0 ]
-  # Stdout must NOT contain permissionDecision (no lock contention here).
   ! _grep_output_for "permissionDecision"
-  # Re-run to capture output for content checks.
-  CLAUDE_COORD=1 run bash -c "echo '$WRITE_TARGET' | '$H'"
-  echo "$output" | jq -e '.hookSpecificOutput.additionalContext | test("stale-read warning")' >/dev/null
+  # New banner format: "Coord drift report ..." with "Drift on FILE" line.
+  echo "$output" | jq -e '.hookSpecificOutput.additionalContext | test("Coord drift report")' >/dev/null
   echo "$output" | jq -e '.hookSpecificOutput.additionalContext | contains("alpha.txt")' >/dev/null
-  # STALE_READ_WARNED event fired.
+  # Pipeline emits VALIDATOR_PIPELINE_STARTED at minimum; if claude
+  # is missing, VALIDATOR_PIPELINE_FAILED follows.
   sleep 0.3
-  run jq -rs '[.[] | select(.kind == "STALE_READ_WARNED")] | length' "$COORD_DIR/events.jsonl"
+  run jq -rs '[.[] | select(.kind == "VALIDATOR_PIPELINE_STARTED")] | length' "$COORD_DIR/events.jsonl"
   [ "$output" -ge "1" ]
 }
 
-@test "pre_tool_use_write: deleted file since read → warning" {
+@test "pre_tool_use_write: deleted file since read → Phase 1 fallback line in drift report" {
   _prime_read "$READ_F1"
   rm -f "$F1"
   CLAUDE_COORD=1 run bash -c "echo '$WRITE_TARGET' | '$H'"
   [ "$status" -eq 0 ]
+  # Deleted-file path falls back to phase1 warning text, not the
+  # validator pipeline (file is gone so no diff possible).
   echo "$output" | jq -e '.hookSpecificOutput.additionalContext | contains("deleted since read")' >/dev/null
+  echo "$output" | jq -e '.hookSpecificOutput.additionalContext | test("Coord drift report")' >/dev/null
+  sleep 0.3
+  run jq -rs '[.[] | select(.kind == "STALE_READ_WARNED" and .payload.stale_kind == "deleted")] | length' "$COORD_DIR/events.jsonl"
+  [ "$output" -ge "1" ]
 }
 
 @test "pre_tool_use_write: entries already marked superseded_by_head_change are NOT re-warned" {
