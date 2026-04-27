@@ -5199,33 +5199,59 @@ Edges:
 
 Iterative bipartite DFS (Bash 3.2 stack-compatible, mirrors
 Phase 5 `coord_cycle_detect` pattern from T5.05):
-- Stack-based DFS using a parallel-indexed array (no
-  associative arrays per CLAUDE.md §A.5).
-- Visited set: TSV file in `.coord/state/.cycle_visit.$$`
-  (process-scoped, cleaned on exit; mirrors T5.05 pattern).
-- Cycle found when DFS revisits a node already on the
-  current path.
-- Chain depth: tracked as path length from start node;
-  rejected when exceeds 3.
+- Stack-based DFS using parallel-indexed arrays (no
+  associative arrays per CLAUDE.md §A.5):
+  `stack_sid` / `stack_path` / `stack_depth` / `visited_arr`.
+- Visited set is the parallel `visited_arr` (linear-scan
+  membership; small N ≤ active session count). Mirrors the
+  exact pattern used by T5.05 `coord_cycle_detect`. (Earlier
+  draft proposed a process-scoped TSV file at
+  `.coord/state/.cycle_visit.$$`; superseded by the in-memory
+  array per T6.02 implementation, which mirrors T5.05's
+  proven `visited_arr` rather than introducing a new on-disk
+  artifact.)
+- Cycle found when DFS would step from `cur_sid`'s task back
+  to `start_sid` (the proposed-task originator). Cycle check
+  fires BEFORE depth check inside the inner loop body so
+  cycle-wins-over-depth combo cases return rc 2.
+- Chain depth: tracked as `stack_depth[i]` (1 = the proposed
+  edge `start_sid → task(target_file) → start_holder`);
+  incremented on each task hop. Rejected when > 3.
 
-Function signature:
+Function signature (per T6.02 user binding 2026-04-27;
+supersedes the earlier flag-based + TSV-stdout draft):
 
 ```bash
-coord_cycle_detect_task_graph \
-    --start-session <sid_B> \
-    --start-file <file_F> \
-    --max-depth 3
-# Output (stdout, TSV one record):
-#   ok\t<empty>\t<empty>          → safe to enqueue
-#   cycle\t<path>\t<empty>         → cycle detected
-#   depth\t<path>\t<actual_depth>  → depth exceeded
-# Exit codes:
-#   0 — query completed (caller inspects TSV for verdict)
-#   1 — internal error (state read failure, lock timeout)
+coord_cycle_detect_task_graph <session_id> <target_file>
+# Returns:
+#   rc 0 — ok; proposed task is safe to persist
+#   rc 1 — chain depth exceeded (>3); stderr human-readable
+#          "Chain depth exceeded (max 3): A → B → C → D rejected"
+#   rc 2 — task cycle detected; stderr human-readable
+#          "Task cycle detected: A → B → A rejected"
+#   rc 3 — usage error (missing/empty arg); stderr usage line
+#
+# Trivial gates (rc 0 fast paths):
+#   - target_file not currently locked → no edge to add
+#   - locks[target_file].session == session_id → self-delegation
 ```
 
-The CLI (`coord task-open`, T6.02) consumes the TSV and
-maps `cycle`/`depth` to user-facing stderr.
+The CLI (`coord task-open`, T6.03 per the post-T6.01 P2
+reorder) dispatches on rc directly; stderr surfaces verbatim
+to the caller.
+
+> **+ UPDATED 2026-04-27 at T6.02 close** reflecting rc/stderr
+> contract supersession. Earlier draft of this section
+> specified a flag-based signature
+> (`--start-session/--start-file/--max-depth`) with TSV stdout
+> output (`ok\t...`, `cycle\t...`, `depth\t...`) and rc 0/1
+> only (caller-side TSV parse for verdict). User T6.02 binding
+> superseded with positional-arg + rc 0/1/2/3 + stderr
+> human-readable. Function header docblock at
+> `src/lib/cycle_detection.sh` notes the supersession; both
+> contracts reconcile cleanly via this PR-PHASE6-03 §3 update.
+> Mirrors Phase 5 T5.07 PR-PHASE5-05 §3-§6 inline-rewrite
+> precedent.
 
 #### 4. Trigger location
 
