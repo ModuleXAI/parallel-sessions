@@ -4776,41 +4776,45 @@ Per `phase4_invariant.bats` (and originally Phase 3):
    in its top-level flow.
 6. Every hook fail-open exits 0 in non-deny code paths.
 
-#### 3. Two Phase 4 carry-forward guards (UNCHANGED)
+#### 3. Two Phase 5 NEW architectural guards
 
-7. `lib/validator_spawn.sh` contains zero
-   `permissionDecision` strings (the Validator classifies
-   but does not deny).
-8. `lib/validator_prefilter.sh` contains zero
-   `permissionDecision` strings (the deterministic pre-
-   filter never denies).
+7. **Mediator dispatch is kind-agnostic** —
+   `lib/mediator_spawn.sh`, `lib/mediator_pending.sh`, and
+   `lib/verdict_apply.sh` contain ZERO `case ... cycle_detected`
+   or `if ... critical_drift` branching in production code.
+   Decision 4 binding (PR-PHASE5-04): cycle_detected handled
+   by the same kind-agnostic 3-action contract that Phase 3
+   established.
+8. **Watchdog probe enforces 3-signal conservative model** —
+   `lib/watchdog.sh` calls `ps -p` (Signal 1: PID liveness)
+   for the alive verdict; Signals 2/3 alone cannot promote
+   to alive (PR-PHASE3-02 §A). Cross-references existing
+   `watchdog.bats` for full 3-outcome semantics.
 
-#### 4. One Phase 4 carry-forward bonus guard (UNCHANGED)
+#### 4. Six bonus guards (Phase 4 carry-forward + Phase 5 NEW)
 
-9. `lib/validator_cache.sh` contains zero
-   `permissionDecision` strings (the cache is a validator
-   component and must not deny).
+9.  `lib/validator_spawn.sh` zero `permissionDecision` (Phase 4 carry).
+10. `lib/validator_prefilter.sh` zero `permissionDecision` (Phase 4 carry).
+11. `lib/validator_cache.sh` zero `permissionDecision` (Phase 4 carry-bonus).
+12. `lib/wait_queue.sh` zero `permissionDecision` (Phase 5 T5.02 NEW).
+13. `lib/cycle_detection.sh` zero `permissionDecision` (Phase 5 T5.05 NEW).
+14. `lib/wait_backend.sh` zero `permissionDecision` (Phase 5 T5.03 NEW).
 
-#### 5. Two NEW Phase 5 bonus guards
-
-10. `lib/wait_queue.sh` contains zero `permissionDecision`
-    strings (queue operations are advisory; deny happens at
-    the existing lock-acquire path).
-11. `lib/cycle_detection.sh` contains zero
-    `permissionDecision` strings (cycle detection routes
-    through Mediator pending pipeline; lockdown is the deny
-    mechanism if scope is global).
-
-**Total: 8 architectural + 3 bonus = 11 guards in
-`phase5_invariant.bats`.**
+**Total: 8 architectural + 6 bonus = 14 guards in
+`phase5_invariant.bats`** (revised from this PR's initial
+11-guard estimate; T5.03 wait_backend.sh + T5.05
+cycle_detection.sh additions raised the bonus-guard count
+from 2 to 6, and Phase 5 T5.06 surfaced two new
+architectural guards #7/#8 verifying Mediator
+kind-agnosticism + watchdog 3-signal model).
 
 #### 6. phase4_invariant.bats deletion
 
 `src/tests/unit/phase4_invariant.bats` is **deleted** in T5.07
 (superseded by `phase5_invariant.bats`, which carries forward
-all Phase 4 guards verbatim plus the 2 new Phase 5 bonus
-guards). Mirrors the Phase 3 → Phase 4 transition (per T4.06
-where `phase3_invariant.bats` was deleted upon
+all Phase 4 guards verbatim plus the Phase 5 additions).
+Mirrors the Phase 3 → Phase 4 transition (per T4.06 where
+`phase3_invariant.bats` was deleted upon
 `phase4_invariant.bats` landing).
 
 ### Plan section deltas required
