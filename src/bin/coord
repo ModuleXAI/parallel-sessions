@@ -632,6 +632,68 @@ cmd_task_open() {
   return 0
 }
 
+# cmd_self_delegate --file <path> --instruction <text>
+#
+# Phase 6 T6.04: persists a self-task into self_tasks[<sid>] for B's
+# session to act on later (when the file becomes unlocked or when B
+# notices the reminder injected by pre_tool_use_any.sh / blocks Stop
+# per stop.sh — both wired in T6.06/T6.07).
+#
+# task_delegation toggle does NOT gate self-delegate (option (b) of
+# the §B.2 deny banner is always available per Decision 6 toggle-
+# FALSE banner; only option (a) coord task-open is gated). Caller's
+# session id from $SESSION_ID env (with synthetic fallback parallel
+# to cmd_wait + cmd_task_open).
+cmd_self_delegate() {
+  local file="" instruction=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --file)         file="${2:-}"; shift 2 ;;
+      --file=*)       file="${1#--file=}"; shift ;;
+      --instruction)  instruction="${2:-}"; shift 2 ;;
+      --instruction=*) instruction="${1#--instruction=}"; shift ;;
+      -*)             die "unknown flag: $1" ;;
+      *)              die "unexpected arg: $1" ;;
+    esac
+  done
+
+  [ -z "$file" ]        && die 'usage: coord self-delegate --file <path> --instruction <text>'
+  [ -z "$instruction" ] && die '--instruction is required'
+
+  # Absolute-path requirement (per T6.04 user binding). Relative
+  # paths would round-trip through self_tasks differently across
+  # sessions (e.g., when notifications surface in a session whose
+  # cwd differs). Reject up-front with clear error.
+  case "$file" in
+    /*) ;;
+    *)  printf 'Error: --file must be an absolute path; got: %s\n' "$file" >&2
+        return 1 ;;
+  esac
+
+  : "${SESSION_ID:=coord-self-delegate-$$}"
+  export SESSION_ID
+
+  # shellcheck disable=SC1091
+  . "$LIB_DIR/atomic_write.sh"
+  # shellcheck disable=SC1091
+  . "$LIB_DIR/log_event.sh"
+  # shellcheck disable=SC1091
+  . "$LIB_DIR/self_tasks.sh"
+
+  local prompt_id
+  if ! prompt_id=$(coord_self_task_open "$SESSION_ID" "$file" "$instruction"); then
+    printf 'Error: failed to persist self-task (rc=%s)\n' "$?" >&2
+    return 1
+  fi
+
+  info "coord self-delegate: self-task created"
+  info "  prompt_id:   $prompt_id"
+  info "  file:        $file"
+  info "  instruction: $instruction"
+  info "Reminder will inject when this file is unlocked (per Decision 2.13)."
+  return 0
+}
+
 usage() {
   cat <<'USAGE'
 usage: coord <subcommand> [args]
@@ -650,12 +712,15 @@ Available subcommands:
   task-open --file <p> --complexity SIMPLE|MODERATE|COMPLEX
             --anchor <json> --instruction <text> [--rationale <text>]
                               delegate a task to the lock-holder of <p>;
-                              processed at lock release (Phase 6)
+                              processed at lock release (Phase 6 T6.03)
+  self-delegate --file <p> --instruction <text>
+                              defer your own work on <p>; reminder injects
+                              when <p> becomes unlocked (Phase 6 T6.04)
   mediate <subcommand>        operator interface to the Mediator agent.
                               Run `coord mediate --help` for details.
 
 Subcommands coming in later phases:
-  self-delegate, tasks, locks, mediate --retry
+  tasks, locks, mediate --retry
 USAGE
 }
 
@@ -691,33 +756,7 @@ case "$sub" in
     ;;
   help|-h|--help) usage ;;
   task-open)   cmd_task_open "$@" ;;
-  self-delegate)
-    # Phase 6 T6.04 deliverable — currently disabled but emits
-    # educational guidance so a Claude session that tried option (b)
-    # from the §B.2 deny prompt loses minimum context. Points them at
-    # option (a) `coord task-open` (now real per T6.03) or option (c)
-    # `coord wait`.
-    target=""
-    while [ $# -gt 0 ]; do
-      case "$1" in
-        --file) target="${2:-}"; shift 2 ;;
-        --file=*) target="${1#--file=}"; shift ;;
-        *) shift ;;
-      esac
-    done
-    cat >&2 <<EOF
-coord self-delegate: not yet enabled (Phase 6 T6.04 deliverable).
-
-Currently-available alternatives:
-  (a) Delegate a task to the lock-holder:
-        coord task-open --file ${target:-<path>} --complexity SIMPLE \\
-            --anchor '{"search":"…","window_lines":"…"}' \\
-            --instruction '…' [--rationale '…']
-  (c) Passively wait for the lock to release:
-        coord wait${target:+ $target} --timeout 570
-EOF
-    exit 1
-    ;;
+  self-delegate) cmd_self_delegate "$@" ;;
   *)
     # Stubs for Phase N+ subcommands not yet implemented.
     case "$sub" in
