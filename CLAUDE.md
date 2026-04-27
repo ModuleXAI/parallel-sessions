@@ -282,6 +282,138 @@ The lifecycle-event-completeness audit is part of the lesson #2 pre-implementati
 
 These rules apply to any future hook / pipeline / spawn-helper construction. The Phase 4 implementations of `pre_tool_use_write.sh` (T4.06), `lib/validator_spawn.sh` (T4.04), and `phase4_ship_gate` fixtures (T4.07) are the canonical references for the patterns.
 
+**7. Bash 3.2 parser fragility on `out=$( ( cmd ) 9>"lock" )` form** (T5.02 lesson, F-018 portability family).
+
+The `out=$( ( cmd ) 9>"$lock" )` pattern fails to parse under Bash 3.2 when the inner subshell contains nested `$(cmd "arg")` inside double-quoted strings. Bash reports `syntax error near unexpected token`)'`on the outer `)`. macOS's default Bash (3.2.57) is the binding version per CLAUDE.md §A.5. The pattern is convenient because it captures stdout AND holds flock simultaneously, but it is unsupportable under Bash 3.2.
+
+```bash
+# WRONG — bash 3.2 syntax error on inner $(cmd "...") nesting:
+out=$(
+  (
+    flock -x -w "$timeout" 9 || exit 2
+    : > "${COORD_DIR}/wakers/${sid}-$(_coord_wq_sanitize "$file").wake"
+    printf 'appended\t%s\n' "$sz"
+  ) 9>"$lock_path"
+)
+```
+
+RIGHT — temp-file inter-subshell communication; mirrors `lib/atomic_write.sh`, `lib/log_event.sh`, `lib/mediator_spawn.sh`:
+
+```bash
+local out_tmp="${COORD_DIR}/wait_queues/.enq.$$.${sid}.out"
+: >"$out_tmp"
+(
+  flock -x -w "$timeout" 9 || exit 2
+  printf 'appended\t%s\n' "$sz" >"$out_tmp"
+) 9>"$lock_path"
+local rc=$?
+local out
+out=$(cat "$out_tmp" 2>/dev/null || printf '')
+rm -f "$out_tmp"
+```
+
+Surfaced in T5.02 `coord_wait_queue_enqueue` + `coord_wait_queue_dequeue`. Caught at bats setup phase before any test ran. Pre-sanitize the file path into a local variable BEFORE entering the flock-wrapped subshell to keep nested `$()` interactions outside the outer command-substitution boundary.
+
+**8. bats PATH manipulation is fragile cross-host** (T5.03 lesson, F-018 family).
+
+A bats helper that strips PATH directories to fake-absent host binaries (e.g., `fswatch` to test polling fallback) breaks on hosts where `/usr/bin` contains other essentials. On Linux with `inotify-tools` installed at `/usr/bin/inotifywait`, stripping `/usr/bin` from PATH ALSO strips `chmod`, `rm`, `sleep`. Tests that run after the strip silently fail with cascading "command not found" errors.
+
+```bash
+# WRONG — strips /usr/bin if it contains inotifywait → chmod/rm/sleep break:
+_isolate_path() {
+  local kept=""
+  IFS=':'
+  for entry in $PATH; do
+    if ! { [ -x "$entry/fswatch" ] || [ -x "$entry/inotifywait" ]; }; then
+      kept="${kept:+$kept:}$entry"
+    fi
+  done
+  PATH="$TMP/bin${kept:+:$kept}"
+}
+```
+
+RIGHT — skip-based tests using `command -v` against the live host:
+
+```bash
+@test "wait_backend: fswatch present + macOS -> backend=fswatch" {
+  [ "$(uname -s)" = "Darwin" ] || skip "macOS-only"
+  command -v fswatch >/dev/null 2>&1 || skip "fswatch not installed"
+  run coord_wait_backend_detect
+  [ "$output" = "fswatch" ]
+}
+```
+
+Skip-based tests reflect the host configuration honestly without breaking the test environment. Use `skip "..."` whenever you cannot reproduce a binary's absence without breaking other tools.
+
+**9. Helper stdout bleeds into `$()` captures of higher-order functions** (T5.04 lesson).
+
+When a function captures another function's stdout via `$()` and the inner function calls helpers that print to stdout under rc=0 (e.g., `coord_validator_prefilter` prints `safe:whitespace_only`, `coord_validator_cache_lookup` prints `MINOR\t<source>\t<diff>`), the helper output bleeds into the outer capture. The captured value is the concatenation of all writes during the call. ALSO, globals set in the captured function are LOST because `$()` runs in a subshell.
+
+```bash
+# WRONG — prefilter prints "safe:whitespace_only" to stdout under rc=0;
+# this bleeds into $diff_summary captured by the caller:
+_coord_notify_compute_diff_summary() {
+  if coord_validator_prefilter "$holder" "$path" "$prev_hash" "$current_hash" 2>/dev/null; then
+    _COORD_NOTIFY_LAST_TIER='prefilter_safe'   # LOST in subshell
+    printf 'trivial change (whitespace/comment)'
+  fi
+}
+diff_summary=$(_coord_notify_compute_diff_summary ...)  # = "safe:whitespace_only\ntrivial change..."
+```
+
+RIGHT — explicit stdout suppression on inner helpers + TSV stdout protocol for tier propagation:
+
+```bash
+_coord_notify_compute_diff_summary() {
+  if coord_validator_prefilter "$holder" "$path" "$prev_hash" "$current_hash" >/dev/null 2>&1; then
+    printf 'prefilter_safe\ttrivial change (whitespace/comment)'
+    return 0
+  fi
+  printf 'fallback\tmodified by %s' "${holder:0:8}"
+}
+local _ds_tsv
+_ds_tsv=$(_coord_notify_compute_diff_summary ...)
+diff_tier=$(printf '%s' "$_ds_tsv" | awk -F'\t' '{print $1}')
+diff_summary=$(printf '%s' "$_ds_tsv" | awk -F'\t' '{print $2}')
+```
+
+Two patterns to remember: (a) explicit `>/dev/null 2>&1` on inner helpers when their stdout is not part of the outer capture contract, and (b) TSV stdout protocol with awk-split for multi-value returns from `$()`-captured functions.
+
+**10. `jq --argjson` requires valid JSON, not jq's bare-key syntax** (T5.05 lesson).
+
+jq's object-construction syntax allows bare keys (`{from:"x"}` is valid jq). But `--argjson` is a JSON parser, not a jq parser — bare keys are rejected. Build edges + nested objects via TSV stdin → `jq -Rsc 'split("\n") | ...'` with QUOTED keys for `--argjson` consumption.
+
+```bash
+# WRONG — jq bare-key syntax fails --argjson parse:
+local edges_jq_lines=""
+for k in ...; do
+  edges_jq_lines+="{from:\"$from_sid\", type:\"waits_for\", to:\"$f\"},"
+done
+jq -nc --argjson edges "[${edges_jq_lines%,}]" '...'
+# → jq: invalid JSON text passed to --argjson
+```
+
+RIGHT — TSV stdin → jq map construction with quoted JSON keys:
+
+```bash
+local edges_tsv=""
+for k in ...; do
+  edges_tsv+=$'\n'"${from_sid}"$'\t'"waits_for"$'\t'"$f"
+done
+local edges_json
+edges_json=$(printf '%s\n' "${edges_tsv#$'\n'}" | jq -Rsc '
+  [ split("\n")[] | select(length > 0) | split("\t")
+    | {from: .[0], type: .[1], to: .[2]} ]
+')
+jq -nc --argjson edges "$edges_json" '...'
+```
+
+Surfaced in T5.05 `cycle_detection.sh` edges builder. Caught at bats setup phase. The TSV intermediate also forces explicit field-position discipline (`split("\t")[0/1/2]`), reducing risk of misordered concatenation.
+
+**Lesson #4 reinforcement (T5.05 case study).** `head -n -1` is a GNU extension; macOS BSD `head` rejects negative line counts (`illegal line count -- -1`). Initial `cycle_path` session-array dedup used `head -n -1` to drop the closing duplicate of `start_sid`. Fix: use `jq unique` instead of `head -n -1` for natural deduplication. Pattern: prefer pure-jq pipelines over CLI-tool composition where deduplication / sorting is needed; jq is portable and feature-complete for these operations.
+
+These rules apply to any future hook / pipeline / spawn-helper / fixture construction. The Phase 5 implementations of `lib/wait_queue.sh` (T5.02), `lib/wait_backend.sh` (T5.03), `lib/notify_waiters.sh` extension (T5.04), `lib/cycle_detection.sh` (T5.05), and `phase5_ship_gate` fixtures (T5.09) are the canonical references for these new patterns.
+
 ---
 
 ## Part B — Runtime Rules for Coordinated Sessions
@@ -417,16 +549,70 @@ The watchdog NEVER returns `alive` solely on activity/lock signals — Signal 1 
 
 **Passive reliability:** `[BEST-EFFORT]` — you must notice and act on the reminder. The hook will surface it, but whether you return to the file is your decision. Archive as `SKIPPED` is the fallback.
 
-### B.8 On passive waiting (polling cadence)
+### B.8 On passive waiting (event-driven wake-up)
 
 **Rule:** Passive wait is the fallback when delegation and self-delegation are not appropriate (e.g., the blocked edit is complex, you have no other productive work). Issue:
-> `Bash: coord wait <file> --timeout 600`
+> `Bash: coord wait <file> --timeout 570`
 
-**Enforcement:** `[HOOK-ENFORCED]` for the polling cadence (30s → 60s → 120s), the wake semantics (lock-release touches the wake file; `coord wait` exits), and the timeout.
+**Enforcement:** `[HOOK-ENFORCED]` for the FIFO ordering, the event-driven wake (lock-release writes diff_summary to your wake_file; `coord wait` exits with that text on stdout), and the timeout.
 
-**What happens on timeout:** `coord wait` exits non-zero; you receive "timeout after Ns" on stdout. Next step is usually to ask the user (the coordination system has done everything it can; the problem is human-scale).
+**Phase 5 / PR-PHASE5-02 wake-up backend (T5.03):**
+1. `coord wait <path>` enqueues your session into `wait_queues[<path>]` (FIFO; per-file flock); the CLI captures the per-(session, file) wake_file path.
+2. The wake_file is watched via the platform-appropriate backend, auto-detected at install time and recorded in `.coord/config.json::wait_backend`:
+   - **macOS:** `fswatch` (preferred); polling fallback if absent.
+   - **Linux:** `inotifywait` (preferred); `fswatch` second; polling fallback if neither installed.
+   - **Other Unix:** 250 ms wake_file mtime polling.
+3. On lock release, the holder's hook (`post_tool_use_write.sh` / `stop.sh` via `lib/notify_waiters.sh`) writes a one-line diff_summary into your wake_file. The watcher fires; `coord wait` reads the content (with a 50 ms grace re-read for the create-vs-write race) and prints it on stdout for your `additionalContext`.
+4. If the wake_file is empty on read, the fallback string is `"modified by <session_id_prefix>"` — semantically correct (you know the file changed) even when the diff_summary computation is degraded.
 
-**Cadence rationale:** Starts at 30s to avoid tight polling; doubles at 5 min (wait counter ≥ 10), doubles again at 15 min (counter ≥ 20) to be nice to other work. Max wait defaults to 30 min (`wait_max_seconds`).
+**SessionStart polling-mode warning:** if `wait_backend` resolves to `polling`, the SessionStart banner appends an `additionalContext` line recommending `brew install fswatch` (macOS) or `apt install inotify-tools` (Linux) for sub-100 ms wake-up latency. F-001 precedent: graceful degradation with operator guidance, never a silent regression.
+
+**What happens on timeout:** `coord wait` exits non-zero with `WAIT_TIMEOUT(reason=deadline)`; you receive "timeout after Ns" on stdout, dequeued automatically. Next step is usually to ask the user (the coordination system has done everything it can; the problem is human-scale).
+
+**SIGINT/SIGTERM:** dequeues your session from the wait_queue, kills any backend watcher PID, emits `WAIT_TIMEOUT(reason=interrupted)`, exits 130. Clean shutdown.
+
+**Latency:** sub-100 ms with `fswatch` / `inotifywait`; ≤ 250 ms with the polling fallback. Phase 2's 30s/60s/120s polling cadence is fully superseded by the event-driven flow; the 250 ms cadence is preserved only in the no-tooling fallback.
+
+**`wait_max_seconds` bound:** clamped to [30, 570] per Decision 2.20; default 570 sits below Claude Code's 600 s Bash-tool ceiling.
+
+### B.8a Phase 5 end-to-end pipeline + cycle detection (operational guidance, T5.08)
+
+**End-to-end flow when you `coord wait <path>`:**
+
+1. **Enqueue.** Your session is appended to `wait_queues[<path>]` under per-file flock (`.coord/wait_queues/<sanitized_path>.lock`; sanitization: `tr / __`). An empty wake_file is touched at `.coord/wakers/<sid>-<sanitized>.wake`.
+2. **Cycle-detection trigger.** If post-append queue depth ≥ 2, `coord_cycle_detect` runs a bipartite session/file DFS from your session as the start. If a cycle is found, a `cycle_detected` pending entry is written to `.coord/mediator/pending.jsonl` and the Mediator is spawned inline (synchronous, ~50-100 s worst case, mirroring Phase 4 `critical_drift` pattern).
+3. **Backend dispatch.** Your `coord wait` blocks on the wake_file via the resolved backend (`fswatch` on macOS, `inotifywait` on Linux, 250 ms polling fallback otherwise — auto-detected at install). First-use emits `WAIT_BACKEND` event.
+4. **Lock release on the holder side.** The holder's `post_tool_use_write.sh` (or `stop.sh` / `session_end.sh`) calls `notify_waiters.sh`, which:
+   - Reads `locks[<path>].latest_validator_verdict_ts` (Phase 5 schema field; populated when the Phase 4 validator pipeline produced a fresh verdict during the holder's write turn).
+   - Computes the `diff_summary` via the **4-tier priority chain**:
+     - **Tier 1** (verdict-file): jq lookup of `.coord/validator/verdict/<ts>.json::.diff_summary`.
+     - **Tier 2** (cache hit): `coord_validator_cache_lookup` on `(file, prev_hash, current_hash)`. SAFE → "trivial change (no semantic drift)"; MINOR → cached diff_summary text.
+     - **Tier 3** (pre-filter SAFE): `coord_validator_prefilter` on the holder's read snapshot vs current file. SAFE → "trivial change (whitespace/comment)".
+     - **Tier 4** (fallback): `"modified by <holder_id_prefix>"`.
+   - Writes the resolved diff_summary to every queued waiter's wake_file via `printf "%s\n" "$diff_summary" > "$wake_file"`.
+   - Emits one `NOTIFICATION_PRODUCED` event with `diff_summary_source=<tier>` for the audit trail.
+5. **Wake-up.** Your backend fires; `coord wait` reads wake_file content (with a 50 ms grace re-read for the create-vs-write race), exits with the `diff_summary` on stdout for your `additionalContext`.
+
+**Operator commands:**
+- `coord status` shows `wait_queues: N waiter(s)` and per-file queue lengths via `coord status --reads` (extended in Phase 5 T5.02).
+- `coord wait <path>` is the primary user-facing command (blocks until release or timeout; prints diff_summary on success).
+- `coord mediate` and `coord mediate --resume` cover Mediator escalations including `cycle_detected` lockdown verdicts (Phase 3 carry-forward).
+
+**When you encounter a long `coord wait`:**
+- If a `polling` backend warning surfaced at SessionStart, install `fswatch` (macOS: `brew install fswatch`) or `inotify-tools` (Linux: `apt install inotify-tools`) and re-run `coord install --repair` to switch backends. The 250 ms polling fallback is correct but adds ~150-200 ms wake-up latency vs the event-driven path.
+- If `coord wait` times out (`WAIT_TIMEOUT(reason=deadline)`), the lock holder is likely stuck or the cycle detector missed a silent 2-cycle (depth ≤ 1 on both queues — see §B.8a "Silent 2-cycle case" below). Surface to the user; the human-scale problem is beyond what the coordination system can resolve alone.
+
+**When you encounter a `cycle_detected` Mediator verdict:**
+- The Mediator's `message_to_caller` describes which session was evicted and why (3-tier priority: oldest activity → fewest locks → youngest session age — see `MEDIATOR_REFERENCE.md` §4.X.1).
+- The evicted session loses its locks, wait_queue entries, read-set, read-snapshots, and wake_files in one atomic step. Other waiters in the cycle wake up via the standard lock-release notification path.
+- A `lockdown` verdict on `cycle_detected` indicates a global deadlock (cycle spans all active sessions, OR ≥ 4 sessions, OR `recent_cycle_count` ≥ 2 within 60 s — Mediator can't surgical-fix). Operator runs `coord mediate --resume` after investigating.
+
+**Silent 2-cycle case (architectural note from T5.05).** When session A holds `/p/foo` and waits for `/p/bar`, AND session B holds `/p/bar` and waits for `/p/foo`, each queue has depth 1 and the depth ≥ 2 trigger doesn't fire. The cycle is silent until either:
+1. A third session enqueues on one of the cycle's files (depth 2 → trigger fires).
+2. A cycle session re-enqueues on the other's file with another waiter already there.
+3. The `wait_max_seconds` clamp expires (570 s) and Phase 7 will add follow-up cleanup detection from the timed-out session's perspective.
+
+For Phase 5, the depth ≥ 2 trigger is sufficient for the done-when criterion. Silent-2-cycle handling is deferred to Phase 7.
 
 ### B.9 Edge-case rules
 
@@ -565,21 +751,34 @@ These are cases where Claude sometimes tries to "help" in ways that undermine co
 
 If Part A is silent on a construction question: follow the Section 10 decision tree in `IMPLEMENTATION_PLAN.md`. If Part B is silent on a runtime question: act conservatively (do not write; ask the user; prefer `coord status` over guessing).
 
-### C.4a Phase 4 architectural invariant (carry-forward from Phase 3)
+### C.4a Phase 5 architectural invariant (carry-forward from Phase 3+4)
 
-**`permissionDecision: "deny"` appears in EXACTLY two architectural locations** (unchanged through Phase 4 — the validator pipeline introduces NO new deny location):
+**`permissionDecision: "deny"` appears in EXACTLY two architectural locations** (UNCHANGED through Phases 3+4+5 — the wait queue + cycle detection layers introduce NO new deny location):
 
 1. `pre_tool_use_write.sh` lock-held-by-other branch (existing Phase 2).
-2. Any hook reading `.coord/mediator/lockdown.json` with `active=true` via `lib/lockdown.sh::coord_lockdown_emit_deny` (existing Phase 3).
+2. Any hook reading `.coord/mediator/lockdown.json` with `active=true` via `lib/lockdown.sh::coord_lockdown_emit_deny` (existing Phase 3 — Mediator lockdown verdicts on `cycle_detected` payloads route through this gate).
 
-Phase 4 adds 2 architectural guards to the Phase 3 invariant set:
+Phase 5 adds **2 NEW architectural guards** + **3 NEW bonus guards** on top of Phase 4's carry-forward set:
 
-3. `lib/validator_spawn.sh` contains zero `permissionDecision` strings — the Validator classifies but does not deny. CRITICAL escalates via Mediator → routes through the existing lockdown gate when Mediator chooses lockdown.
-4. `lib/validator_prefilter.sh` contains zero `permissionDecision` strings — the deterministic pre-filter never denies; only returns SAFE or ESCALATE_TO_AGENT.
+**Phase 5 NEW architectural guards:**
 
-Total: **8 architectural guards** in `phase4_invariant.bats` (Phase 3's 6 + Phase 4's 2), plus 1 bonus guard for `lib/validator_cache.sh` (also zero permissionDecision; the cache is a validator component and must not deny). The static-grep gate fails the test if any other code path emits `permissionDecision` outside the two allowed locations.
+7. **Mediator dispatch is kind-agnostic.** `lib/mediator_spawn.sh`, `lib/mediator_pending.sh`, and `lib/verdict_apply.sh` contain ZERO `case ... cycle_detected` or `if ... critical_drift` branches in production code. Decision 4 binding (PR-PHASE5-04): cycle_detected is handled by the same kind-agnostic 3-action contract (advice / surgical_fix / lockdown) that Phase 3 established. Future kinds (Phase 6+) MUST also fit this contract without code changes.
+8. **Watchdog probe enforces 3-signal conservative model.** `lib/watchdog.sh` calls `ps -p` for Signal 1 (PID liveness) — mandatory for the alive verdict per PR-PHASE3-02 §A. Signals 2 (`last_activity_at` staleness) and 3 (lock-context unrefreshed) alone cannot promote to alive; only suspicion. Cross-references `watchdog.bats` for full 3-outcome semantics.
 
-When future phases (5+) extend the system, every new lib/ or hooks/ file MUST be added to the invariant test's enumeration and pass the zero-deny grep — UNLESS it is the Mediator's lockdown gate (which has an explicit allowlist).
+**Phase 4+5 bonus guards (zero permissionDecision in component libs):**
+
+9.  `lib/validator_spawn.sh` (Phase 4 carry-forward).
+10. `lib/validator_prefilter.sh` (Phase 4 carry-forward).
+11. `lib/validator_cache.sh` (Phase 4 carry-forward bonus).
+12. `lib/wait_queue.sh` (Phase 5 T5.02 NEW — queue ops are advisory; deny happens at the existing lock-acquire path).
+13. `lib/cycle_detection.sh` (Phase 5 T5.05 NEW — cycle detection routes through the Mediator pending pipeline; lockdown is the deny mechanism if scope is global).
+14. `lib/wait_backend.sh` (Phase 5 T5.03 NEW — backend abstraction is mechanical; deny is not a backend concern).
+
+Total: **8 architectural guards + 6 bonus guards = 14 guards** in `phase5_invariant.bats`. The static-grep gate fails the test if (a) any other code path emits `permissionDecision` outside the two allowed locations, OR (b) Mediator dispatch grows kind-branching, OR (c) the watchdog regresses to non-Signal-1-mandatory alive verdicts.
+
+When future phases (6+) extend the system, every new `lib/` or `hooks/` file MUST be added to the invariant test's enumeration and pass the zero-deny grep — UNLESS it is the Mediator's lockdown gate (which has an explicit allowlist). New pending kinds MUST flow through the existing kind-agnostic dispatch and 3-action contract; any addition of `case ... <new_kind>)` branching in `mediator_spawn.sh` / `mediator_pending.sh` / `verdict_apply.sh` is a Phase 5 invariant violation.
+
+`phase4_invariant.bats` deleted at T5.07 (superseded by `phase5_invariant.bats`); mirrors the Phase 3 → Phase 4 transition pattern (T4.06 deleted `phase3_invariant.bats`). Phase 6+ will continue the rolling supersession.
 
 ### C.5 Version
 

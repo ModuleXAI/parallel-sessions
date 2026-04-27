@@ -50,7 +50,7 @@ mk_empty_sessions() {
     "schema_version": "1.0",
     "sessions": {},
     "locks": {},
-    "wait_queue": {},
+    "wait_queues": {},
     "read_sets": {},
     "notifications": {},
     "self_tasks": {},

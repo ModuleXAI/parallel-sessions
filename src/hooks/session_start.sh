@@ -274,6 +274,18 @@ if [ -n "$PENDING_BANNER" ]; then
   BANNER="$BANNER"$'\n\n'"$PENDING_BANNER"
   coord_log_event kind=MEDIATOR_PENDING_DELIVERED source=session_start
 fi
+
+# Phase 5 T5.03 / PR-PHASE5-02 §4: surface a warning when the wake-up
+# backend is the polling fallback (neither fswatch nor inotifywait
+# present). F-001 precedent — graceful degradation with operator
+# guidance.
+if [ -f "$COORD_DIR/config.json" ]; then
+  WAIT_BACKEND_CFG=$(jq -r '.wait_backend // "auto"' "$COORD_DIR/config.json" 2>/dev/null || printf 'auto')
+  if [ "$WAIT_BACKEND_CFG" = "polling" ]; then
+    BANNER="$BANNER"$'\n\n'"[Coord] Wake-up using 250 ms polling fallback. Install fswatch (macOS: brew install fswatch) or inotify-tools (Linux: apt install inotify-tools) for sub-100 ms wake-up latency."
+  fi
+fi
+
 emit_additional_context "$BANNER"
 
 # --- Event log per source ---

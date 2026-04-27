@@ -42,7 +42,7 @@ processes:
   file bar.ts containing 'export const bar = \"v2\";'."
 - **Session B prompt:** "Modify foo.ts to set the foo constant to 'v2'."
 
-Sequencing is enforced via barriers (sleep + wait_queue inspection) so
+Sequencing is enforced via barriers (sleep + wait_queues inspection) so
 that A's Read precedes B's Write, and A's Write follows B's Write. The
 same assertions on `events.jsonl` apply.
 

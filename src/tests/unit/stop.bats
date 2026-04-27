@@ -130,13 +130,24 @@ _other_attempt() {
   [ "$output" = "true" ]
 }
 
-@test "stop: notification populated for prior denied waiter on released path" {
+@test "stop: notification populated for queued waiter on released path (Phase 5 T5.04)" {
   _acquire "$TARGET1"
-  # OTHER tries to write → denied + LOCK_DENIED logged.
+  # OTHER tries to write → denied + LOCK_DENIED logged + (Phase 5)
+  # OTHER would normally enqueue itself via `coord wait`, but the
+  # _other_attempt fixture predates Phase 5. Pre-seed the queue
+  # entry directly via the public API.
   _other_attempt "$TARGET1"
   sleep 0.3
   run jq -rs '[.[] | select(.kind == "LOCK_DENIED" and .session == $b)] | length' --arg b "$OTHER" "$COORD_DIR/events.jsonl"
   [ "$output" = "1" ]
+  mkdir -p "$COORD_DIR/wakers" "$COORD_DIR/wait_queues"
+  # shellcheck disable=SC1091
+  . "$SRC_ROOT/lib/atomic_write.sh"
+  # shellcheck disable=SC1091
+  . "$SRC_ROOT/lib/log_event.sh"
+  # shellcheck disable=SC1091
+  . "$SRC_ROOT/lib/wait_queue.sh"
+  COORD_DIR="$COORD_DIR" coord_wait_queue_enqueue "$OTHER" "$TARGET1" >/dev/null
   # Now SID stops → release should populate notifications[OTHER][TARGET1].
   CLAUDE_COORD=1 bash -c "echo '$STOP_INPUT' | '$H'" >/dev/null
   sleep 0.3
@@ -147,11 +158,12 @@ _other_attempt() {
   run jq -r --arg b "$OTHER" --arg f "$TARGET1" '
     .notifications[$b][$f][0]
   ' "$COORD_DIR/sessions.json"
-  # Action-hint format: "Lock released on <path> (held by <prefix>... for N sec)."
-  # plus the actionable next-step nudge (retry / `coord wait`).
+  # Action-hint format preserves Phase 2 wording with T5.04
+  # diff_summary appended.
   echo "$output" | grep -q "Lock released on"
   echo "$output" | grep -qE "held by ${SID:0:8}\\.\\.\\."
   echo "$output" | grep -qE "for [0-9]+ sec"
+  echo "$output" | grep -q "diff_summary:"
   echo "$output" | grep -q "You may now retry your write"
   echo "$output" | grep -q "coord wait $TARGET1"
   # NOTIFICATION_PRODUCED event emitted, waiter_count=1.

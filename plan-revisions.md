@@ -3135,6 +3135,1776 @@ phase-4-signoff.md.
 
 ---
 
+## PR-PHASE5-01 — Wait queue lock semantics + data structure + schema rename (Decision 1)
+
+**Date:** 2026-04-27
+**Author:** Phase 5 builder (T5.01).
+**Status:** APPROVED 2026-04-27 at T5.01 close. Gates T5.02 (wait queue infrastructure).
+**Driver:** User-resolved Decision 1 from Phase 5 resume prompt
+("Wait queue lock semantics" — per-file lock pattern, no global
+wait_queues.lock, wait_queues[<path>][] data structure, six public
+functions in `lib/wait_queue.sh`) plus pin-points (a-1) and (c-1)
+from T5.01 startup approval.
+
+### Observed gap requiring change
+
+Plan §5 Phase 5 scope says "wait_queue[<file>] FIFO with explicit
+`waiting_since` ordering" but does not specify:
+1. Whether the FIFO state lives in `sessions.json` or in a
+   separate file.
+2. The locking granularity for queue mutations (single global
+   lock vs per-file lock).
+3. The directory layout of per-file locks (path sanitization
+   convention).
+4. The set of CLI/library operations exposed.
+5. Whether the existing `sessions.json` schema slot is named
+   `wait_queue` (singular, as currently encoded in 4 sites) or
+   `wait_queues` (plural, as Decision 1 wording specifies).
+
+T5.02 implementation cannot proceed without resolving these.
+
+### User-resolved decision
+
+**Per-file lock pattern with plural schema slot.**
+
+#### 1. Storage location and schema rename
+
+Wait queue state lives in `sessions.json` under a top-level
+`wait_queues` slot. This **renames** the existing schema slot
+(currently `wait_queue` singular, present-but-empty in 4 code
+sites listed below).
+
+**Pre-rename precondition (verified 2026-04-27 at T5.01 open):**
+the existing `wait_queue` slot is empty in installed state
+(`jq '.wait_queue|keys' .coord/sessions.json` → `[]`,
+`[.wait_queue[]?|length]|add` → `0`). No data migration is
+needed; the rename is mechanical text substitution.
+
+**4 code sites updated by T5.02:**
+- `src/lib/atomic_write.sh:62` — template `wait_queue: {}` →
+  `wait_queues: {}`.
+- `src/lib/state_query.sh:28` — fallback empty-state line
+  `wait_queue: {}` → `wait_queues: {}`.
+- `src/tests/helpers/common.bash:53` — bats helper
+  `"wait_queue": {}` → `"wait_queues": {}`.
+- `src/bin/coord:52` + `src/bin/coord:65` — `coord status`
+  reads `.wait_queue[]` (line 52) and prints
+  `"wait_queue: …"` label (line 65); both rename to
+  `wait_queues`.
+
+**T5.02 pre-rename gate:** the implementer MUST re-verify the
+empty-slot precondition immediately before performing the
+rename (run the same `jq` probe against `.coord/sessions.json`).
+If non-empty data is found, halt and report — a migration
+script would be needed. Empty slot expected; rename
+straightforward.
+
+#### 2. Wait queue data structure
+
+```json
+{
+  "wait_queues": {
+    "/path/foo.ts": [
+      {
+        "session_id": "<sid>",
+        "waiting_since": "<ISO8601 with ms>",
+        "wake_file": ".coord/wakers/<sid>-<sanitized_path>.wake",
+        "queue_position": 0
+      }
+    ]
+  }
+}
+```
+
+- Keys are absolute file paths (the same shape `locks` uses).
+- Values are FIFO arrays; index 0 is the head (next to be
+  woken).
+- `queue_position` is 0-indexed and recomputed on every queue
+  mutation (enqueue / dequeue / cleanup_session). Stale
+  positions are not tolerated; the queue is the source of
+  truth, position is a convenience field.
+- `waiting_since` uses millisecond precision per F-009
+  (perl `Time::HiRes` via `coord_now_iso8601`).
+
+#### 3. Per-file lock semantics
+
+Each tracked file has its own wait-queue lock at
+`.coord/wait_queues/<sanitized_path>.lock`. No global
+`wait_queues.lock` is created.
+
+**Path sanitization (pin-point a-1, binding):**
+literal `tr / __` form. The leading `/` of an absolute path
+becomes a leading `__`. Examples:
+- `/src/api.ts` → `__src__api.ts`
+- `/Users/x/Desktop/foo/bar.md` → `__Users__x__Desktop__foo__bar.md`
+- `relative/path.ts` (no leading slash) → `relative__path.ts`
+
+Reverse mapping is unambiguous: every `__` in the sanitized
+form was a `/` in the original. (No real path component
+contains `__` in practice; if a future regression surfaces such
+a path, raise a finding and revisit.) The lock-filename helper
+sets the working file for the
+subshell-redirected-fd-form per F-003:
+
+```
+(
+  flock -x -w "$timeout" 9
+  # critical section: read/mutate sessions.json wait_queues[$file]
+) 9>".coord/wait_queues/<sanitized_path>.lock"
+```
+
+The lock file is created lazily on first enqueue for a given
+file path; it persists across the session lifetime and is
+cleaned up only by `install.sh --uninstall` (the `.coord/`
+purge). Empty lock files are byte-identical and cheap; no
+runtime sweep is needed.
+
+**Rationale for per-file (vs global) granularity:** under a
+heavy multi-file coordinated workload with N waiters across M
+files, per-file locks yield up to M concurrent flock operations
+versus 1 global serialization point. Cycle detection (which
+needs a consistent snapshot across multiple files) does NOT
+hold the per-file locks; it reads `sessions.json` directly
+under the existing `sessions.lock` (the cycle detector's read
+is a point-in-time snapshot, not a transactional barrier across
+files — see PR-PHASE5-03 for cycle-detection isolation
+semantics).
+
+#### 4. Public API: `lib/wait_queue.sh`
+
+Six public functions:
+
+- `coord_wait_queue_enqueue <sid> <file_path>`
+  Acquires per-file flock; appends an entry to
+  `wait_queues[<file_path>]` with the current ISO timestamp,
+  pre-computed wake_file path, and queue_position derived
+  from the post-append array length. Recomputes positions on
+  ALL entries for the file (defensive against partial state).
+  Idempotent: if `<sid>` is already in the queue for
+  `<file_path>`, returns its existing wake_file path without
+  re-appending. Logs `WAIT_QUEUE_ENQUEUE` event.
+  **Returns:** wake_file path on stdout; rc=0 on success, rc=1
+  on flock timeout, rc=2 on atomic_edit failure.
+  **Cycle-detection trigger:** when post-append queue depth ≥
+  2, enqueue invokes `coord_cycle_detect <sid>` (PR-PHASE5-03)
+  before returning. Cycle detection is in-process; if a cycle
+  is found, the `cycle_detected` pending entry is written
+  before enqueue returns. The enqueue itself still succeeds
+  (rc=0); the caller sees the wake_file path normally and the
+  Mediator handles the cycle on the consumer side.
+
+- `coord_wait_queue_dequeue <sid> <file_path>`
+  Acquires per-file flock; removes the entry where
+  `session_id == <sid>`. Recomputes queue_positions on
+  remaining entries. Logs `WAIT_QUEUE_DEQUEUE` event.
+  Idempotent: if `<sid>` is not in the queue, no-op (rc=0).
+  **Returns:** rc=0 on success or no-op, rc=1 on flock
+  timeout, rc=2 on atomic_edit failure.
+
+- `coord_wait_queue_head <file_path>`
+  Acquires per-file flock briefly (read-only critical
+  section). Returns the head entry's session_id and wake_file
+  as TSV on stdout (`<sid>\t<wake_file>`). Empty stdout if
+  queue is empty.
+  **Returns:** rc=0 on success (including empty), rc=1 on
+  flock timeout.
+
+- `coord_wait_queue_size <file_path>`
+  Acquires per-file flock briefly. Returns queue length on
+  stdout. Empty queue → "0".
+  **Returns:** rc=0 always (defensive; callers that need
+  authoritative answers should hold the per-file lock around
+  their own jq query instead).
+
+- `coord_wait_queue_position <sid> <file_path>`
+  Acquires per-file flock briefly. Returns 0-indexed position
+  on stdout, or "-1" if `<sid>` is not in the queue.
+  **Returns:** rc=0 always.
+
+- `coord_wait_queue_cleanup_session <sid>`
+  Walks ALL `wait_queues` entries (under `sessions.lock`, NOT
+  per-file locks — this is a global cleanup), removes every
+  entry with `session_id == <sid>`. Recomputes queue_positions
+  on each affected file's queue. Removes corresponding
+  wake_files from `.coord/wakers/<sid>-*.wake`. Logs
+  `WAIT_QUEUE_SESSION_CLEANUP` event with affected-file count.
+  Called from: `session_end.sh` (graceful exit), watchdog
+  eviction path (via `verdict_apply.sh::evict_session`), and
+  `install.sh --repair` (defensive sweep for orphaned waiters
+  after a crash).
+
+All operations under `set -euo pipefail` per CLAUDE.md §A.5;
+all state-file mutations go through `coord_atomic_edit` per the
+same rule.
+
+### Plan section deltas required
+
+**A. `IMPLEMENTATION_PLAN.md` §3.1 layer 5 (Wait queue)** —
+new paragraph: "Phase 5 implementation: per-file FIFO at
+`wait_queues[<file_path>]` in sessions.json, with per-file
+flock at `.coord/wait_queues/<sanitized_path>.lock` (path
+sanitization: `tr / __`). Queue mutations via
+`lib/wait_queue.sh` six-function API
+(enqueue/dequeue/head/size/position/cleanup_session). Cycle
+detection triggered on post-enqueue depth ≥ 2 (see
+PR-PHASE5-03)."
+
+**B. `IMPLEMENTATION_PLAN.md` §3.2 file structure on disk** —
+add `wait_queues/` and `wakers/` blocks alongside `validator/`
+and `read_snapshots/`:
+
+```
+├── wait_queues/                      # Phase 5 per-file flock locks
+│   └── <sanitized_path>.lock         # tr / __ from absolute file path
+├── wakers/                           # Phase 5 per-(session, file) wake files
+│   └── <session_id>-<sanitized_path>.wake
+```
+
+**C. `IMPLEMENTATION_PLAN.md` §3.3 sessions.json schema** —
+rename top-level slot `wait_queue` → `wait_queues`. Update
+the schema text for the value type:
+
+```json
+{
+  "wait_queues": {
+    "<file_path>": [
+      {
+        "session_id": "<uuid>",
+        "waiting_since": "<ISO8601 with ms>",
+        "wake_file": "<relative path>",
+        "queue_position": 0
+      }
+    ]
+  }
+}
+```
+
+The plural form is the canonical name; the singular
+`wait_queue` is a Phase-0/1/2/3/4 vestige of the empty slot
+template and is removed.
+
+**D. `IMPLEMENTATION_PLAN.md` §3.5 events.jsonl kind list** —
+add:
+- `WAIT_QUEUE_ENQUEUE` (payload: `file`, `session`,
+  `queue_position`, `wake_file`).
+- `WAIT_QUEUE_DEQUEUE` (payload: `file`, `session`,
+  `removed_position`, `remaining_size`).
+- `WAIT_QUEUE_SESSION_CLEANUP` (payload: `session`,
+  `affected_files`, `removed_count`, `wake_files_removed`).
+
+**E. `IMPLEMENTATION_PLAN.md` §4 component specs** — add
+`lib/wait_queue.sh` with the 6-function contract above. Note
+the per-file flock convention and cite F-003 (subshell +
+redirected fd) as the lock-form reference.
+
+**F. `CLAUDE.md` §B.7 (Wait queue / passive wait)** — non-
+binding update: add a short note that Phase 5 makes the
+wait queue authoritative (vs Phase 2's events.jsonl scan) and
+that operators should never edit `wait_queues/<…>.lock` files
+or `wakers/<…>.wake` files directly. Wire-protocol details
+do not appear in user-facing CLAUDE.md text; they live in
+this PR.
+
+### Implementation-task dependencies
+
+- T5.02 (wait queue infrastructure) implements §A through §E
+  + the 4-site rename (verified empty slot first). **Gated
+  on this PR approval.**
+- T5.03 (wake file mechanism + event-driven coord wait)
+  consumes `coord_wait_queue_enqueue` and the wake_file path
+  it returns. **Gated on T5.02 close.**
+- T5.04 (notification diff_summary integration) does NOT
+  touch `wait_queue.sh` directly; it modifies
+  `notify_waiters.sh` to write to wake_file content. **Not
+  gated by this PR.**
+- T5.05 (cycle detection) extends `coord_wait_queue_enqueue`
+  to call `coord_cycle_detect` post-append. **Gated on T5.02
+  close + PR-PHASE5-03 approval.**
+- T5.07 (Phase 5 invariant) adds the
+  `wait_queue.sh-zero-permissionDecision` bonus guard.
+  **Gated on T5.02 close.**
+
+### Ambiguity dispositions (resolved 2026-04-27 at T5.01 open)
+
+1. **Sanitization form** (pin-point a-1). **RESOLVED — literal
+   `tr / __`.** Leading underscore preserved. `/src/api.ts` →
+   `__src__api.ts`.
+2. **Schema slot naming** (pin-point c-1). **RESOLVED —
+   plural `wait_queues`.** 4-site rename in T5.02 with empty-
+   slot precondition verified at T5.01 open and to be re-
+   verified by T5.02 implementer immediately before rename.
+3. **Locking granularity.** **RESOLVED — per-file flock at
+   `.coord/wait_queues/<sanitized_path>.lock`.** No global
+   wait_queues.lock. Cycle detection reads `sessions.json`
+   under `sessions.lock` for its bipartite traversal; does
+   not hold per-file locks (snapshot read).
+4. **`waiting_since` precision.** **RESOLVED — ms-precision
+   ISO8601 via `coord_now_iso8601`** (perl Time::HiRes per
+   F-009). Same precision as Phase 3 watchdog activity
+   timestamps.
+5. **Idempotent enqueue.** **RESOLVED — yes.** If `<sid>` is
+   already queued for `<file>`, return its existing wake_file
+   path without appending a duplicate. Defensive against hook
+   double-fire scenarios.
+6. **`coord_wait_queue_cleanup_session` global walk vs per-
+   file.** **RESOLVED — global walk under `sessions.lock`.**
+   Per-file locks are for the FIFO ordering invariant on a
+   single file; cleanup is a cross-file orthogonal concern
+   that the global lock already covers via atomic_edit.
+
+### Cross-references
+
+- **Decision 1** (verbatim from Phase 5 resume prompt) — this
+  PR encodes the per-file lock pattern, sanitization, data
+  structure, and 6-function API.
+- **PR-PHASE5-02** — wake_file mechanism + event-driven
+  coord wait + notify_waiters.sh extension. Consumes the
+  wake_file path produced by `coord_wait_queue_enqueue`.
+- **PR-PHASE5-03** — cycle detection. `coord_cycle_detect`
+  invoked from `coord_wait_queue_enqueue` on post-append
+  depth ≥ 2.
+- **PR-PHASE5-05** — Phase 5 architectural invariant.
+  `lib/wait_queue.sh` is bonus guard #10 (zero
+  permissionDecision).
+- **F-003** (flock subshell + redirected-fd convention) —
+  applies to per-file wait-queue locks.
+- **F-009** (perl Time::HiRes ms timestamps) — applies to
+  `waiting_since` field.
+- **F-010** (branch policy) — Phase 5 lands on
+  `phase-5/wait-queue-cycle-detection`; merge to main on
+  user approval at signoff.
+- **F-014** (apostrophe-fragile bats) — ensure
+  `wait_queue.bats` test scaffolding uses
+  `_grep_output_for` helper, not `bash -c "echo '$output'"`.
+
+### Non-changes (deliberate)
+
+- `notifications[<sid>][<path>]` schema unchanged (Phase 1
+  established; Phase 2 producer; Phase 5 keeps it as a
+  parallel notification channel for non-wait-queue waiters
+  e.g., sessions denied a write but not currently in the
+  queue).
+- `locks[<file>]` schema unchanged in this PR (PR-PHASE5-02
+  adds the `latest_validator_verdict_ts` field; orthogonal
+  to wait queue).
+- `sessions.lock` / `events.lock` / `cache.lock` / etc.
+  unchanged. Per-file wait-queue locks are a new lock family,
+  not a substitute.
+- Phase 2's `coord wait` polling (30s/60s/120s cadence)
+  remains in the codebase as the fallback path for the
+  fswatch/inotifywait-absent case; PR-PHASE5-02 specifies the
+  fallback contract.
+
+### Acknowledgement
+
+DRAFT. Pending user approval at T5.01 close. Pin-points (a-1)
+and (c-1) from T5.01 startup approval are binding. Final merge
+into IMPLEMENTATION_PLAN.md / CLAUDE.md folds into
+phase-5-signoff.md.
+
+---
+
+## PR-PHASE5-02 — Notification diff_summary + wake_file content protocol + platform abstraction + locks schema field (Decision 2)
+
+**Date:** 2026-04-27
+**Author:** Phase 5 builder (T5.01).
+**Status:** APPROVED 2026-04-27 at T5.01 close. Gates
+T5.03 (wake file mechanism + event-driven coord wait) and T5.04
+(notify_waiters diff_summary integration).
+**Driver:** User-resolved Decision 2 from Phase 5 resume prompt
+("Notification diff_summary attachment point" — extend
+notify_waiters.sh; compute via Phase 4 pipeline reuse) plus
+pin-points (c-2), (c-3), (d), and (e) from T5.01 startup
+approval.
+
+### Observed gap requiring change
+
+Plan §5 Phase 5 scope says "Notification emission on lock-
+release includes content summary" and "additionalContext for
+passive-waiters when they wake up: 'You waited for foo.ts; it
+was released after N seconds. Changes since you last read it:
+…'" but does not specify:
+1. WHERE in the lock-release path the diff_summary attaches.
+2. HOW it is computed (validator agent re-spawn? cache
+   lookup? events.jsonl scrape?).
+3. HOW it propagates from producer (lock-release hook) to
+   consumer (waiting `coord wait` process).
+4. WHAT replaces Phase 2's events.jsonl LOCK_DENIED-scan
+   notification mechanism.
+5. WHAT happens when no validator pipeline ran for the
+   release (no stale-read drift was detected during the
+   write).
+6. WHICH event-watcher backend the consumer uses
+   (`fswatch`/`inotifywait`/polling) and what fallback policy
+   applies when neither is installed.
+7. HOW the producer/consumer race on wake_file content is
+   prevented.
+
+T5.03 and T5.04 cannot proceed without resolving these.
+
+### User-resolved decision
+
+**Six sub-dispositions, all binding.**
+
+#### 1. diff_summary attachment point: lock-release moment, inline
+
+`lib/notify_waiters.sh` is extended (NOT replaced) so that
+`coord_notify_lock_release_waiters` computes the diff_summary
+synchronously during the lock-release atomic_edit and writes
+it to the wake_file content of every queued waiter on the
+released file.
+
+The compute happens inside the existing function, after
+`waiters_json` is collected and BEFORE the per-waiter
+notification append. The new branch operates on
+`wait_queues[<file>]` (the Phase 5 source of truth) instead of
+the events.jsonl scan (see §2 below).
+
+#### 2. Pivot to wait_queues authoritative source (pin-point c-2)
+
+Phase 2's events.jsonl LOCK_DENIED scan (lines 88-105 of
+`notify_waiters.sh`) is **deleted** in T5.04 and replaced
+with a `wait_queues[<file>]` enumeration:
+
+```bash
+waiters_json=$(jq -sc \
+    --arg path "$path" \
+    '[.wait_queues[$path][]?
+      | {session: .session_id, wake_file: .wake_file}]' \
+    "$state" 2>/dev/null || printf '[]')
+```
+
+Every entry in the queue is woken in FIFO order; the head
+session is responsible for retrying the write next, the tail
+sessions are surfaced via `additionalContext` on their next
+PreToolUse hook.
+
+**Single source of truth principle:** `wait_queues` is now the
+authoritative waiter list. events.jsonl remains read-only for
+audit trail; LOCK_DENIED events still fire (PreToolUse hook on
+denied write) but are no longer scanned by the producer.
+
+The `notifications[<sid>][<path>]` consumer side (Phase 1
+dormant consumer in pre_tool_use_read.sh +
+pre_tool_use_any.sh) is **kept** as a complementary channel:
+sessions that were denied but later moved on (cleared queue,
+self-delegated, etc.) still get a "lock_released:..." string
+appended for surface on next read or PreToolUse. The
+producer-side change is purely the source-of-truth pivot.
+
+#### 3. Wake_file content protocol (pin-point c-3)
+
+**Producer** (extended `notify_waiters.sh`, executed in the
+release-side hook context — `post_tool_use_write.sh` or
+`stop.sh`):
+
+```bash
+for waiter in $waiter_list; do
+    wake_file="$(get_wake_file "$waiter" "$path")"
+    printf "%s\n" "$diff_summary" > "$wake_file"
+done
+```
+
+Atomic single-write `>`; the `printf "%s\n"` ensures a trailing
+newline so the consumer can distinguish "written" from
+"truncated". Permission inherits from `.coord/` (no explicit
+chmod). Empty `diff_summary` is permitted (rare; see fallback
+in §6 below) and the consumer handles it.
+
+**Consumer** (`coord wait` wrapper, see §4 backend abstraction):
+
+```bash
+content=$(cat "$wake_file")
+if [ -z "$content" ]; then
+    sleep 0.05                       # 50 ms grace
+    content=$(cat "$wake_file")
+fi
+if [ -z "$content" ]; then
+    content="modified by $releaser_session_id"
+fi
+printf "%s" "$content"
+```
+
+The 50 ms grace handles the create-vs-write race: fswatch /
+inotifywait may fire on the empty `touch` (file-create event)
+before the producer's `printf` lands. After 50 ms (well above
+the typical 1-5 ms producer write latency), if content is
+still empty, the empty-fallback "modified by <session>" is
+semantically correct (waiter knows the file changed but does
+not have a richer summary).
+
+The waiter does NOT delete the wake_file on read; cleanup is
+handled by `coord_wait_queue_dequeue` (which removes both the
+queue entry and the wake_file) once the waiter exits its
+`coord wait` invocation.
+
+#### 4. Platform abstraction (pin-point d)
+
+**Backend selection at install time:**
+
+`install.sh` extends `materialize_coord` with a deps-check that
+records the wake-event backend in `.coord/config.json`:
+
+```json
+{
+  "wait_event_backend": "fswatch|inotifywait|polling",
+  "wait_event_backend_reason": "auto-detected"
+}
+```
+
+Detection order:
+1. `command -v fswatch` succeeds → `fswatch` (preferred on
+   macOS).
+2. `command -v inotifywait` succeeds → `inotifywait`
+   (preferred on Linux).
+3. Neither → `polling` fallback (250 ms wake_file mtime
+   poll).
+
+The user can override via env var `COORD_WAIT_EVENT_BACKEND`
+or `coord config set wait_event_backend …`; bounds checked by
+`coord health`. **Reasoning:** F-001 precedent (flock optional
+deps) — the system gracefully degrades but emits a SessionStart
+banner when the polling fallback is active.
+
+**SessionStart additionalContext warning:**
+`session_start.sh` reads `.config.json::wait_event_backend`
+and, if value is `polling`, appends to `additionalContext`:
+
+> Polling-mode wait-queue active. Install `fswatch` (macOS:
+> `brew install fswatch`) or `inotify-tools` (Linux:
+> `apt install inotify-tools`) for sub-100 ms wake-up
+> latency.
+
+**WAIT_BACKEND event:**
+First `coord wait` invocation per session emits one
+`WAIT_BACKEND` event:
+
+```json
+{
+  "kind": "WAIT_BACKEND",
+  "backend": "fswatch|inotifywait|polling",
+  "reason": "auto-detected"
+}
+```
+
+Subsequent `coord wait` calls in the same session do NOT re-
+emit (idempotent at session scope; tracked via in-process
+flag, not persisted across sessions).
+
+**`coord wait` wrapper:** consumes `wait_event_backend` and
+dispatches:
+
+- `fswatch -1 "$wake_file"` (single-event mode; exits when
+  the watched file is modified).
+- `inotifywait -e modify -e create "$wake_file"` (modify
+  event; exits on the producer's `>` write).
+- Polling fallback: `while [ ! -s "$wake_file" ]; do sleep
+  0.25; done` (250 ms cadence; replaces Phase 2's
+  30s/60s/120s when polling backend is selected).
+
+All three branches converge on the §3 consumer read protocol
+(50 ms grace + empty-fallback) before printing
+diff_summary to stdout.
+
+#### 5. locks schema field: `latest_validator_verdict_ts` (pin-point e)
+
+The Phase 4 pipeline writes a verdict file at
+`.coord/validator/verdict/<ts>.json` whenever the validator
+agent runs (or whenever a CRITICAL Mediator inline runs).
+Phase 5 needs to bridge from "this lock was acquired" to
+"the most recent verdict for this file" without re-running
+the validator.
+
+**Schema addition** (T5.04 modifies `lib/atomic_write.sh`
+template + `pre_tool_use_write.sh` lock-acquire path):
+
+```json
+{
+  "locks": {
+    "/path/foo.ts": {
+      "session_id": "<sid>",
+      "acquired_at": "<ISO>",
+      "last_refresh_at": "<ISO>",
+      "tasks": [],
+      "latest_validator_verdict_ts": "<ts>" | null
+    }
+  }
+}
+```
+
+**Population:** the Phase 4 pipeline
+(`_coord_phase4_run_pipeline` in `pre_tool_use_write.sh`)
+already writes verdict files. T5.04 extends the post-write
+flow so that when a validator pipeline run completes (any
+disposition: SAFE / MINOR / CRITICAL / pipeline-failure), the
+verdict_ts is captured. On lock acquisition, this ts is set
+on the lock record. The field is `null` when the lock was
+acquired without any validator pipeline run (no stale-read
+drift detected — the common case).
+
+**Consumption** (extended `notify_waiters.sh`):
+
+```bash
+verdict_ts=$(jq -r --arg f "$path" \
+    '.locks[$f].latest_validator_verdict_ts // empty' "$state")
+if [ -n "$verdict_ts" ]; then
+    diff_summary=$(jq -r '.diff_summary // empty' \
+        "$COORD_DIR/validator/verdict/$verdict_ts.json")
+fi
+if [ -z "$diff_summary" ]; then
+    diff_summary="modified by ${holder:0:8}"
+fi
+```
+
+**Fallback path:** when `latest_validator_verdict_ts` is null
+(common case — most writes don't trigger the validator
+pipeline), the diff_summary is `"modified by <session_id_8>"`.
+This is semantically correct (waiter knows the file changed)
+and matches the §3 consumer empty-fallback string.
+
+**Edge case: pipeline ran but produced no diff_summary**
+(e.g., spawn-failure path → Phase 1 fallback line). In this
+case, the verdict file may not exist, or may have an empty
+`diff_summary`. Either way, `notify_waiters.sh`'s jq lookup
+returns empty and the fallback string is used. NOT an error
+condition; documented as expected behavior.
+
+#### 6. Edge cases and explicit non-changes
+
+- **Lock release without queued waiters:** `wait_queues[<file>]`
+  is empty → `notify_waiters.sh` collects empty `waiters_json`
+  → existing early-return (line 110 of current
+  notify_waiters.sh) fires; no wake_file write attempted.
+  This is the path-of-least-surprise; no diff_summary
+  computation either (cheap fast path).
+- **Stop hook multi-lock release:** `stop.sh` releases all
+  locks held by the exiting session. For each released lock,
+  `notify_waiters.sh` is called once. Each call independently
+  fetches its own `latest_validator_verdict_ts` and writes
+  diff_summary to its file's waiters' wake_files. No batch
+  optimization in v1.
+- **Watchdog eviction:** `verdict_apply.sh::evict_session`
+  releases the evicted session's locks via the same path as
+  graceful exit. Notify-waiters fires, wake_files updated.
+  Phase 7 stress test will verify this end-to-end.
+- **Phase 2 polling cadence in non-fallback mode:** Phase 2's
+  `cmd_wait` polling at 30s/60s/120s is **superseded** when
+  `wait_event_backend != "polling"`. The `cmd_wait`
+  implementation is rewritten in T5.03 to dispatch on backend;
+  the polling cadence is preserved ONLY in the fallback
+  branch (and tightened from 30s to 250 ms — much faster
+  because the fallback's only purpose is wake_file detection,
+  not arbitrary state polling).
+
+### Plan section deltas required
+
+**A. `IMPLEMENTATION_PLAN.md` §3.2 file structure on disk** —
+clarify `.coord/wakers/` is the wake_file directory (already
+added by PR-PHASE5-01 §B); document content protocol:
+"Wake files contain the diff_summary text written by
+notify_waiters.sh on lock release. Empty file = waiter still
+waiting; non-empty file = woken with context. Permission
+inherits from `.coord/`."
+
+**B. `IMPLEMENTATION_PLAN.md` §3.3 sessions.json schema** —
+extend `locks[<file>]` value type with
+`latest_validator_verdict_ts: string | null` field.
+
+**C. `IMPLEMENTATION_PLAN.md` §3.5 events.jsonl kind list** —
+add:
+- `WAIT_WAKE` (payload: `file`, `session`, `backend`,
+  `latency_ms`, `diff_summary_source` ∈ {`validator_verdict`,
+  `fallback`}).
+- `WAIT_BACKEND` (payload: `backend`, `reason`).
+- `NOTIFICATION_PRODUCED` already exists from Phase 2 — extend
+  payload to include `diff_summary_present` (boolean).
+
+**D. `IMPLEMENTATION_PLAN.md` §3.6 config.json defaults** —
+add:
+- `wait_event_backend: "auto"` (auto-detected at install;
+  override values: `fswatch`, `inotifywait`, `polling`).
+- `wait_event_backend_reason: "auto-detected"` (informational;
+  surfaced in `coord status`).
+
+`coord health` validates the enum; rejects unknown values.
+
+**E. `IMPLEMENTATION_PLAN.md` §4 component specs** — modify:
+
+`lib/notify_waiters.sh`:
+- DELETE the events.jsonl LOCK_DENIED scan (lines 88-105).
+- ADD `wait_queues[$path]` enumeration as the waiter source.
+- ADD `latest_validator_verdict_ts` lookup.
+- ADD `.coord/validator/verdict/<ts>.json` content read for
+  diff_summary extraction (fallback to "modified by
+  <session_id_8>" on missing/empty).
+- ADD wake_file content write (`printf "%s\n" "$diff_summary"
+  > "$wake_file"`) per queued waiter.
+- KEEP `notifications[<sid>][<path>]` append (for non-queue
+  waiters) — complementary channel.
+- KEEP `NOTIFICATION_PRODUCED` event emission; add
+  `diff_summary_present` payload field.
+
+`pre_tool_use_write.sh` (extended in T5.04):
+- After successful lock acquisition, if the validator
+  pipeline produced a verdict during the same hook turn,
+  populate `locks[<target>].latest_validator_verdict_ts`
+  in the same atomic_edit.
+
+`bin/coord` (extended in T5.03):
+- `cmd_wait` dispatches on `config.wait_event_backend`:
+  fswatch / inotifywait / polling branches with shared
+  consume protocol (§3).
+- First `cmd_wait` per session emits `WAIT_BACKEND` event.
+
+`install.sh` (extended in T5.03):
+- `materialize_coord`: detect `fswatch` / `inotifywait`;
+  write `wait_event_backend` + `wait_event_backend_reason`
+  to config.json defaults block.
+- `--repair`: re-detect and update config (idempotent).
+
+**F. `CLAUDE.md` §B.7 (Wait queue / passive wait)** — extend
+to describe the wake_file content protocol (one or two
+sentences only; no detailed mechanics): "On lock release, the
+holder writes a diff_summary line to the waiter's wake_file
+which `coord wait` reads on wake-up and prints to stdout for
+your additionalContext."
+
+**G. `CLAUDE.md` §B.8 (passive waiting cadence)** — replace
+30s/60s/120s cadence narrative with backend-aware narrative:
+"Wake-up is event-driven via fswatch (macOS), inotifywait
+(Linux), or 250 ms wake_file mtime polling fallback. Cadence
+is sub-100 ms in the event-driven case, ≤250 ms in fallback."
+
+### Implementation-task dependencies
+
+- T5.03 (wake file mechanism + event-driven coord wait)
+  implements §A + §D (config) + §E `bin/coord` + `install.sh`.
+  **Gated on this PR + PR-PHASE5-01 approval.**
+- T5.04 (notification diff_summary integration) implements
+  §B (locks schema field) + §E `notify_waiters.sh` +
+  `pre_tool_use_write.sh` extension. **Gated on this PR
+  approval.**
+- T5.07 (Phase 5 invariant) — no new bonus guards from this
+  PR (`notify_waiters.sh` already emits zero
+  permissionDecision; existing Phase 3 invariant covers the
+  `verdict_apply.sh` extension PR-PHASE5-03 introduces).
+- T5.08 (pipeline integration) wires the lock-release end-to-
+  end. **Gated on T5.03 + T5.04 close.**
+- T5.09 (ship-gate fixtures) — scenario `02_wake_file_event_
+  driven` and `03_diff_summary_on_release` exercise this PR.
+
+### Ambiguity dispositions (resolved 2026-04-27 at T5.01 open)
+
+1. **Where diff_summary attaches.** **RESOLVED — lock-release
+   moment, inline in `notify_waiters.sh`** (Decision 2 + this
+   PR §1). The release hook is the only deterministic moment
+   where before/after content is known.
+2. **Source-of-truth pivot from events.jsonl scan to
+   wait_queues** (pin-point c-2). **RESOLVED — full pivot.**
+   Phase 2's events.jsonl scan deleted in T5.04. Single source
+   of truth.
+3. **Producer/consumer race mitigation** (pin-point c-3).
+   **RESOLVED — 50 ms grace re-read with empty-fallback to
+   "modified by <session_id_8>".**
+4. **Backend auto-detection + fallback** (pin-point d).
+   **RESOLVED — install.sh deps-check writes
+   `wait_event_backend` to config; SessionStart warning when
+   polling; 250 ms polling cadence in fallback.** F-001
+   precedent.
+5. **diff_summary computation source** (pin-point e).
+   **RESOLVED — `locks[<file>].latest_validator_verdict_ts`
+   schema field bridges Phase 4 verdict files to Phase 5
+   notify_waiters; fallback string when null.**
+6. **Cache lookup vs verdict-file read.** **RESOLVED — verdict-
+   file read.** The cache (PR-PHASE4-04) is keyed on (file,
+   read_hash, current_hash) and has 1-hour TTL; the verdict
+   file is keyed on ts and is permanent (within 24-hour GC
+   per PR-PHASE3-04). For diff_summary attachment at lock-
+   release, the verdict-file path is more direct (the lock
+   record stores verdict_ts; the verdict file is a single jq
+   `.diff_summary` away). The cache is consulted earlier in
+   the pipeline (validator-pipeline cache short-circuit) and
+   not re-consulted at notify time.
+
+### Cross-references
+
+- **Decision 2** (verbatim from Phase 5 resume prompt) — this
+  PR encodes the inline-attachment rule and Phase 4 pipeline
+  reuse.
+- **PR-PHASE5-01** — wait_queues schema + per-file lock
+  semantics. This PR consumes
+  `coord_wait_queue_enqueue`'s wake_file path.
+- **PR-PHASE4-04** (validator cache) — orthogonal; cache is
+  used for pipeline short-circuit, not for notify-time
+  diff_summary lookup.
+- **PR-PHASE3-04** (pending.jsonl GC) — same 24-hour
+  retention applies to verdict files; T5.04 must verify
+  verdict-file freshness before consuming.
+- **F-001** (optional deps install model) — applies to
+  fswatch / inotifywait detection.
+- **F-014** (apostrophe-fragile bats) — `wait_wake.bats` and
+  `notify_waiters.bats` extension MUST use `_grep_output_for`
+  helper; diff_summary text contains user-content that may
+  have apostrophes.
+
+### Non-changes (deliberate)
+
+- `notifications[<sid>][<path>]` consumer side (Phase 1
+  dormant consumer) unchanged. It remains a complementary
+  notification channel.
+- `events.jsonl` LOCK_DENIED event unchanged; only the
+  notify_waiters.sh SCAN of it is removed.
+- `wait_queues` schema (PR-PHASE5-01) unchanged by this PR.
+- `cache.json` (PR-PHASE4-04) unchanged; not consulted at
+  notify time.
+- Phase 2's `coord wait` polling cadence preserved ONLY in
+  the polling-fallback branch (tightened to 250 ms).
+- Phase 4 invariant (8 architectural + 1 bonus guard)
+  preserved; `notify_waiters.sh` continues to emit zero
+  permissionDecision.
+
+### Acknowledgement
+
+DRAFT. Pending user approval at T5.01 close. Pin-points (c-2),
+(c-3), (d), and (e) from T5.01 startup approval are binding.
+Final merge into IMPLEMENTATION_PLAN.md / CLAUDE.md folds into
+phase-5-signoff.md.
+
+---
+
+## PR-PHASE5-03 — Cycle detection algorithm + cycle_detected pending kind (Decision 3)
+
+**Date:** 2026-04-27
+**Author:** Phase 5 builder (T5.01).
+**Status:** APPROVED 2026-04-27 at T5.01 close. Gates
+T5.05 (cycle detection library) and T5.06 (Mediator pending
+kind extension).
+**Driver:** User-resolved Decision 3 from Phase 5 resume prompt
+("Cycle detection" — DFS bipartite traversal, depth ≥ 2
+trigger, <50 ms budget, cycle_detected pending kind, Mediator
+inline) plus pin-point (a-2) from T5.01 startup approval.
+
+### Observed gap requiring change
+
+Plan §5 Phase 5 done-when says "Cycle introduced artificially
+triggers Mediator verdict that breaks the cycle" but does not
+specify:
+1. The graph topology (session-only vs bipartite session/file).
+2. The trigger threshold (depth ≥ 2 vs depth ≥ 3 vs every
+   enqueue).
+3. The detection algorithm (DFS, BFS, Tarjan SCC).
+4. The cycle-path payload schema for the Mediator.
+5. The Mediator escalation pathway (synchronous inline vs
+   async pending-consumer).
+6. The recursion-guard relationship to Phase 4's
+   CRITICAL-drift Mediator inline pattern.
+
+T5.05 and T5.06 cannot proceed without resolving these.
+
+### User-resolved decision
+
+**Bipartite session/file DFS, triggered on enqueue depth ≥ 2,
+synchronous Mediator inline.**
+
+#### 1. Graph topology (pin-point a-2): bipartite
+
+The graph has two node types:
+- **Session nodes:** one per ACTIVE session in `sessions` map.
+- **File nodes:** one per file appearing in `locks` or
+  `wait_queues`.
+
+Edges are directed:
+- For each `locks[<file>] = {session: S}`: edge `file → S`
+  (file is held by session S).
+- For each `wait_queues[<file>][i] = {session_id: S}`: edge
+  `S → file` (session S waits for file).
+
+A cycle is a directed path that returns to the starting node.
+In this bipartite graph, every cycle alternates session →
+file → session → file → … and has even length (number of
+edges = 2 * number of distinct sessions in the cycle).
+
+**Example 2-cycle (deadlock):**
+- Session A holds `foo.ts`, waits for `bar.ts`.
+- Session B holds `bar.ts`, waits for `foo.ts`.
+- Edges: `A → bar.ts`, `bar.ts → B`, `B → foo.ts`,
+  `foo.ts → A`.
+- Cycle path: `A → bar.ts → B → foo.ts → A`.
+
+**Why bipartite (not session-only):** the bipartite encoding
+matches the on-disk data structure
+(`wait_queues[file]` + `locks[file]`) directly. A session-only
+graph (edge `S_a → S_b` when S_a waits on a file held by S_b)
+is mathematically equivalent for cycle detection but requires
+synthesizing the edges from two data sources, adding a
+transformation step that's redundant with the natural
+representation. Cycle paths in the bipartite form retain file
+identity, which is useful for the Mediator's payload (it can
+see which files are involved without a separate lookup).
+
+#### 2. Trigger threshold: post-enqueue depth ≥ 2
+
+`coord_wait_queue_enqueue` (PR-PHASE5-01) calls
+`coord_cycle_detect <sid>` after the atomic_edit completes,
+when `wait_queues[<file>]` length ≥ 2.
+
+**Rationale for depth ≥ 2:** depth 0 (empty queue before
+enqueue) and depth 1 (just-added single waiter) cannot form a
+cycle by themselves — at least 2 sessions must be in `wait
+state` for a cycle to exist. Depth ≥ 2 is the smallest
+threshold where cycle detection is non-trivially worth
+running. It also matches the simplest deadlock (2-cycle, the
+"A waits for B, B waits for A" case).
+
+**Cost:** detection runs ≤ 50 ms (target) or ≤ 100 ms (worst
+case, 100 sessions). Below CLAUDE.md §A.6's 2-second hook-
+latency ceiling. Bipartite DFS is O(V + E) where V = sessions
++ files and E = locks + queued-waiters-total; for typical
+fleet (10-50 sessions, similar locks) this is negligible.
+
+**False-positive avoidance:** the trigger fires on every
+post-enqueue depth-2-or-more event, including queues that
+grow to depth 5 + 6 + 7 etc. without any cycle. The DFS is
+cheap; the false-positive cost is one O(V+E) walk per
+enqueue. Acceptable.
+
+#### 3. DFS algorithm
+
+`coord_cycle_detect <session_id_just_added>`:
+
+```
+Inputs:
+  S_new = session_id that just enqueued
+  state = sessions.json snapshot (read once under sessions.lock)
+
+build_graph(state):
+  edges = {}
+  for sid, session in state.sessions:
+    if session.status == "ACTIVE":
+      add session node sid
+  for file, lock in state.locks:
+    add file node file
+    edges[file].add(lock.session)        # file → session
+  for file, queue in state.wait_queues:
+    add file node file
+    for entry in queue:
+      edges[entry.session_id].add(file)  # session → file
+  return edges
+
+DFS(start):
+  stack = [(start, [start])]
+  visited = {start}
+  while stack:
+    node, path = stack.pop()
+    for next_node in edges[node]:
+      if next_node == start:
+        return path + [next_node]       # cycle found
+      if next_node not in visited:
+        visited.add(next_node)
+        stack.append((next_node, path + [next_node]))
+  return null
+
+cycle = DFS(S_new)
+return cycle
+```
+
+**Implementation note:** Bash 3.2 cannot do real recursion
+cleanly; the algorithm uses an iterative stack-based DFS.
+Bash arrays + parallel-indexed dictionaries replace the
+hashmap (per CLAUDE.md §A.5 — no associative arrays in
+Bash 3.2). The state read happens ONCE at function entry
+under `sessions.lock` (snapshot semantics); cycle detection
+operates on the snapshot in-memory. Subsequent state
+mutations during the walk do not invalidate the result;
+the cycle either exists at snapshot time or it does not.
+
+**Returned cycle path:** an array of alternating session/file
+node identifiers, starting and ending with `S_new`. Output
+format (for `coord_cycle_describe` and Mediator payload): a
+JSON array.
+
+```json
+[
+  {"type": "session", "id": "<sid_A>"},
+  {"type": "file",    "id": "/path/foo.ts"},
+  {"type": "session", "id": "<sid_B>"},
+  {"type": "file",    "id": "/path/bar.ts"},
+  {"type": "session", "id": "<sid_A>"}
+]
+```
+
+#### 4. `coord_cycle_describe <cycle_path_json>`
+
+Translates the cycle JSON into a human-readable string for the
+Mediator's prompt context:
+
+```
+Deadlock detected:
+  Session A (a1b2c3d4) holds /path/foo.ts and waits for /path/bar.ts
+  Session B (e5f6g7h8) holds /path/bar.ts and waits for /path/foo.ts
+  Cycle: A -> bar.ts -> B -> foo.ts -> A
+```
+
+Logic:
+- Walk the cycle path; for each session node, lookup its held
+  files (`locks[*].session == sid`) AND the next file in the
+  path (`wait_queues[next_file]`).
+- Render one line per session: "Session X (prefix...) holds
+  <held_file_or_files> and waits for <next_file_in_path>".
+- Final line: arrow-joined cycle path with truncated session
+  IDs (8-char prefixes per existing notify_waiters convention).
+
+#### 5. cycle_detected pending kind
+
+When `coord_cycle_detect` returns a non-null cycle path:
+1. Write a `kind=cycle_detected` entry to
+   `.coord/mediator/pending.jsonl` (existing JSONL append-
+   only via `lib/mediator_pending.sh`):
+
+```json
+{
+  "kind": "cycle_detected",
+  "ts": "<ISO8601 with ms>",
+  "for_pending_entry": null,
+  "payload": {
+    "trigger_session_id": "<S_new>",
+    "trigger_file": "<file_S_new_just_enqueued_for>",
+    "cycle_path": [<bipartite path JSON>],
+    "cycle_description": "<coord_cycle_describe output>",
+    "queue_depth_at_detection": <int>,
+    "involved_sessions": ["<sid_A>", "<sid_B>", ...],
+    "involved_files": ["/path/foo.ts", "/path/bar.ts", ...]
+  }
+}
+```
+
+2. Spawn Mediator inline (synchronous, mirroring Phase 4
+   critical_drift pattern per PR-PHASE4-02 + Concern B):
+```
+coord_mediator_spawn --pending-ts <pending_ts>
+```
+3. Mediator's prompt is pending-kind-agnostic per PR-PHASE4-03;
+   it reads the payload, analyzes the cycle, and emits a
+   verdict in the existing 3-action contract (advice /
+   surgical_fix / lockdown). Mediator decides which session
+   to evict for surgical_fix based on Decision 4's heuristics
+   (session age, lock count, activity recency — encoded in
+   prompt context, not deterministic code).
+4. Mediator's verdict is applied via existing
+   `coord_verdict_apply_actions` (which already handles
+   `release_lock` / `evict_session` / `clear_read_set`).
+5. Per-session `last_consumed_verdict` pointer advanced;
+   Mediator-action banner composed; pre_tool_use_write.sh
+   call returns.
+
+**No new Mediator code paths.** The cycle_detected kind is
+purely a payload variation; the existing Mediator+verdict-
+apply pipeline handles it kind-agnostically.
+
+#### 6. Recursion guard relationship
+
+`coord_cycle_detect` itself is pure-Bash (no `claude -p`
+spawn); it has no recursion-guard concerns. The Mediator
+spawn it triggers IS subject to the existing
+`CLAUDE_CODE_MEDIATOR=<depth>` recursion guard
+(PR-PHASE3-01). Depth-2 ceiling unchanged.
+
+The trigger session (S_new) does NOT itself spawn the
+Mediator — `coord_wait_queue_enqueue` does, in the parent
+hook context. The Mediator's spawn env propagates
+`CLAUDE_CODE_MEDIATOR=1` (or 2 if escalated peer review);
+Mediator's verdict apply runs back in the parent context,
+not in a recursive shell.
+
+**Latency budget:**
+- `coord_cycle_detect` itself: <50 ms target, <100 ms worst
+  case (100 sessions / 100 files).
+- Mediator inline spawn: 20-35 s typical (subscription mode).
+- Total post-enqueue worst case: ~50-100 s for deadlock
+  recovery, well under Bash-tool 600 s ceiling.
+
+### Plan section deltas required
+
+**A. `IMPLEMENTATION_PLAN.md` §3.5 events.jsonl kind list** —
+add:
+- `CYCLE_DETECTED` (payload: `trigger_session`,
+  `trigger_file`, `involved_sessions[]`,
+  `involved_files[]`, `queue_depth`).
+- `CYCLE_DETECTION_RAN` (payload: `trigger_session`,
+  `result` ∈ {`cycle_found`, `no_cycle`}, `duration_ms`).
+
+**B. `IMPLEMENTATION_PLAN.md` §3.5 mediator pending kinds**
+— extend `pending.jsonl` kind enum:
+- `cycle_detected` (new) joins the existing kinds
+  (`corrupt_state`, `flock_timeout`, `stale_active`,
+  `pid_recycled`, `consensus_dead`, `manual`,
+  `critical_drift`).
+
+**C. `IMPLEMENTATION_PLAN.md` §4 component specs** — add:
+
+`lib/cycle_detection.sh`:
+- `coord_cycle_detect <session_id>` — bipartite DFS
+  from `<session_id>` over the snapshot of sessions.json
+  (read once under sessions.lock). Returns JSON cycle path
+  on stdout, or empty stdout if no cycle. Logs
+  `CYCLE_DETECTION_RAN` event.
+- `coord_cycle_describe <cycle_json>` — translates cycle
+  path to human-readable string for Mediator prompt context
+  embedding. Pure-text; no I/O beyond reading sessions.json
+  for held-files lookup.
+
+`lib/wait_queue.sh` (extends PR-PHASE5-01):
+- `coord_wait_queue_enqueue` post-append: when queue depth ≥ 2,
+  call `coord_cycle_detect <sid>`. On non-empty result, write
+  `cycle_detected` pending entry + spawn Mediator inline.
+
+`lib/mediator_pending.sh` (extends Phase 3):
+- Documentation only: kind enum extended with
+  `cycle_detected`. Existing producer/consumer flow handles
+  the new kind without code change.
+
+`MEDIATOR_REFERENCE.md` §4 (extends Phase 3):
+- New subsection 4.X: `cycle_detected` payload schema +
+  example + recommended action mapping (advice for shallow
+  cycles, surgical_fix for typical deadlock, lockdown for
+  global deadlock — see PR-PHASE5-04).
+
+**D. `IMPLEMENTATION_PLAN.md` §5 Phase 5 Scope** — add:
+> "Cycle detection (`lib/cycle_detection.sh`): bipartite
+> session/file DFS triggered on `coord_wait_queue_enqueue`
+> post-append depth ≥ 2. Cycle path written as
+> `cycle_detected` pending entry to pending.jsonl;
+> synchronous Mediator inline spawn (mirroring Phase 4
+> critical_drift pattern). Mediator's existing 3-action
+> contract handles cycle_detected kind-agnostically (no new
+> Mediator code paths)."
+
+**E. `CLAUDE.md` §B.6 (Mediator invocation protocol)** —
+non-binding update: add a one-line note that
+"`cycle_detected` pending entries are automatically
+generated when wait-queue cycle detection finds a deadlock;
+you do not invoke Mediator yourself."
+
+### Implementation-task dependencies
+
+- T5.05 (cycle detection) implements §A + §C
+  `cycle_detection.sh`. **Gated on this PR + PR-PHASE5-01
+  approval.**
+- T5.06 (Mediator integration) implements §B + §C
+  `mediator_pending.sh` documentation extension + §C
+  MEDIATOR_REFERENCE.md extension. **Gated on this PR +
+  PR-PHASE5-04 approval (PR-PHASE5-04 documents the action-
+  mapping heuristic).**
+- T5.07 (Phase 5 invariant) — `lib/cycle_detection.sh` is
+  bonus guard #11 (zero permissionDecision).
+- T5.09 (ship-gate fixtures) — scenario
+  `04_cycle_detected_mediator_evict` exercises this PR end-
+  to-end.
+
+### Ambiguity dispositions (resolved 2026-04-27 at T5.01 open)
+
+1. **Graph topology** (pin-point a-2). **RESOLVED —
+   bipartite session/file.** Direct mapping to on-disk data
+   structures.
+2. **Trigger threshold.** **RESOLVED — post-enqueue depth ≥
+   2.** Smallest non-trivial threshold; matches 2-cycle
+   deadlock minimum.
+3. **Algorithm.** **RESOLVED — iterative stack-based DFS.**
+   Bash 3.2 compat (no recursion); O(V+E) cost; matches
+   <50 ms target.
+4. **Cycle-path payload format.** **RESOLVED — bipartite
+   JSON array** alternating `{type: "session"|"file", id}`.
+   Round-trips cleanly through jq.
+5. **Mediator escalation.** **RESOLVED — synchronous inline
+   spawn** mirroring Phase 4 critical_drift pattern.
+6. **Recursion guard.** **RESOLVED — existing depth-2 ceiling
+   unchanged.** `coord_cycle_detect` is pure-Bash; only the
+   spawned Mediator counts against the depth budget.
+7. **Snapshot vs transactional consistency.** **RESOLVED —
+   snapshot.** Read sessions.json once under sessions.lock;
+   operate on snapshot in-memory; subsequent mutations
+   during the walk do not invalidate the result.
+
+### Cross-references
+
+- **Decision 3** (verbatim from Phase 5 resume prompt) — this
+  PR encodes the bipartite DFS, depth-2 trigger,
+  cycle_detected pending kind, Mediator inline pattern.
+- **Decision 4** — PR-PHASE5-04 documents Mediator's action
+  mapping for cycle_detected payloads (advice / surgical_fix
+  / lockdown choice). This PR provides the payload; that PR
+  documents the consumer.
+- **PR-PHASE5-01** — wait_queue infrastructure.
+  `coord_wait_queue_enqueue` is the trigger point for
+  `coord_cycle_detect`.
+- **PR-PHASE4-02** + **Concern B** — synchronous Mediator
+  inline pattern. cycle_detected reuses the same pathway.
+- **PR-PHASE4-03** — Mediator pending-kind-agnostic prompt
+  contract. cycle_detected is a new kind that fits the
+  existing contract.
+- **PR-PHASE3-01** — existing 3-action contract +
+  CLAUDE_CODE_MEDIATOR depth-2 recursion guard.
+- **PR-PHASE3-04** — pending.jsonl 24-hour GC; cycle_detected
+  entries are GCed on the same schedule.
+- **R17 / R18** (plan §7 risks) — task-graph cycle / wait_
+  queue deadlock. This PR's cycle detection is the planned
+  mitigation per the risk table.
+
+### Non-changes (deliberate)
+
+- Mediator code paths unchanged. `coord_mediator_spawn` does
+  not branch on `kind`; the prompt assembly is kind-
+  agnostic (per PR-PHASE4-03).
+- `coord_verdict_apply_actions` unchanged. The 3-action
+  contract handles cycle_detected verdicts naturally.
+- Phase 4 invariant unchanged. `lib/cycle_detection.sh` is a
+  new bonus guard (#11 in Phase 5 invariant per
+  PR-PHASE5-05).
+- `task_graph` cycle detection (Phase 6 task delegation)
+  is OUT OF SCOPE for this PR. Phase 5's cycle detection is
+  wait-queue-only. Phase 6 will add task-chain cycle
+  detection in `coord task-open`.
+
+### Acknowledgement
+
+DRAFT. Pending user approval at T5.01 close. Pin-point (a-2)
+from T5.01 startup approval is binding. Final merge into
+IMPLEMENTATION_PLAN.md / CLAUDE.md folds into
+phase-5-signoff.md.
+
+---
+
+## PR-PHASE5-04 — Mediator deadlock-breaking via existing 3-action contract (Decision 4; documentation-only)
+
+**Date:** 2026-04-27
+**Author:** Phase 5 builder (T5.01).
+**Status:** APPROVED 2026-04-27 at T5.01 close. Gates
+T5.06 documentation only (no code change).
+**Driver:** User-resolved Decision 4 from Phase 5 resume
+prompt ("Mediator deadlock-breaking heuristic" — existing
+3-action contract sufficient; NO new action verbs; judgment
+encoded in Mediator's prompt context, not deterministic code).
+
+### Observed gap requiring change
+
+PR-PHASE5-03 establishes the `cycle_detected` pending kind and
+hands off to the existing Mediator pipeline. But the
+Mediator's prompt context (per `MEDIATOR_REFERENCE.md` §4)
+documents action mappings for `corrupt_state`, `flock_timeout`,
+`stale_active`, `pid_recycled`, `consensus_dead`, `manual`,
+and `critical_drift` (the latter from PR-PHASE4-03). It does
+NOT yet document expected action mappings for
+`cycle_detected`.
+
+Without this documentation, the spawned Mediator has no
+guidance on how to choose advice vs surgical_fix vs lockdown
+for cycle_detected payloads. The result would be inconsistent
+verdicts across cycle scenarios — sometimes advice, sometimes
+lockdown, with no principled basis. The decision-matrix
+encoding in the prompt context (NOT in deterministic code) is
+the canonical site for this guidance.
+
+This PR is **documentation-only**: no Mediator code change, no
+new lib/ file, no test changes. It extends
+`MEDIATOR_REFERENCE.md` and (informationally)
+`IMPLEMENTATION_PLAN.md` §3.7 / §5.
+
+### User-resolved decision
+
+**Existing 3-action contract sufficient. NO new action verbs.
+Judgment encoded in Mediator's prompt context.**
+
+#### 1. Decision matrix for cycle_detected payloads
+
+Mediator's `MEDIATOR_REFERENCE.md` §4 (extended) carries the
+following decision matrix as guidance to the spawned agent.
+The Mediator is free to deviate based on the specific
+payload, but these are the expected default mappings:
+
+**Action: `advice`**
+Used when:
+- Cycle is shallow (2 sessions, single file each) AND
+- Both sessions show recent activity (`last_activity_at`
+  within last 60 s) AND
+- Neither session has held its lock for >5 minutes (so manual
+  release is likely).
+
+Mediator emits `action_type=advice` with
+`message_to_caller` containing the cycle description and a
+recommendation:
+> "Cycle detected with session B (prefix...): you hold
+> /path/foo.ts, B holds /path/bar.ts, you both want each
+> other's lock. Recommend: release /path/foo.ts manually
+> (post_tool_use_write.sh on a no-op) or coordinate with B
+> via your operator. No action taken."
+
+The trigger session continues; no eviction; the cycle persists
+until manually broken.
+
+**Action: `surgical_fix` (typical case)**
+Used when:
+- Cycle has ≥ 2 sessions OR
+- At least one session has held its lock for >5 minutes
+  (`acquired_at` older than threshold) OR
+- Activity is unbalanced (some sessions idle, others active).
+
+Mediator chooses ONE session to evict (`evict_session` action
+in `actions[]`), based on (in priority order):
+1. **Activity recency:** evict the session with oldest
+   `last_activity_at` (most likely idle / abandoned).
+2. **Lock count:** if activity is similar, evict the session
+   holding the FEWEST locks (least disruption).
+3. **Session age:** if both prior tied, evict the YOUNGEST
+   session (preserve older accumulated work).
+
+Mediator emits:
+```json
+{
+  "action_type": "surgical_fix",
+  "actions": [
+    {"verb": "evict_session", "session_id": "<chosen_sid>"}
+  ],
+  "message_to_caller": "Deadlock detected. Evicting session
+    B (prefix...) which has been idle for 8 minutes and holds
+    1 lock. You should now be able to acquire /path/bar.ts."
+}
+```
+
+The eviction path (existing
+`coord_verdict_apply_actions::evict_session`) releases the
+evicted session's locks, removes it from `wait_queues`,
+clears its read-set, removes its read-snapshots
+(`coord_read_snapshot_cleanup_session`), and removes its
+wake_files (`coord_wait_queue_cleanup_session`). The cycle
+breaks. Other waiters in the cycle proceed via the standard
+lock-release notification path.
+
+**Action: `lockdown`**
+Used when:
+- Cycle spans ALL active sessions (global deadlock) OR
+- Cycle includes ≥ 4 sessions (extended deadlock; eviction
+  may not break all entanglements) OR
+- Two consecutive cycle_detected events in the last 60 s
+  (recurrent deadlock; surgical_fix is not converging).
+
+Mediator emits:
+```json
+{
+  "action_type": "lockdown",
+  "actions": [
+    {"verb": "lockdown", "reason_source": "cycle_detected"}
+  ],
+  "message_to_caller": "System-wide deadlock detected (4 of
+    5 active sessions in cycle). Lockdown active. Operator
+    intervention required: run `coord mediate --resume` after
+    investigating."
+}
+```
+
+Lockdown routes through the existing
+`lib/lockdown.sh::coord_lockdown_activate` → every hook reads
+`.coord/mediator/lockdown.json` and emits the deny banner.
+This is the **second architectural deny location** — the
+Phase 3+4 invariant is preserved (cycle_detected does NOT
+introduce a third deny site).
+
+#### 2. Lowest-priority eviction heuristic encoding
+
+Mediator's prompt context for cycle_detected includes:
+
+```
+You are deciding which session to evict to break a deadlock.
+The candidates are listed below with the following metrics:
+
+- session_id (uuid)
+- last_activity_at (ISO8601)
+- locks_held (count)
+- session_age (seconds since registered_at)
+
+Choose the session to evict by this priority:
+1. Oldest last_activity_at (most likely idle/abandoned).
+2. If activity within 60s window, fewest locks_held.
+3. If both tied, youngest session_age (preserve older work).
+
+Output your choice as actions[].session_id with verb
+'evict_session'. Justify in message_to_caller.
+```
+
+This guidance is **encoded in Mediator's prompt**, not in
+`coord_verdict_apply_actions` or `coord_mediator_spawn`. The
+Mediator is the judgment layer; the verdict-apply layer is
+mechanical.
+
+#### 3. Mediator pending payload extension
+
+PR-PHASE5-03 §5 specifies the cycle_detected payload schema.
+This PR adds context fields that the Mediator needs for the
+heuristic application:
+
+```json
+{
+  "kind": "cycle_detected",
+  "payload": {
+    "trigger_session_id": "<S_new>",
+    "trigger_file": "<file_S_new_just_enqueued_for>",
+    "cycle_path": [...],
+    "cycle_description": "...",
+    "queue_depth_at_detection": <int>,
+    "involved_sessions": ["<sid>", ...],
+    "involved_files": ["/path/foo.ts", ...],
+
+    // Heuristic context (added by this PR):
+    "session_metadata": {
+      "<sid>": {
+        "last_activity_at": "<ISO>",
+        "locks_held": <int>,
+        "session_age_seconds": <int>,
+        "registered_at": "<ISO>"
+      }
+    },
+    "recent_cycle_count": <int>  // count of cycle_detected
+                                  // events in last 60s; 1+
+                                  // means recurring deadlock
+  }
+}
+```
+
+`coord_wait_queue_enqueue` populates `session_metadata` and
+`recent_cycle_count` from sessions.json + events.jsonl scan
+at pending-write time. The events.jsonl scan for
+`recent_cycle_count` is bounded (last 60 s only) and runs
+inside the same enqueue critical section.
+
+### Plan section deltas required
+
+**A. `MEDIATOR_REFERENCE.md` §4 (action mapping for pending
+kinds)** — new subsection 4.X (after critical_drift §4.Y):
+
+```
+### 4.X cycle_detected payloads
+
+The cycle_detected pending kind indicates that the wait-queue
+cycle detector found a deadlock during a coord_wait_queue_enqueue.
+Your task is to choose between advice / surgical_fix /
+lockdown:
+
+[decision matrix from §1 above, full text]
+
+Worked example:
+  Payload:
+    cycle_path: A -> bar.ts -> B -> foo.ts -> A
+    session_metadata:
+      A: last_activity_at=2026-04-27T10:00:00Z, locks_held=1,
+         session_age_seconds=300
+      B: last_activity_at=2026-04-27T09:50:00Z, locks_held=1,
+         session_age_seconds=600
+  Reasoning: 2-cycle, B is older but less active (10 min idle
+  vs A's 0 min). Evict B (oldest last_activity_at wins per
+  priority 1).
+  Verdict: action_type=surgical_fix, actions=[{verb:
+  evict_session, session_id: B}]
+```
+
+**B. `IMPLEMENTATION_PLAN.md` §3.7 sequence diagrams** —
+add cycle-detection sequence diagram showing:
+1. Session C calls coord_wait_queue_enqueue (post-append
+   depth=2).
+2. coord_cycle_detect runs, finds cycle path.
+3. cycle_detected pending entry written to pending.jsonl.
+4. Mediator inline spawned (synchronous).
+5. Mediator reads payload, applies decision matrix, emits
+   verdict with surgical_fix evict_session action.
+6. coord_verdict_apply_actions evicts the chosen session
+   (release_locks, remove from wait_queues, clear read-set,
+   etc.).
+7. Cycle broken; remaining sessions proceed via lock-release
+   notifications.
+
+**C. `IMPLEMENTATION_PLAN.md` §5 Phase 5 Scope** — note:
+> "Mediator's response to cycle_detected payloads uses the
+> existing 3-action contract (advice / surgical_fix /
+> lockdown). NO new action verbs. Decision heuristic
+> (oldest activity > fewest locks > youngest session)
+> encoded in Mediator prompt context per PR-PHASE5-04
+> documentation."
+
+**D. `CLAUDE.md` §B.6 (Mediator invocation protocol)** —
+non-binding extension: add note that "cycle_detected
+verdicts surface as standard Mediator action banners; the
+heuristic for eviction choice is documented in
+MEDIATOR_REFERENCE.md §4.X."
+
+### Implementation-task dependencies
+
+- T5.06 (Mediator integration) implements §A
+  MEDIATOR_REFERENCE.md extension only — no Mediator code
+  change. **Gated on this PR + PR-PHASE5-03 approval.**
+- T5.05 (cycle detection) populates the
+  `session_metadata` + `recent_cycle_count` payload fields
+  added by this PR's §3. **Gated on this PR + PR-PHASE5-03
+  approval.**
+
+### Ambiguity dispositions (resolved 2026-04-27 at T5.01 open)
+
+1. **New action verbs?** **RESOLVED — NO.** Existing
+   advice / surgical_fix / lockdown contract sufficient.
+2. **Eviction priority encoding (deterministic code vs
+   prompt).** **RESOLVED — prompt context only.** Mediator
+   is the judgment layer.
+3. **Lowest-priority definition.** **RESOLVED —
+   (1) oldest last_activity_at, (2) fewest locks_held,
+   (3) youngest session_age.** Three-tier priority,
+   tiebreakers in order.
+4. **Lockdown trigger threshold.** **RESOLVED —
+   global-cycle OR ≥4 sessions OR recurrent (2+ in 60s).**
+   Conservative thresholds; falls into lockdown only when
+   surgical_fix has clearly insufficient leverage.
+5. **session_metadata fields.** **RESOLVED — last_activity_at,
+   locks_held, session_age_seconds, registered_at.** Four
+   fields cover the priority logic + enable the Mediator to
+   reason about additional context.
+6. **recent_cycle_count window.** **RESOLVED — 60 seconds.**
+   Empirically aligned with typical hook-pulse cadence;
+   shorter windows would miss recurrent patterns;
+   longer would overcount unrelated incidents.
+
+### Cross-references
+
+- **Decision 4** (verbatim from Phase 5 resume prompt) — this
+  PR encodes the existing-contract sufficiency.
+- **PR-PHASE5-03** — cycle_detected pending kind. This PR
+  documents the consumer side; that PR documents the
+  producer.
+- **PR-PHASE3-01** — existing 3-action contract definition
+  (advice / surgical_fix / lockdown). This PR is a
+  documentation extension within that contract.
+- **PR-PHASE4-03** — Mediator pending-kind-agnostic prompt
+  contract. cycle_detected fits the same pattern.
+- **MEDIATOR_REFERENCE.md** — §4 already documents action
+  mappings for prior kinds; this PR adds §4.X for
+  cycle_detected.
+
+### Non-changes (deliberate)
+
+- `lib/mediator_spawn.sh` unchanged.
+- `lib/verdict_apply.sh` unchanged.
+- `lib/mediator_pending.sh` unchanged.
+- `coord_verdict_apply_actions` unchanged.
+- No new lib/ file added.
+- No code-level test changes; the action mapping is
+  documentation, not deterministic code. Phase 7 stress
+  test will verify Mediator's compliance with the heuristic
+  on real `claude -p` runs.
+
+### Acknowledgement
+
+DRAFT. Pending user approval at T5.01 close. Documentation-
+only; no code changes proposed. Final merge into
+IMPLEMENTATION_PLAN.md + MEDIATOR_REFERENCE.md folds into
+phase-5-signoff.md.
+
+---
+
+## PR-PHASE5-05 — Phase 5 architectural invariant preservation (Decision 5)
+
+**Date:** 2026-04-27
+**Author:** Phase 5 builder (T5.01).
+**Status:** APPROVED 2026-04-27 at T5.01 close. Gates
+T5.07 (Phase 5 invariant test).
+**Driver:** User-resolved Decision 5 from Phase 5 resume
+prompt ("Phase 5 architectural invariant" — preserves 2-
+location deny invariant; cycle_detection routes through
+Mediator → lockdown gate; 8 architectural + 3 bonus = 11
+guards; phase4_invariant.bats deleted).
+
+### Observed gap requiring change
+
+The Phase 4 sign-off STATE_OF_SYSTEM noted that Phase 5
+might introduce a third architectural deny location for
+wait-queue management or cycle-detection escalation. After
+deeper consideration during Phase 5 resume-prompt drafting,
+the user determined that:
+1. Wait queue management has no deny use case (queue
+   operations are advisory; lock acquisition denial happens
+   at the existing pre_tool_use_write.sh location).
+2. Cycle detection escalates via Mediator → which routes
+   through the existing lockdown.json gate when scope is
+   global. No new deny site needed.
+
+The 2-location deny invariant from Phase 3 (preserved
+through Phase 4) is preserved through Phase 5 unchanged.
+
+This PR formally documents the invariant preservation,
+extends the bats invariant test, and deletes the superseded
+Phase 4 invariant test.
+
+### User-resolved decision
+
+**Phase 5 invariant: 8 architectural guards + 3 bonus = 11
+guards in `phase5_invariant.bats`.**
+
+#### 1. Two architectural deny locations (UNCHANGED from Phase 3+4)
+
+1. **`pre_tool_use_write.sh` lock-held-by-other branch**
+   (existing Phase 2). Emits `permissionDecision: "deny"`
+   when the target file is locked by another session.
+2. **`lib/lockdown.sh` `coord_lockdown_emit_deny`**
+   (existing Phase 3). Invoked by every hook when
+   `coord_lockdown_check` returns 0 (lockdown active).
+
+These two are the ONLY architectural deny sites. Cycle
+detection routes through site #2 when Mediator chooses
+lockdown for global deadlock (per PR-PHASE5-04 §1).
+Wait-queue management uses neither.
+
+#### 2. Six Phase 3 carry-forward architectural guards (UNCHANGED)
+
+Per `phase4_invariant.bats` (and originally Phase 3):
+
+1. `pre_tool_use_write.sh` contains EXACTLY ONE
+   `permissionDecision: "deny"` emit (the lock-held-by-other
+   branch).
+2. `lib/lockdown.sh` contains EXACTLY ONE
+   `permissionDecision: "deny"` emit
+   (`coord_lockdown_emit_deny`).
+3. No other hook script in `src/hooks/` emits
+   `permissionDecision: "deny"` directly.
+4. No other lib/ script in `src/lib/` emits
+   `permissionDecision: "deny"` directly.
+5. Every hook in `src/hooks/` sources `lib/lockdown.sh` and
+   calls `coord_lockdown_check` + `coord_lockdown_emit_deny`
+   in its top-level flow.
+6. Every hook fail-open exits 0 in non-deny code paths.
+
+#### 3. Two Phase 5 NEW architectural guards
+
+7. **Mediator dispatch is kind-agnostic** —
+   `lib/mediator_spawn.sh`, `lib/mediator_pending.sh`, and
+   `lib/verdict_apply.sh` contain ZERO `case ... cycle_detected`
+   or `if ... critical_drift` branching in production code.
+   Decision 4 binding (PR-PHASE5-04): cycle_detected handled
+   by the same kind-agnostic 3-action contract that Phase 3
+   established.
+8. **Watchdog probe enforces 3-signal conservative model** —
+   `lib/watchdog.sh` calls `ps -p` (Signal 1: PID liveness)
+   for the alive verdict; Signals 2/3 alone cannot promote
+   to alive (PR-PHASE3-02 §A). Cross-references existing
+   `watchdog.bats` for full 3-outcome semantics.
+
+#### 4. Six bonus guards (Phase 4 carry-forward + Phase 5 NEW)
+
+9.  `lib/validator_spawn.sh` zero `permissionDecision` (Phase 4 carry).
+10. `lib/validator_prefilter.sh` zero `permissionDecision` (Phase 4 carry).
+11. `lib/validator_cache.sh` zero `permissionDecision` (Phase 4 carry-bonus).
+12. `lib/wait_queue.sh` zero `permissionDecision` (Phase 5 T5.02 NEW).
+13. `lib/cycle_detection.sh` zero `permissionDecision` (Phase 5 T5.05 NEW).
+14. `lib/wait_backend.sh` zero `permissionDecision` (Phase 5 T5.03 NEW).
+
+**Total: 8 architectural + 6 bonus = 14 guards in
+`phase5_invariant.bats`** (revised from this PR's initial
+11-guard estimate; T5.03 wait_backend.sh + T5.05
+cycle_detection.sh additions raised the bonus-guard count
+from 2 to 6, and Phase 5 T5.06 surfaced two new
+architectural guards #7/#8 verifying Mediator
+kind-agnosticism + watchdog 3-signal model).
+
+#### 6. phase4_invariant.bats deletion
+
+`src/tests/unit/phase4_invariant.bats` is **deleted** in T5.07
+(superseded by `phase5_invariant.bats`, which carries forward
+all Phase 4 guards verbatim plus the Phase 5 additions).
+Mirrors the Phase 3 → Phase 4 transition (per T4.06 where
+`phase3_invariant.bats` was deleted upon
+`phase4_invariant.bats` landing).
+
+### Plan section deltas required
+
+**A. `IMPLEMENTATION_PLAN.md` §5 Phase 5 Scope** — add:
+> "Phase 5 invariant: 8 architectural deny guards + 3 bonus
+> guards = 11 total in `phase5_invariant.bats`. The 2-
+> location deny invariant (lock-held-by-other +
+> lockdown.json gate) is preserved unchanged from Phase 3+4.
+> `phase4_invariant.bats` deleted (superseded)."
+
+**B. `IMPLEMENTATION_PLAN.md` §5 Phase 5 Done-when criteria**
+— add:
+- [ ] `phase5_invariant.bats` 11/11 PASS (8 architectural +
+      3 bonus).
+- [ ] `phase4_invariant.bats` deleted from
+      `src/tests/unit/`.
+
+**C. `CLAUDE.md` §C.4a (Phase 4 architectural invariant
+carry-forward section)** — extend / rename to "Phase 5
+architectural invariant (carry-forward from Phase 3+4)".
+Replace the 8-guard + 1-bonus enumeration with the 11-guard
+list. Update the future-phase enumeration requirement to
+include `lib/wait_queue.sh` + `lib/cycle_detection.sh`.
+
+### Implementation-task dependencies
+
+- T5.07 (Phase 5 invariant test) implements §A + §B.
+  **Gated on T5.02 close (so wait_queue.sh exists for
+  guard #10) + T5.05 close (so cycle_detection.sh exists
+  for guard #11).**
+- T5.07 also DELETES `phase4_invariant.bats` per §C.6.
+- T5.10 (Linux re-probe) verifies all 11 guards PASS on
+  Linux Docker.
+
+### Ambiguity dispositions (resolved 2026-04-27 at T5.01 open)
+
+1. **Cycle detection adds a deny site?** **RESOLVED — NO.**
+   Routes through existing lockdown gate.
+2. **Wait queue adds a deny site?** **RESOLVED — NO.**
+   Queue operations are advisory; lock-acquire denial is at
+   the existing site.
+3. **Bonus vs architectural classification of new guards.**
+   **RESOLVED — both bonus.** Guards #10 and #11 are not
+   on the deny path itself; they are zero-deny content
+   audits of new lib/ files. Classified as bonus per
+   precedent (Phase 4's `validator_cache.sh` is also bonus).
+4. **phase4_invariant.bats fate.** **RESOLVED — DELETE.**
+   Superseded by phase5_invariant.bats which carries
+   forward all 9 prior guards verbatim. Mirrors Phase 3 →
+   Phase 4 transition.
+5. **Future-phase guard enumeration.** **RESOLVED — Phase 6
+   onward must add new lib/ files to the invariant
+   enumeration.** Documented in CLAUDE.md §C.4a.
+
+### Cross-references
+
+- **Decision 5** (verbatim from Phase 5 resume prompt) — this
+  PR encodes the invariant preservation.
+- **PR-PHASE3-01** — Mediator design contract; established
+  the deny-via-lockdown pathway.
+- **PR-PHASE4-02** — Phase 4 invariant 2-location preservation
+  (Concern B disposition). This PR extends the same
+  invariant through Phase 5.
+- **CLAUDE.md §C.4a** — currently documents Phase 4
+  invariant; extended by this PR to Phase 5.
+
+### Non-changes (deliberate)
+
+- `pre_tool_use_write.sh` deny site unchanged.
+- `lib/lockdown.sh` `coord_lockdown_emit_deny` unchanged.
+- No new architectural deny location added.
+- No new hook scripts (`src/hooks/`) added in Phase 5;
+  hook modifications are extensions to existing hooks
+  (`pre_tool_use_write.sh`, `post_tool_use_write.sh`) which
+  remain bound by the existing guard.
+- `verdict_apply.sh` unchanged in Phase 5; its
+  `evict_session` action handles the wait-queue cleanup
+  (`coord_wait_queue_cleanup_session`) and snapshot cleanup
+  (already wired in Phase 4) but emits no
+  permissionDecision.
+
+### Acknowledgement
+
+DRAFT. Pending user approval at T5.01 close. Final merge into
+IMPLEMENTATION_PLAN.md / CLAUDE.md folds into
+phase-5-signoff.md.
+
+---
+
 *Future entries append below.*
 
 

@@ -216,14 +216,24 @@ hook firing advances HWM after consume.
 ```json
 {
   "ts": "<ISO 8601 UTC>",
-  "kind": "<corrupt_state | flock_timeout | stale_active | pid_recycled | manual>",
+  "kind": "<corrupt_state | flock_timeout | stale_active | pid_recycled | manual | critical_drift | cycle_detected>",
   "session": "<the session that emitted; may be the watchdog-observer>",
-  "source": "<atomic_write | watchdog | coord_mediate | ...>",
+  "source": "<atomic_write | watchdog | coord_mediate | coord_cycle_detect | ...>",
   "payload": {
     "<arbitrary key=value pairs>"
   }
 }
 ```
+
+The kind enum has grown over the phases:
+- Phase 3 (PR-PHASE3-01..04): `corrupt_state`, `flock_timeout`,
+  `stale_active`, `pid_recycled`, `consensus_dead`, `manual`.
+- Phase 4 (PR-PHASE4-03): `critical_drift` — emitted by the
+  validator pipeline when a stage-3 spawn returns CRITICAL.
+- Phase 5 (PR-PHASE5-03 + PR-PHASE5-04): `cycle_detected` — emitted
+  by `lib/cycle_detection.sh` when bipartite-DFS finds a deadlock
+  during `coord_wait_queue_enqueue`. See §4.X below for the full
+  payload schema and Mediator handling guidance.
 
 ### Read entries (you can do this via cat/jq)
 
@@ -241,6 +251,184 @@ coord_mediator_gc_pending 24   # hours retention; default 24
 
 Atomic rewrite under flock. Keeps unconsumed entries + recently-
 consumed (<24h). Rebases HWM. Emits `PENDING_GC_RUN` event.
+
+### 4.X `cycle_detected` payloads (Phase 5 / PR-PHASE5-04)
+
+**When fired.** `lib/cycle_detection.sh::coord_cycle_detect` runs a
+bipartite session/file DFS during `coord_wait_queue_enqueue` when
+the post-append queue depth on any file is ≥ 2 (PR-PHASE5-03 §2). On
+a non-empty cycle path, `coord_cycle_emit_pending` writes a
+`cycle_detected` entry to `pending.jsonl` and the wait_queue
+forwarder spawns the Mediator inline (synchronous, mirroring the
+Phase 4 `critical_drift` pattern per PR-PHASE4-02 + Concern B).
+
+**Payload schema (9 keys, per PR-PHASE5-03 §5 + PR-PHASE5-04 §3):**
+
+```json
+{
+  "kind": "cycle_detected",
+  "ts":   "<ISO 8601 UTC ms>",
+  "session": "<trigger session — usually the just-enqueued sid>",
+  "source": "coord_cycle_detect",
+  "payload": {
+    "trigger_session_id": "<sid>",
+    "trigger_file":       "</absolute/path>",
+    "cycle_path": {
+      "cycle_id":           "<sha256 prefix of canonical path string>",
+      "trigger_session_id": "<sid>",
+      "sessions": ["<sid_A>", "<sid_B>", ...],
+      "files":    ["</p/foo>", "</p/bar>", ...],
+      "edges": [
+        {"from": "<sid>",  "type": "waits_for", "to": "</p/file>"},
+        {"from": "</p/f>", "type": "held_by",   "to": "<sid>"}
+      ],
+      "detected_at": "<ISO 8601 UTC ms>"
+    },
+    "cycle_description":         "<human-readable per-session lines>",
+    "queue_depth_at_detection":  <int — count of distinct sessions in cycle>,
+    "involved_sessions":         ["<sid_A>", "<sid_B>", ...],
+    "involved_files":            ["</p/foo>", "</p/bar>", ...],
+    "session_metadata": {
+      "<sid>": {
+        "last_activity_at":    "<ISO>",
+        "registered_at":       "<ISO>",
+        "locks_held":          <int>,
+        "session_age_seconds": <int — populated by Phase 7+ stress harness>
+      }
+    },
+    "recent_cycle_count": <int — count of CYCLE_DETECTED events in last 60 s>
+  }
+}
+```
+
+The `cycle_path.edges` array always alternates `waits_for` (session →
+file) and `held_by` (file → session) — bipartite invariant, asserted
+by `cycle_detection.bats` test 10. Even-length edge count == 2 ×
+distinct cycle sessions.
+
+The `cycle_description` field carries a pre-rendered string from
+`coord_cycle_describe`. It includes one line per session
+("`<sid> (<prefix>) holds X and waits for Y`"), an arrow-joined
+cycle path, and the **3-tier eviction priority guidance** verbatim:
+
+> Eviction priority guidance:
+> (1) oldest `last_activity_at` (most likely idle / abandoned)
+> (2) fewest `locks_held` (least disruption)
+> (3) youngest `session_age` (preserve older work)
+
+Use the priority chain when choosing which session to evict for
+`surgical_fix`. `session_metadata` provides the values at decision
+time; `recent_cycle_count` indicates whether a previous Mediator
+verdict has not yet broken the cycle (≥ 1 = recurrence).
+
+### 4.X.1 Decision matrix for `cycle_detected`
+
+The existing 3-action contract handles `cycle_detected`
+kind-agnostically per Decision 4 — **NO new action verbs are
+introduced**. The default mappings are:
+
+| Action | When | Verdict shape |
+|--------|------|---------------|
+| `advice` | Shallow cycle (2 sessions, single file each) AND both sessions show `last_activity_at` within last 60 s AND neither has held its lock for >5 min. | `action_type=advice`, `actions=[]`, `message_to_caller` describes the cycle and recommends manual release. |
+| `surgical_fix` (severity=brief) | Typical case: 2 sessions, mixed activity, OR ≥1 session held for >5 min. Evict ONE session per the 3-tier priority chain. | `action_type=surgical_fix`, `severity=brief`, `actions=[{verb:evict_session, session_id:<chosen>}]`, `confidence=auto_apply`. |
+| `surgical_fix` (severity=extended) | Multi-file cycle (3+ sessions) where evicting one session may not break all entanglements; evict 2+ sessions. | `action_type=surgical_fix`, `severity=extended`, `actions=[{verb:evict_session, ...}, {verb:evict_session, ...}]`, `confidence=needs_review` (operator approves). |
+| `lockdown` | Global deadlock: cycle spans ALL active sessions, OR cycle includes ≥4 sessions, OR `recent_cycle_count` ≥ 2 (recurrence — surgical_fix isn't converging). | `action_type=lockdown`, `actions=[{verb:lockdown, reason_source:cycle_detected}]`, `message_to_others=<reason for all sessions to see banner>`. |
+
+**Eviction priority example.** Suppose `cycle_detected.payload`
+shows:
+
+```json
+"sessions": ["sid-A", "sid-B"],
+"session_metadata": {
+  "sid-A": {"last_activity_at": "2026-04-27T10:00:00Z", "locks_held": 1, ...},
+  "sid-B": {"last_activity_at": "2026-04-27T09:50:00Z", "locks_held": 1, ...}
+}
+```
+
+Apply the 3-tier chain:
+1. Tier 1 (oldest `last_activity_at`): sid-B (10 min idle) wins
+   over sid-A (0 min idle).
+
+Verdict:
+```json
+{
+  "action_type": "surgical_fix",
+  "severity": "brief",
+  "confidence": "auto_apply",
+  "actions": [{"verb": "evict_session", "session_id": "sid-B"}],
+  "message_to_caller": "Deadlock detected with sid-B (e5f6g7h8). Evicting sid-B which has been idle for 10 minutes and holds 1 lock. You should now be able to acquire /p/bar."
+}
+```
+
+The eviction path (existing `coord_verdict_apply_actions::evict_session`)
+releases the evicted session's locks, removes it from `wait_queues`,
+clears its read-set, removes its read-snapshots, and removes its
+wake_files. Other waiters in the cycle proceed via the standard
+lock-release notification path (notify_waiters → wake_file content
+write → `coord wait` exits with `WAIT_RELEASED`).
+
+### 4.X.2 Phase 5 distinction: `cycle_detected` vs `critical_drift`
+
+| | `critical_drift` (Phase 4) | `cycle_detected` (Phase 5) |
+|---|---|---|
+| Producer | `_coord_phase4_run_pipeline` stage 3 (validator agent CRITICAL verdict) | `coord_cycle_detect` (bipartite DFS on `wait_queues` enqueue depth ≥ 2) |
+| Trigger | Stale-read + content drift classified CRITICAL | Wait-queue cycle in graph |
+| Synchronous spawn | Yes (Mediator inline; ~60-100 s wall-clock) | Yes (mirrors `critical_drift` pattern) |
+| Action contract | 3-action (advice / surgical_fix / lockdown) | 3-action (same; no new verbs per Decision 4) |
+| Mediator code path | Kind-agnostic dispatch | Kind-agnostic dispatch |
+| Latency budget exception | CLAUDE.md §A.6 2 s budget intentionally bypassed (PR-PHASE4-02 + Concern B) | Same justification (intervention before next operation) |
+
+Both kinds route through the same `pending.jsonl` consumer, the same
+verdict-apply pipeline, and the same lockdown gate. The Mediator
+prompt's Section 3 embeds the full pending entry verbatim — no
+kind-specific dispatch logic in `lib/mediator_spawn.sh`.
+
+### 4.X.3 Silent 2-cycle case (operational note)
+
+The depth ≥ 2 trigger threshold is intentional false-positive
+prevention (PR-PHASE5-03 §2): every enqueue produces ≥ 1 waiter on
+the queued file, so a depth-1 enqueue is uninteresting (cycle
+detection from a single waiter cannot find anything novel). This
+creates a known edge case:
+
+**Scenario.** Session A holds /p/foo, B holds /p/bar. A waits on
+/p/bar (depth 1 — no trigger). B waits on /p/foo (depth 1 — no
+trigger). The A↔B cycle exists but no detection fires.
+
+**Mitigation.** Phase 7 will add a `wait_max_seconds`-bounded
+timeout path: `coord wait` clamps at 570 s (PR-PHASE0-01 + F-008);
+on timeout, the waiter emits `WAIT_TIMEOUT(reason=deadline)` and a
+follow-up cleanup path runs `coord_cycle_detect` from the timed-out
+session's perspective. This catches silent 2-cycles within the
+600 s Bash-tool ceiling.
+
+**Phase 5 scope:** depth ≥ 2 trigger is sufficient for the
+done-when criteria (3 sessions queue → cycle introduced
+artificially). Silent-2-cycle handling deferred to Phase 7 stress
+harness.
+
+### 4.X.4 Synchronous inline pattern (recap)
+
+Same as `critical_drift` (PR-PHASE4-02 + Concern B):
+
+1. `coord_wait_queue_enqueue` post-append at depth ≥ 2 calls
+   `coord_cycle_detect`.
+2. On cycle, `coord_cycle_emit_pending` writes the entry +
+   `coord_mediator_spawn` runs synchronously inline (~20-35 s
+   typical; ~60-100 s worst case).
+3. Mediator returns verdict; `coord_verdict_apply_actions` applies
+   the chosen action(s) in the parent hook's process — no extra
+   recursion (Mediator's own depth-2 ceiling is the bound for any
+   peer review on disagreement).
+4. Trigger session's `coord_wait_queue_enqueue` returns rc=0 with
+   the wake_file path. The lock acquisition that follows is
+   independently coordinated through the standard lock-acquire
+   path; the Mediator's verdict (e.g., evict_session of one of the
+   cycle members) makes the next acquisition possible.
+
+Total wait-queue-enqueue worst-case wall-clock is ~50-100 s on the
+trigger session's hook turn — well within the 600 s Bash-tool
+ceiling.
 
 ---
 

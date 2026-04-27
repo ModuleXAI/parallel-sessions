@@ -40,6 +40,18 @@ LIB_DIR="$(cd "$HOOK_DIR/../lib" && pwd)"
 . "$LIB_DIR/notify_waiters.sh"
 # shellcheck disable=SC1091
 . "$LIB_DIR/lockdown.sh"
+# T5.04 / PR-PHASE5-02 §5: notify_waiters' 4-tier diff_summary chain
+# uses validator_cache (tier 2), validator_prefilter + read_snapshots
+# (tier 3), and hash (tier 2/3 inputs). Source defensively — present
+# in Phase 4+ installs.
+# shellcheck disable=SC1091
+[ -f "$LIB_DIR/hash.sh" ] && . "$LIB_DIR/hash.sh"
+# shellcheck disable=SC1091
+[ -f "$LIB_DIR/validator_cache.sh" ] && . "$LIB_DIR/validator_cache.sh"
+# shellcheck disable=SC1091
+[ -f "$LIB_DIR/validator_prefilter.sh" ] && . "$LIB_DIR/validator_prefilter.sh"
+# shellcheck disable=SC1091
+[ -f "$LIB_DIR/read_snapshots.sh" ] && . "$LIB_DIR/read_snapshots.sh"
 
 coord_resolve_root() {
   if [ -n "${COORD_DIR:-}" ] && [ -d "$COORD_DIR" ]; then
@@ -102,15 +114,18 @@ if coord_lockdown_check && coord_lockdown_emit_deny "PostToolUse"; then
   exit 0
 fi
 
-# Identify the lock holder + acquired_at for $TARGET, if any. Capture
-# acquired_at BEFORE deletion so the notification scan window is correct.
+# Identify the lock holder + acquired_at + verdict_ts for $TARGET, if
+# any. Capture all BEFORE deletion so notify_waiters can pass the
+# verdict_ts into its 4-tier diff_summary chain (T5.04 / PR-PHASE5-02
+# §5).
 LOCK_TSV=$(jq -r --arg f "$TARGET" '
   (.locks[$f] // {}) as $L
-  | [($L.session // ""), ($L.acquired_at // "")]
+  | [($L.session // ""), ($L.acquired_at // ""), ($L.latest_validator_verdict_ts // "")]
   | @tsv
 ' "$STATE" 2>/dev/null || printf '')
 LOCK_HOLDER=$(printf '%s' "$LOCK_TSV" | awk -F'\t' '{print $1}')
 LOCK_ACQUIRED=$(printf '%s' "$LOCK_TSV" | awk -F'\t' '{print $2}')
+LOCK_VERDICT_TS=$(printf '%s' "$LOCK_TSV" | awk -F'\t' '{print $3}')
 
 if [ -z "$LOCK_HOLDER" ]; then
   # No lock to release — pre-hook may have failed atomic acquire; silent allow.
@@ -153,9 +168,9 @@ coord_log_event kind=LOCK_RELEASED source=post_tool_use_write \
 # to a real producer. Any session that was denied on $TARGET during the
 # hold window will see a "lock_released: ..." entry on its next read or
 # any tool call.
-coord_notify_lock_release_waiters "$SESSION_ID" "$TARGET" "$LOCK_ACQUIRED" "$NOW"
+coord_notify_lock_release_waiters "$SESSION_ID" "$TARGET" "$LOCK_ACQUIRED" "$NOW" "$LOCK_VERDICT_TS"
 
-# Phase 5 will replace this best-effort scan with an explicit wait_queue
+# Phase 5 will replace this best-effort scan with an explicit wait_queues
 # FIFO + diff-summary content; Phase 2's notification has no diff yet.
 
 exit 0
