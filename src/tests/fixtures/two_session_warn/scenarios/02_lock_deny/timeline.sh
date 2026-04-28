@@ -106,16 +106,26 @@ scenario_assert() {
   case "$reason" in *"(b) Self-delegate"*) : ;; *) _fail B.4 "missing (b) marker" ;; esac
   case "$reason" in *"(c) Passively wait"*) : ;; *) _fail B.4 "missing (c) marker" ;; esac
 
-  # B.5 — Abstract Phase-6 references.
-  case "$reason" in *"\`coord task-open\`"*) : ;; *) _fail B.5 "missing abstract \`coord task-open\` reference" ;; esac
-  case "$reason" in *"\`coord self-delegate\`"*) : ;; *) _fail B.5 "missing abstract \`coord self-delegate\` reference" ;; esac
+  # B.5 — Phase 6 production CLI shapes embedded (T6.09 stub-removal
+  # per PR-PHASE6-05 §6 toggle TRUE banner; no longer abstract refs).
+  # Both (a) and (b) MUST embed full CLI argument shape.
+  if ! printf '%s' "$reason" | grep -qF "coord task-open --file $target_path --complexity SIMPLE"; then
+    _fail B.5 "(a) missing coord task-open production CLI shape"
+  fi
+  if ! printf '%s' "$reason" | grep -qF "coord self-delegate --file $target_path --instruction"; then
+    _fail B.5 "(b) missing coord self-delegate production CLI shape"
+  fi
 
-  # B.6 — Phase 6 syntax NOT frozen.
+  # B.6 — Phase 6 production wording REQUIRES full --file argument
+  # shape (T6.09 inverted the Phase 2 stub guard). Re-using these
+  # case patterns as positive presence checks.
   case "$reason" in
-    *"task-open --file"*)     _fail B.6 "reason froze Phase-6 'task-open --file' syntax" ;;
+    *"task-open --file"*) : ;;
+    *) _fail B.6 "reason missing Phase-6 'task-open --file' production syntax" ;;
   esac
   case "$reason" in
-    *"self-delegate --file"*) _fail B.6 "reason froze Phase-6 'self-delegate --file' syntax" ;;
+    *"self-delegate --file"*) : ;;
+    *) _fail B.6 "reason missing Phase-6 'self-delegate --file' production syntax" ;;
   esac
 
   # B.7 — (c) coord wait full invocation with --timeout 570.
@@ -124,9 +134,16 @@ scenario_assert() {
     printf '    reason: %s\n' "$reason" >&2
   fi
 
-  # B.8 — Both acquired + last-activity ages surfaced.
-  case "$reason" in *"acquired "*"ago"*) : ;; *) _fail B.8 "missing 'acquired N ago'" ;; esac
-  case "$reason" in *"last activity "*"ago"*) : ;; *) _fail B.8 "missing 'last activity N ago'" ;; esac
+  # B.8 — Phase 6 production wording uses "since X (~Y)" humanized
+  # timestamps (build_deny_reason rewritten at T6.09 per
+  # PR-PHASE6-05 §6). Stub-era "acquired X, last activity Y" format
+  # is gone. Assert presence of "since" + "ago" pattern.
+  case "$reason" in *"since "*"ago"*) : ;; *) _fail B.8 "missing 'since N ago' (Phase 6 production wording)" ;; esac
+  # Stub-removal regression-guard: legacy "acquired N ago" / "Phase 6
+  # — currently disabled" markers must be ABSENT.
+  case "$reason" in
+    *"Phase 6 — currently disabled"*) _fail B.8 "Phase 2 stub marker 'Phase 6 — currently disabled' still present (T6.09 stub-removal regression)" ;;
+  esac
 
   # B.9 — Events sequence: LOCK_ACQUIRED(A) → LOCK_DENIED(B) → LOCK_RELEASED(A).
   if [ ! -f "$events" ]; then

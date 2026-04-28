@@ -494,3 +494,263 @@ coord_cycle_emit_pending() {
   printf '%s' "$now"
   return 0
 }
+
+# ---------------------------------------------------------------
+# Phase 6 T6.02 — Public: coord_cycle_detect_task_graph
+# ---------------------------------------------------------------
+#
+# coord_cycle_detect_task_graph <session_id> <target_file>
+#
+# Bipartite session/task DFS simulating the proposed task that
+# <session_id> is about to open on <target_file> (caller is
+# `coord task-open` BEFORE persistence to locks[<target_file>].tasks[]).
+# Decides whether the proposed task would create a chain of
+# delegation depth > 3 OR a task-graph cycle returning to
+# <session_id>.
+#
+# Edge model (per PR-PHASE6-03 §2):
+#   session  → task     : session is the opener of the task
+#                          (task.opener field == session)
+#   task     → session  : task targets the current lock-holder
+#                          of task.file (locks[task.file].session)
+#   task     → task     : transitive via opener-of-opener; not a
+#                          stored edge slot — discovered through
+#                          DFS traversal of the bipartite graph
+#
+# Returns (rc + stderr; per T6.02 user binding 2026-04-27,
+# supersedes PR-PHASE6-03 §3 TSV-stdout draft contract):
+#   rc 0 — ok; proposed task is safe to persist
+#   rc 1 — chain depth exceeded (>3); stderr "Chain depth
+#          exceeded (max 3): A → B → C → D rejected"
+#   rc 2 — task cycle detected; stderr "Task cycle detected:
+#          A → B → A rejected"
+#   rc 3 — usage error (missing/empty arg); stderr usage line
+#
+# Cycle/depth ordering: cycle check fires BEFORE depth check
+# inside the inner loop. If a single path simultaneously cycles
+# AND would exceed depth, cycle wins (rc 2) — matches the
+# user-bound "Reject: depth-3 + cycle combo (cycle wins)"
+# scenario.
+#
+# Trivial gates (rc 0 fast paths):
+#   - target_file not currently locked → no edge added → safe
+#   - locks[target_file].session == session_id  → self-delegation
+#     case (rejected by `coord task-open` separately; cycle
+#     detection treats as safe — no real cross-session edge)
+#
+# Algorithm: iterative DFS via parallel-indexed arrays
+# (stack_sid / stack_path / stack_depth + visited_arr); mirrors
+# coord_cycle_detect's Bash 3.2 stack-compat pattern from T5.05.
+# PSEP=$'\x1e' record separator joins path nodes; path render
+# strips task-labels (only sessions surface in stderr message).
+#
+# Logging: emits CYCLE_DETECTION_TASK_GRAPH_RAN with result +
+# duration_ms (mirrors CYCLE_DETECTION_RAN). On rc 1/2 also
+# emits TASK_GRAPH_VIOLATION_DETECTED for audit trail.
+#
+# Bash 3.2 compat: parallel-indexed arrays only; no associative
+# arrays; no recursion; visited-set linear scan.
+
+# _coord_cycle_tasks_opened_by <sid>
+#   Print newline-separated file paths where any task in
+#   locks[<file>].tasks[] has .opener == sid. Each line is the
+#   FILE path (the task's target). Multi-task per file: emits
+#   the file once per task entry (caller dedupes via visited
+#   tracking since each task hops to its own holder).
+#
+#   Helper stdout protocol per CLAUDE.md §A.13 lesson #9: clean
+#   newline-separated output; no other writes. Errors → silent
+#   empty stdout (rc 0 always; jq failure ≡ no tasks found).
+_coord_cycle_tasks_opened_by() {
+  local sid="$1"
+  local state
+  state=$(_coord_cycle_state)
+  [ -f "$state" ] || return 0
+  jq -r --arg s "$sid" '
+    [ .locks // {}
+      | to_entries[]
+      | .key as $f
+      | (.value.tasks // [])[]
+      | select(.opener == $s)
+      | $f ]
+    | .[]
+  ' "$state" 2>/dev/null
+}
+
+# _coord_cycle_render_session_path <psep_path>
+#   Take a PSEP-separated path string (alternating session, task
+#   label, session, task label, ..., session) and render it as
+#   "A → B → C" with arrow separator, dropping task labels.
+#   Used for stderr violation messages.
+_coord_cycle_render_session_path() {
+  local raw="$1"
+  local PSEP=$'\x1e'
+  local OLD_IFS="$IFS"
+  IFS="$PSEP"
+  # shellcheck disable=SC2086
+  set -- $raw
+  IFS="$OLD_IFS"
+  local out="" i=0 node
+  for node in "$@"; do
+    if [ $((i % 2)) -eq 0 ]; then
+      if [ -z "$out" ]; then
+        out="$node"
+      else
+        out="$out → $node"
+      fi
+    fi
+    i=$((i + 1))
+  done
+  printf '%s' "$out"
+}
+
+coord_cycle_detect_task_graph() {
+  local start_sid="${1:-}"
+  local target_file="${2:-}"
+
+  if [ -z "$start_sid" ] || [ -z "$target_file" ]; then
+    printf 'usage: coord_cycle_detect_task_graph <session_id> <target_file>\n' >&2
+    return 3
+  fi
+  if [ -z "${COORD_DIR:-}" ]; then
+    return 0
+  fi
+  local state
+  state=$(_coord_cycle_state)
+  [ -f "$state" ] || return 0
+
+  local t0 t1 elapsed_ms
+  t0=$(_coord_cycle_now_ms)
+
+  # Trivial gates -------------------------------------------------
+  local start_holder
+  start_holder=$(_coord_cycle_lock_holder "$target_file")
+  if [ -z "$start_holder" ]; then
+    coord_log_event kind=CYCLE_DETECTION_TASK_GRAPH_RAN \
+      session="$start_sid" target="$target_file" \
+      result=no_holder duration_ms=0 2>/dev/null || true
+    return 0
+  fi
+  if [ "$start_holder" = "$start_sid" ]; then
+    coord_log_event kind=CYCLE_DETECTION_TASK_GRAPH_RAN \
+      session="$start_sid" target="$target_file" \
+      result=self_holder duration_ms=0 2>/dev/null || true
+    return 0
+  fi
+
+  # DFS state -----------------------------------------------------
+  # Parallel-indexed arrays per Bash 3.2 stack-compat (no
+  # associative arrays per CLAUDE.md §A.5 + §A.13 lesson on
+  # parallel-indexed pattern from T5.05 coord_cycle_detect).
+  #
+  #   stack_sid[i]   = session at frame i
+  #   stack_path[i]  = PSEP-joined path-so-far at frame i
+  #                    (alternates session, task-label, session, ...)
+  #   stack_depth[i] = chain depth at frame i (1 = the proposed
+  #                    edge from start_sid; increments per task hop)
+  #   visited_arr    = sessions already pushed onto the stack
+  #                    (linear search; small N <= active sessions).
+  local PSEP=$'\x1e'
+  local -a stack_sid stack_path stack_depth visited_arr
+
+  local start_path="${start_sid}${PSEP}task:${target_file}${PSEP}${start_holder}"
+  stack_sid=("$start_holder")
+  stack_path=("$start_path")
+  stack_depth=(1)
+  visited_arr=("$start_sid" "$start_holder")
+
+  local violation_kind="" violation_path=""
+
+  while [ "${#stack_sid[@]}" -gt 0 ]; do
+    # Pop last frame.
+    local last_idx=$((${#stack_sid[@]} - 1))
+    local cur_sid="${stack_sid[$last_idx]}"
+    local cur_path="${stack_path[$last_idx]}"
+    local cur_depth="${stack_depth[$last_idx]}"
+    unset 'stack_sid[last_idx]' 'stack_path[last_idx]' 'stack_depth[last_idx]'
+
+    # Find files with tasks where cur_sid is opener.
+    local files_str
+    files_str=$(_coord_cycle_tasks_opened_by "$cur_sid")
+    [ -z "$files_str" ] && continue
+
+    local f
+    while IFS= read -r f; do
+      [ -z "$f" ] && continue
+      local next_holder
+      next_holder=$(_coord_cycle_lock_holder "$f")
+      [ -z "$next_holder" ] && continue   # file no longer locked → edge dead
+
+      local extended_path="${cur_path}${PSEP}task:${f}${PSEP}${next_holder}"
+
+      # Cycle check FIRST (rc 2 wins over rc 1 per
+      # "depth+cycle combo" scenario).
+      if [ "$next_holder" = "$start_sid" ]; then
+        violation_kind="cycle"
+        violation_path="$extended_path"
+        break 2
+      fi
+
+      # Depth check.
+      local new_depth=$((cur_depth + 1))
+      if [ "$new_depth" -gt 3 ]; then
+        violation_kind="depth"
+        violation_path="$extended_path"
+        break 2
+      fi
+
+      # Already-visited session → skip (avoids infinite loop on
+      # dense graphs; mirrors coord_cycle_detect visited_arr
+      # treatment).
+      local v already=0
+      for v in "${visited_arr[@]}"; do
+        if [ "$v" = "$next_holder" ]; then
+          already=1
+          break
+        fi
+      done
+      [ "$already" = 1 ] && continue
+
+      visited_arr+=("$next_holder")
+      stack_sid+=("$next_holder")
+      stack_path+=("$extended_path")
+      stack_depth+=("$new_depth")
+    done <<<"$files_str"
+  done
+
+  t1=$(_coord_cycle_now_ms)
+  elapsed_ms=$(( t1 - t0 ))
+
+  if [ -z "$violation_kind" ]; then
+    coord_log_event kind=CYCLE_DETECTION_TASK_GRAPH_RAN \
+      session="$start_sid" target="$target_file" \
+      result=ok duration_ms="$elapsed_ms" 2>/dev/null || true
+    return 0
+  fi
+
+  local rendered
+  rendered=$(_coord_cycle_render_session_path "$violation_path")
+
+  if [ "$violation_kind" = "cycle" ]; then
+    printf 'Task cycle detected: %s rejected\n' "$rendered" >&2
+    coord_log_event kind=TASK_GRAPH_VIOLATION_DETECTED \
+      session="$start_sid" target="$target_file" \
+      violation=cycle path="$rendered" duration_ms="$elapsed_ms" \
+      2>/dev/null || true
+    coord_log_event kind=CYCLE_DETECTION_TASK_GRAPH_RAN \
+      session="$start_sid" target="$target_file" \
+      result=cycle duration_ms="$elapsed_ms" 2>/dev/null || true
+    return 2
+  fi
+
+  # violation_kind == depth
+  printf 'Chain depth exceeded (max 3): %s rejected\n' "$rendered" >&2
+  coord_log_event kind=TASK_GRAPH_VIOLATION_DETECTED \
+    session="$start_sid" target="$target_file" \
+    violation=depth path="$rendered" duration_ms="$elapsed_ms" \
+    2>/dev/null || true
+  coord_log_event kind=CYCLE_DETECTION_TASK_GRAPH_RAN \
+    session="$start_sid" target="$target_file" \
+    result=depth duration_ms="$elapsed_ms" 2>/dev/null || true
+  return 1
+}

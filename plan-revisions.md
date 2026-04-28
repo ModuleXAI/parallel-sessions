@@ -4905,6 +4905,1018 @@ phase-5-signoff.md.
 
 ---
 
+## PR-PHASE6-01 — F-015 disposition: `coord wait` subagent context soft-deprecation banner (Decision 1)
+
+**Date:** 2026-04-27
+**Author:** Phase 6 builder (T6.01).
+**Status:** APPROVED 2026-04-27 at T6.01 close. Gates
+T6.05 (`pre_tool_use_any.sh` self-task reminder + F-015
+banner). Resolves F-015 at Phase 6 close.
+**Driver:** User-resolved Decision 1 from Phase 6 resume
+prompt ("`coord wait` subagent içinde no-op (current Decision
+2.17 behavior preserved + formally extended in Phase 6)").
+
+### Observed gap requiring change
+
+F-015 carries forward as OPEN since Phase 5. The plan §5 Phase
+6 scope is silent on `coord wait` subagent policy. Decision
+2.17 binds subagent context to hook-no-op, but the existing
+`subagent_filter.sh` is hook-input-driven and cannot reach a
+plain `Bash: coord wait …` invocation issued from within a
+spawned subagent — the Bash command IS the only signal the
+hook receives. Without a Phase 6 disposition the F-015
+question would migrate forward indefinitely.
+
+The user weighed allow-by-default (A) vs reject-with-education
+(B) and chose a third path: **allow + soft-deprecate via
+educational banner**. Decision 6 binds the no-third-deny-
+location invariant, so reject-with-deny is off the table.
+
+### User-resolved decision
+
+`pre_tool_use_any.sh` (Phase 6 extension under T6.05) detects:
+- `tool == "Bash"`
+- `command` starts with `"coord wait"` (case-sensitive; first
+  10 chars after stripping leading whitespace)
+- hook-input `agent_type` non-empty (subagent context)
+
+When all three match, the hook emits `additionalContext`
+banner:
+
+> *Subagent context detected; `coord wait` is allowed but
+> Phase 6 task delegation primitives via parent session are
+> recommended for tracked workflow. See `coord task-open` and
+> `coord self-delegate` for the parent-session equivalents.*
+
+Banner is **soft deprecation** (educational, not enforcement).
+The hook continues with `permissionDecision: allow` (or no
+decision; allow is the Claude Code default when the hook does
+not emit one). NO third deny location is introduced —
+Decision 6 invariant preserved.
+
+### Implementation surface
+
+**Code:**
+- `src/hooks/pre_tool_use_any.sh` — add detection branch
+  (after self-task reminder block, before tail).
+- `src/lib/subagent_filter.sh` — UNCHANGED. The existing
+  hook-input-based pattern is correct; coord wait CLI-side
+  detection is impossible without hook signal.
+
+**Documentation:**
+- `CLAUDE.md` §B operational guidance (Phase 6 close): new
+  paragraph in §B.10 anti-patterns or §B.8 wait-flow section
+  referencing the banner + recommended parent-session
+  pattern.
+- `CLAUDE.md` §C.4a Phase 6 invariant section: explicit
+  "Decision 6 preserves 2-location deny — F-015 banner is
+  educational injection, not deny" callout.
+
+**Tests (T6.05):**
+- bats: subagent-context coord wait emits banner + allow
+  exit (not deny).
+- bats: non-subagent coord wait does NOT emit banner
+  (regression-guard against accidental injection in normal
+  flow).
+- bats: subagent-context Bash with non-coord-wait command
+  does NOT emit banner.
+
+**Events:**
+- New event kind `SUBAGENT_COORD_WAIT_BANNER_EMITTED` (audit
+  trail; aligns with Phase 0 `SUBAGENT_ACTIVITY_SKIPPED`
+  observability pattern). Payload: `session_id`,
+  `agent_type`, `parent_session_id` if extractable.
+
+### F-015 lifecycle
+
+- Phase 0: F-015 raised, status OPEN.
+- Phases 1-5: carried forward, no disposition.
+- Phase 6 (THIS PR): disposition bound by Decision 1.
+  Implementation lands at T6.05.
+- Phase 6 close (T6.12 sign-off): F-015 status flipped to
+  RESOLVED with reference to PR-PHASE6-01 + T6.05 commit.
+
+### Non-changes (deliberate)
+
+- `subagent_filter.sh` unchanged.
+- Existing 2-location deny invariant unchanged (Decision 6).
+- `coord wait` CLI itself unchanged — banner is hook-side
+  injection, not CLI-side rejection.
+- Subagent observability event vocabulary extended (additive
+  only).
+
+### Acknowledgement
+
+DRAFT. Pending user approval at T6.01 close. Final merge into
+CLAUDE.md folds into phase-6-signoff.md.
+
+---
+
+## PR-PHASE6-02 — Self-delegation Stop "unresolved" semantic + audit event vocabulary (Decision 2)
+
+**Date:** 2026-04-27
+**Author:** Phase 6 builder (T6.01).
+**Status:** APPROVED 2026-04-27 at T6.01 close. Gates
+T6.06 (`stop.sh` self-task block-once-then-allow).
+**Driver:** User-resolved Decision 2 from Phase 6 resume
+prompt ("Self-delegation Stop behavior — file unlock-based
+unresolved semantic; Decision 2.13 clarification").
+
+### Observed gap requiring change
+
+Decision 2.13 says "On `Stop`, unresolved self-tasks trigger
+`decision: 'block'` once with a reminder; second `Stop` lets
+the session end and archives the self-task as SKIPPED" but
+does not define **what makes a self-task "unresolved"** at
+Stop time. Two interpretations are consistent with the text:
+- (i) any self-task that has not been explicitly archived
+  (regardless of file lock state)
+- (ii) a self-task whose file is currently UNLOCKED (B could
+  acquire and act now)
+
+Interpretation (i) over-blocks: B would be blocked at Stop
+for any pending self-task even if the target file is still
+held by another session and B couldn't act on it anyway.
+Interpretation (ii) is symmetric with the Decision 2.13 text
+on the PreToolUse-reminder side ("the hook checks whether
+any self-task's file is now unlocked"). The user binds (ii).
+
+### User-resolved decision
+
+A self-task is **"unresolved" at Stop** iff its `file` is
+NOT currently locked by any session (i.e., the file is
+unlocked; B could acquire it now).
+
+- Self-tasks whose file is still locked by a peer are NOT
+  blocking. Stop proceeds normally past them.
+- First Stop with at least one unresolved self-task →
+  `decision: "block"` once + reminder
+  `additionalContext`: "/foo.ts is now free, your self-task
+  pending: '<instruction>'" (one banner per unresolved
+  self-task; multi-line OK).
+- Second consecutive Stop (same prompt cycle, no PreToolUse
+  acted on the self-task between Stops) → session ends.
+  Each unresolved self-task is archived as SKIPPED in
+  `sessions_history.json`'s `self_tasks_archive[<sid>]`
+  array, with `archived_at` ISO8601-ms + `archive_reason:
+  "stop_skipped"`.
+
+### Block-once vs block-twice tracking
+
+`stop.sh` records a per-(session, prompt_id) "stop attempt
+counter" in `.coord/state/stop_counters.json` keyed by
+`<sid>:<prompt_id>`:
+- 1st Stop: counter increments 0 → 1, hook emits block.
+- 2nd Stop: counter increments 1 → 2, hook archives SKIPPED
+  + allows.
+- Counter reset on any successful PreToolUse for that
+  session (the user actually did something between Stops;
+  the next Stop is a "fresh" first Stop).
+
+Counter file is gitignored. atomic_write through
+`lib/atomic_write.sh` consumer pattern.
+
+### Audit event vocabulary
+
+Three NEW events.jsonl event kinds (additive):
+- `SELF_TASK_OPENED` — emitted by `coord self-delegate` at
+  CLI invocation. Payload: `session_id`, `file`,
+  `instruction`, `prompt_id`, `created_at`.
+- `SELF_TASK_REMINDER` — emitted by `pre_tool_use_any.sh`
+  when injecting the additionalContext reminder. Payload:
+  `session_id`, `file`, `instruction`, `prompt_id`,
+  `unlocked_since` (ISO8601-ms).
+- `SELF_TASK_SKIPPED` — emitted by `stop.sh` on second-Stop
+  archive. Payload: `session_id`, `file`, `instruction`,
+  `prompt_id`, `created_at`, `archived_at`,
+  `archive_reason: "stop_skipped"`.
+
+A fourth event kind `SELF_TASK_RESOLVED` (B re-acquired the
+locked file and successfully wrote) is **deferred to Phase
+7** — Phase 6 mock-binary scope (Decision 5) does not
+exercise the success path end-to-end. Audit gap explicitly
+accepted.
+
+### Implementation surface
+
+**Code:**
+- `src/hooks/stop.sh` — extend with self-task block-once
+  branch + counter management.
+- `src/lib/self_tasks.sh` (NEW; T6.03) — `coord_self_tasks_
+  list_unresolved <sid>` returns self-tasks whose `file`
+  is unlocked. Used by both `pre_tool_use_any.sh` (T6.05
+  reminder) and `stop.sh` (T6.06 block-once).
+- `src/lib/self_tasks.sh` — `coord_self_tasks_archive_
+  skipped <sid> <task_idx>` moves entry to
+  `self_tasks_archive` in history.
+
+**Tests (T6.06):**
+- bats: 1st Stop with unresolved self-task → block once.
+- bats: 2nd Stop → allow + archive SKIPPED + event emitted.
+- bats: PreToolUse between Stops resets counter (next Stop
+  is fresh-first).
+- bats: 1st Stop with self-task whose file is still locked
+  → no block (file-locked self-tasks not "unresolved").
+- bats: multi-self-task interleave (one unlocked, one
+  locked) → block once with single banner referencing only
+  unlocked one.
+
+### Non-changes (deliberate)
+
+- Decision 2.13's PreToolUse-reminder semantic unchanged
+  (was already file-unlock-based).
+- self_tasks JSON schema unchanged from Decision 2.13
+  (file/instruction/created_at/prompt_id) — see PR-PHASE6-05
+  for prompt_id synthesis.
+- No new architectural deny location.
+- Stop-counter file is operational state, not coord state
+  schema — does NOT bump `schema_version`.
+
+### Acknowledgement
+
+DRAFT. Pending user approval at T6.01 close. Final merge into
+phase-6-signoff.md.
+
+---
+
+## PR-PHASE6-03 — `task_graph` cycle detection extension to `lib/cycle_detection.sh` (Decision 3)
+
+**Date:** 2026-04-27
+**Author:** Phase 6 builder (T6.01).
+**Status:** APPROVED 2026-04-27 at T6.01 close. Gates
+T6.07 (task_graph cycle detection extension) and T6.02
+(`coord task-open` cycle/depth check consumes this lib).
+**Driver:** User-resolved Decision 3 from Phase 6 resume
+prompt ("Phase 5's `lib/cycle_detection.sh` extends to handle
+task graph cycles (NOT a new file)").
+
+### Observed gap requiring change
+
+Plan §5 Phase 6 says "chain-depth + `task_graph` cycle
+detection" but does not specify:
+1. Where the algorithm lives (NEW file vs extension to
+   existing Phase 5 `lib/cycle_detection.sh`).
+2. The bipartite graph definition (session/task node types,
+   edge directions).
+3. The trigger location (CLI-time vs hook-time).
+4. Whether cycle detection escalates to Mediator or is a
+   CLI-only rejection (Decision 6 binding answers this).
+
+The user binds: extend the existing Phase 5 file (not a new
+file); CLI-time trigger; CLI-only rejection (no Mediator).
+
+### User-resolved decision
+
+#### 1. Algorithm location
+
+**Extend `src/lib/cycle_detection.sh`** with a NEW function
+`coord_cycle_detect_task_graph`. The existing
+`coord_cycle_detect` (bipartite session/file, Phase 5 wait
+queue cycle) is **unchanged**. Both functions live side-by-
+side in the same file.
+
+#### 2. Bipartite graph definition
+
+Nodes:
+- **Session nodes:** every active session in
+  `sessions[<sid>]` whose state is not `IDLE_CLOSED`.
+- **Task nodes:** every task in `locks[<file>].tasks[<i>]`
+  for any locked file.
+
+Edges:
+- `session → task`: session A holds lock on file F; task T
+  is in `locks[F].tasks[]`. Edge from A to T means "A's
+  release will trigger T."
+- `task → session`: task T has `opener: <sid_B>`. Edge from
+  T to B means "T's outcome notifies B."
+- `task → task` (chain via opener-of-opener): if task T1
+  has opener B, and B holds lock on file G, and task T2 is
+  in `locks[G].tasks[]`, then T1 → T2 captures the chain.
+  This is computed transitively from the session/task
+  edges; not stored as a separate edge slot.
+
+#### 3. Algorithm
+
+Iterative bipartite DFS (Bash 3.2 stack-compatible, mirrors
+Phase 5 `coord_cycle_detect` pattern from T5.05):
+- Stack-based DFS using parallel-indexed arrays (no
+  associative arrays per CLAUDE.md §A.5):
+  `stack_sid` / `stack_path` / `stack_depth` / `visited_arr`.
+- Visited set is the parallel `visited_arr` (linear-scan
+  membership; small N ≤ active session count). Mirrors the
+  exact pattern used by T5.05 `coord_cycle_detect`. (Earlier
+  draft proposed a process-scoped TSV file at
+  `.coord/state/.cycle_visit.$$`; superseded by the in-memory
+  array per T6.02 implementation, which mirrors T5.05's
+  proven `visited_arr` rather than introducing a new on-disk
+  artifact.)
+- Cycle found when DFS would step from `cur_sid`'s task back
+  to `start_sid` (the proposed-task originator). Cycle check
+  fires BEFORE depth check inside the inner loop body so
+  cycle-wins-over-depth combo cases return rc 2.
+- Chain depth: tracked as `stack_depth[i]` (1 = the proposed
+  edge `start_sid → task(target_file) → start_holder`);
+  incremented on each task hop. Rejected when > 3.
+
+Function signature (per T6.02 user binding 2026-04-27;
+supersedes the earlier flag-based + TSV-stdout draft):
+
+```bash
+coord_cycle_detect_task_graph <session_id> <target_file>
+# Returns:
+#   rc 0 — ok; proposed task is safe to persist
+#   rc 1 — chain depth exceeded (>3); stderr human-readable
+#          "Chain depth exceeded (max 3): A → B → C → D rejected"
+#   rc 2 — task cycle detected; stderr human-readable
+#          "Task cycle detected: A → B → A rejected"
+#   rc 3 — usage error (missing/empty arg); stderr usage line
+#
+# Trivial gates (rc 0 fast paths):
+#   - target_file not currently locked → no edge to add
+#   - locks[target_file].session == session_id → self-delegation
+```
+
+The CLI (`coord task-open`, T6.03 per the post-T6.01 P2
+reorder) dispatches on rc directly; stderr surfaces verbatim
+to the caller.
+
+> **+ UPDATED 2026-04-27 at T6.02 close** reflecting rc/stderr
+> contract supersession. Earlier draft of this section
+> specified a flag-based signature
+> (`--start-session/--start-file/--max-depth`) with TSV stdout
+> output (`ok\t...`, `cycle\t...`, `depth\t...`) and rc 0/1
+> only (caller-side TSV parse for verdict). User T6.02 binding
+> superseded with positional-arg + rc 0/1/2/3 + stderr
+> human-readable. Function header docblock at
+> `src/lib/cycle_detection.sh` notes the supersession; both
+> contracts reconcile cleanly via this PR-PHASE6-03 §3 update.
+> Mirrors Phase 5 T5.07 PR-PHASE5-05 §3-§6 inline-rewrite
+> precedent.
+
+#### 4. Trigger location
+
+`coord task-open` invokes
+`coord_cycle_detect_task_graph` BEFORE persistence to
+`locks[<file>].tasks[]`. Cycle/depth violation → CLI exit 1
++ stderr message; task is NOT persisted. Decision 6
+preserved (CLI-level rejection, no permissionDecision).
+
+#### 5. NO Mediator escalation
+
+Per Decision 6, task-graph cycle/depth violations are
+**CLI-level errors only**. No `cycle_detected` (or
+analogous) pending kind is written for task-graph cases —
+that pending kind is reserved for the Phase 5 wait-queue
+cycle scenario.
+
+#### 6. Schema additions
+
+`locks[<file>].tasks[<i>]` task record gains fields beyond
+Decision 2.13's `{file, instruction, created_at, prompt_id}`
+self_tasks baseline (note: locks[].tasks[] is a different
+slot from self_tasks):
+- `opener: <sid>` — session ID of the opener (B in plan
+  examples). Required for task → session edge construction.
+- `complexity: SIMPLE|MODERATE|COMPLEX` — caller-supplied
+  via --complexity per Q2. Validated by `coord task-open`.
+- `anchor: {search, window_lines}` — caller-supplied via
+  --anchor per Q1. Validated by `coord task-open`.
+- `task_id: <synthesized>` — `<sid_B>-task-<created_at_ms>-<random_4_hex>`,
+  format mirrors Q4 prompt_id synthesis.
+- `affected_lines_at_open: [start, end]` — captured from
+  anchor.window_lines parsed range. Used by task processor
+  (T6.04) for overlap check.
+
+These fields land via PR-PHASE6-05's full schema fragment.
+PR-PHASE6-03 only declares the cycle-detection-relevant
+fields (`opener`, `task_id`).
+
+### Implementation surface
+
+**Code:**
+- `src/lib/cycle_detection.sh` — add
+  `coord_cycle_detect_task_graph` function (~80-120 LOC
+  estimated; comparable to T5.05 `coord_cycle_detect`).
+- `src/bin/coord` — `coord task-open` invokes the new
+  function and dispatches stderr messages.
+
+**Tests (T6.07):**
+- bats: 12-18 scenarios across:
+  - Happy: linear chain depth 2 ok.
+  - Depth: chain depth 4 → reject "Chain depth exceeded
+    (3)".
+  - Cycle: A → B → A → reject "Task cycle detected".
+  - Boundary: depth exactly 3 → ok (boundary inclusive).
+  - Visited-set hygiene: process-scoped TSV cleaned on exit.
+  - Bash 3.2 compat: iterative DFS does not require
+    associative arrays.
+
+### Non-changes (deliberate)
+
+- `coord_cycle_detect` (Phase 5 wait queue) unchanged.
+- Phase 5 `cycle_detected` pending kind unchanged (Phase 5
+  scope only; not used by Phase 6 task graph).
+- `lib/cycle_detection.sh` retains its zero-permissionDecision
+  guard (Phase 5 invariant guard #13, carried forward as
+  Phase 6 invariant guard #13).
+
+### Acknowledgement
+
+DRAFT. Pending user approval at T6.01 close. Final merge into
+phase-6-signoff.md.
+
+---
+
+## PR-PHASE6-04 — Phase 6 architectural invariant: 17 guards + 2-location deny preserved (Decision 6)
+
+**Date:** 2026-04-27
+**Author:** Phase 6 builder (T6.01).
+**Status:** APPROVED 2026-04-27 at T6.01 close. Gates
+T6.08 (`phase6_invariant.bats` + delete `phase5_invariant.bats`).
+**Driver:** User-resolved Decision 6 from Phase 6 resume
+prompt ("Phase 6 PRESERVES the 2-location deny invariant
+through Phases 3+4+5+6").
+
+### Observed gap requiring change
+
+Phase 5 invariant test (`phase5_invariant.bats`) asserts 14
+guards (8 architectural + 6 bonus). Phase 6 introduces three
+NEW lib/CLI surfaces (task processor, self_tasks, task-open
+CLI subcommand) that all need bonus guards to ensure none
+emit `permissionDecision`. The user binds the new total to
+17 guards (8 architectural carry-forward + 9 bonus).
+Decision 6 also binds: chain depth, task graph cycles,
+ambiguous anchor, and toggle-disabled rejections are CLI-
+level errors (exit 1 + stderr), NOT
+`permissionDecision: deny`.
+
+### User-resolved decision
+
+#### Phase 6 architectural guards (8, all carry-forward)
+
+1. **2-location deny:** `permissionDecision: "deny"` appears
+   in EXACTLY two architectural locations:
+   - `pre_tool_use_write.sh` lock-held-by-other branch
+     (Phase 2).
+   - Any hook reading `.coord/mediator/lockdown.json` with
+     `active=true` via `lib/lockdown.sh::coord_lockdown_emit_deny`
+     (Phase 3 — Mediator lockdown verdicts route here).
+2. **Watchdog 3-signal conservative model:** `lib/watchdog.sh`
+   calls `ps -p` for Signal 1 (PID liveness); Signals 2/3
+   alone cannot promote to alive (PR-PHASE3-02 §A).
+3-6. **Phase 4 carry-forward** (Mediator dispatch kind-
+   agnostic, lockdown-active gate, validator pipeline fail-
+   open, NEVER deny on stale read alone).
+7. **Mediator dispatch kind-agnostic:** `lib/mediator_spawn.sh`,
+   `lib/mediator_pending.sh`, `lib/verdict_apply.sh` contain
+   ZERO `case ... <kind>)` branches in production code
+   (PR-PHASE5-04).
+8. **Phase 5 carry-forward** (cycle detection routes through
+   Mediator pending pipeline; lockdown is the deny mechanism
+   if scope is global — only when `cycle_detected` pending
+   kind, NOT for task-graph cycles which are CLI-only).
+
+#### Phase 6 bonus guards (9 total)
+
+Carry-forward Phase 4-5 (6 bonus):
+9.  `lib/validator_spawn.sh` — zero `permissionDecision`.
+10. `lib/validator_prefilter.sh` — zero `permissionDecision`.
+11. `lib/validator_cache.sh` — zero `permissionDecision`.
+12. `lib/wait_queue.sh` — zero `permissionDecision`.
+13. `lib/cycle_detection.sh` — zero `permissionDecision`
+    (covers BOTH `coord_cycle_detect` Phase 5 AND
+    `coord_cycle_detect_task_graph` Phase 6 per PR-PHASE6-03).
+14. `lib/wait_backend.sh` — zero `permissionDecision`.
+
+NEW Phase 6 (3 bonus):
+15. `lib/task_processor.sh` (NEW T6.04) — zero
+    `permissionDecision`. The post_tool_use_write task
+    processor is mechanical patch-application + outcome-
+    write; deny is not a processor concern.
+16. `lib/self_tasks.sh` (NEW T6.03) — zero
+    `permissionDecision`. Self-task management is record-
+    keeping; deny happens only at the existing pre_tool_use_
+    write lock-held branch (architectural guard 1).
+17. `coord task-open` + `coord self-delegate` CLI subcommands
+    in `src/bin/coord` — zero `permissionDecision` in those
+    code paths. CLI-level rejection (chain depth / cycle /
+    anchor uniqueness / toggle disabled) is exit 1 + stderr
+    only, NOT permissionDecision.
+
+**Total: 8 architectural + 9 bonus = 17 guards.**
+
+#### Static-grep gate definition
+
+`phase6_invariant.bats` runs grep against the
+enumerated file set. Test fails if:
+- (a) any code path outside the two architectural locations
+  emits `permissionDecision`, OR
+- (b) Mediator dispatch grows kind-branching, OR
+- (c) Watchdog regresses to non-Signal-1-mandatory alive
+  verdicts, OR
+- (d) any of the 9 bonus-guarded files grows a
+  `permissionDecision` string.
+
+Each guard maps to one bats test case for clarity (17
+test cases minimum). May add aggregate guards (e.g.,
+"enumerate all `lib/*.sh` files NOT in allowlist; grep zero
+`permissionDecision` strings") as a defense-in-depth
+catch-all.
+
+#### Supersession
+
+`phase5_invariant.bats` is **deleted** at T6.08
+(superseded by `phase6_invariant.bats`). Mirrors Phase 4 →
+5 transition pattern from T5.07 (which deleted
+`phase4_invariant.bats`). Future phases continue rolling
+supersession.
+
+#### CLI-level rejection contract (Decision 6 detail)
+
+These four `coord task-open` rejection paths are
+**informational stderr + exit 1**, NOT `permissionDecision`:
+
+```
+$ coord task-open --file foo.ts --complexity SIMPLE \
+    --anchor '{"search":"x","window_lines":"100-110"}' \
+    --instruction '...'
+Error: anchor matches 0 candidates (expected 1)
+$ echo $?
+1
+```
+
+Wording (locked in PR-PHASE6-05):
+- Anchor not found: "Error: anchor not found in <file>"
+- Ambiguous anchor: "Error: anchor matches N candidates
+  (expected 1)"
+- Chain depth: "Error: Chain depth exceeded (3): A → B → C
+  → D rejected"
+- Task graph cycle: "Error: Task cycle detected: A → B → A
+  rejected"
+- Toggle disabled: "Error: task_delegation disabled per
+  repo (config.json task_delegation: false)"
+
+CONFLICT outcome (anchor still resolves but A's edit
+affected the anchor's lines per PR-PHASE6-05's
+affected_lines overlap algorithm) is a **task outcome**,
+not a deny. Written to task record + notification, not a
+hook deny.
+
+### Implementation surface
+
+**Tests (T6.08):**
+- 17 guard test cases in `src/tests/integration/phase6_
+  invariant.bats`.
+- Aggregate enumeration test (defense-in-depth).
+- DELETE `src/tests/integration/phase5_invariant.bats`.
+
+**Documentation:**
+- `CLAUDE.md` §C.4a Phase 6 invariant section (T6.11
+  staging): rewrites Phase 5 14-guard description to Phase
+  6 17-guard structure; documents 3 NEW bonus guards;
+  preserves 2-location deny invariant explicitly.
+
+### Non-changes (deliberate)
+
+- All 8 architectural guards UNCHANGED from Phase 5.
+- 6 bonus guards (validator_spawn / validator_prefilter /
+  validator_cache / wait_queue / cycle_detection /
+  wait_backend) carry forward identically.
+- No new architectural deny location.
+- No new pending kind (`cycle_detected` reserved for Phase 5
+  wait-queue cycle; task-graph cycles are CLI-only).
+
+### Acknowledgement
+
+DRAFT. Pending user approval at T6.01 close. Final merge into
+CLAUDE.md §C.4a folds into phase-6-signoff.md.
+
+---
+
+## PR-PHASE6-05 — Plan §5 Phase 6 implementation contract: CLI specs + processor + reminder + block-once + toggle (alignment Q1-Q5)
+
+**Date:** 2026-04-27
+**Author:** Phase 6 builder (T6.01).
+**Status:** APPROVED 2026-04-27 at T6.01 close (with C+D
+inline edits applied per ambiguity dispositions). Gates
+T6.02 (`coord task-open`), T6.03 (`coord self-delegate` +
+`lib/self_tasks.sh`), T6.04 (`post_tool_use_write` task
+processor + `lib/task_processor.sh`), T6.09 (banner stub
+removal + `phase6_e2e.bats`).
+**Driver:** Plan §5 Phase 6 (lines 1005–1027) scope baseline
++ Decision 2.13 (lines 108–110) self-delegation mechanism +
+Decision 2.14 (lines 112–114) wait semantics + user
+alignment answers Q1-Q5 (anchor format, complexity trigger,
+affected_lines algorithm, prompt_id source, mock-Claude
+contract).
+
+### Observed gap requiring change
+
+Plan §5 Phase 6 lists scope items at high level but the
+following implementation details are unspecified and gate
+T6.02-T6.04 + T6.09:
+1. Anchor JSON shape and uniqueness algorithm.
+2. `--complexity` flag validation vs Claude-spawned
+   classification.
+3. `affected_lines` overlap algorithm (line-range vs token-
+   level).
+4. `self_tasks` schema `prompt_id` source.
+5. Mock Claude binary contract for task-execution mode.
+6. Lock-held-by-other deny banner production wording (toggle
+   true vs false).
+7. Task record schema (full JSON shape persisted in
+   `locks[<file>].tasks[]`).
+8. `TASK_OUTCOME` notification payload format to opener.
+
+User alignment answers Q1-Q5 resolve items 1-5. PR-PHASE6-05
+locks all 8 in one production-contract document.
+
+### User-resolved decision
+
+#### 1. Anchor format (Q1)
+
+```json
+--anchor '{"search":"<exact_string>","window_lines":"<start>-<end>"}'
+```
+
+- `search`: case-sensitive, whitespace-significant exact-
+  string match against PRE-EDIT file content.
+- `window_lines`: range format `"start-end"` (inclusive,
+  1-indexed line numbers; e.g., `"42-67"`). NOT a count.
+- Uniqueness algorithm: `grep -F -c "<search>" <file>`:
+  - 0 matches → exit 1, stderr "Error: anchor not found in
+    `<file>`".
+  - 1 match → unique, proceed.
+  - ≥2 matches → exit 1, stderr "Error: anchor matches N
+    candidates (expected 1)".
+- Anchor capture timing: PRE-EDIT (at `coord task-open`
+  invocation, before A starts editing).
+
+#### 2. `--complexity` trigger (Q2)
+
+CALLER-SUPPLIED. `coord task-open --complexity
+SIMPLE|MODERATE|COMPLEX`:
+- Validate against enum.
+- Reject invalid values: exit 1, stderr "Error: invalid
+  complexity (must be SIMPLE/MODERATE/COMPLEX)".
+- Persist in `locks[<file>].tasks[<i>].complexity`.
+
+NO Claude spawn for classification in Phase 6. Auto-
+classification deferred to Phase 7 (Decision 5 binding).
+
+Task processor (T6.04) reads `.complexity` as **context
+only** when spawning mock Claude for task execution; no
+behavior branches in Phase 6.
+
+#### 3. `affected_lines` overlap algorithm (Q3)
+
+CLOSED-INTERVAL LINE-RANGE INTERSECTION:
+
+```bash
+overlap_check() {
+  local task_start=$1 task_end=$2 edit_start=$3 edit_end=$4
+  if [ "$task_end" -ge "$edit_start" ] \
+      && [ "$edit_end" -ge "$task_start" ]; then
+    return 0  # overlap → CONFLICT outcome
+  fi
+  return 1  # no overlap → task PROCEEDS
+}
+```
+
+- Task range: parsed from
+  `locks[<file>].tasks[<i>].anchor.window_lines`.
+- Edit range: from PostToolUse hook payload (`tool_response`
+  contains start_line/end_line for Write/Edit tools).
+- Overlap → task outcome `CONFLICT` (notification to opener
+  with diff for manual review).
+- No overlap → task processor proceeds with mock-Claude
+  spawn; outcome from mock JSON.
+
+Conservative algorithm (false positives possible, false
+negatives avoided). Phase 7 may add token-level diff
+awareness via real-Claude semantic verification.
+
+#### 4. `prompt_id` source for self_tasks (Q4)
+
+SYNTHESIZED:
+
+```
+prompt_id = "<sid>-self-<created_at_ms>-<random_4_hex>"
+```
+
+- `<sid>`: session ID at `coord self-delegate` invocation.
+- `self`: literal string (origin marker).
+- `<created_at_ms>`: Unix epoch milliseconds (Phase 5
+  pattern).
+- `<random_4_hex>`: 4 hex chars from `openssl rand -hex 2`,
+  fallback to `printf '%04x' $((RANDOM*RANDOM)) | tail -c4`
+  if openssl unavailable (Bash 3.2 portable).
+
+Same synthesis pattern reused for task records:
+
+```
+task_id = "<sid_B>-task-<created_at_ms>-<random_4_hex>"
+```
+
+#### 5. Mock Claude binary contract (Q5)
+
+**Env-var name:** `COORD_MOCK_CLAUDE_TASK_PATCH`
+
+**JSON shape:**
+
+```json
+{
+  "status": "COMPLETED|CONFLICT|SKIPPED",
+  "diff": "<unified diff text, may be empty>",
+  "affected_lines": [<start>, <end>],
+  "rationale": "<1-3 sentence human-readable reason>"
+}
+```
+
+**Field contracts:**
+- `status` enum validated by task processor; invalid →
+  SKIPPED + log warning.
+- `diff`: unified diff (git-compatible). Empty string OK
+  for SKIPPED.
+- `affected_lines`: closed-interval `[start, end]`, both
+  inclusive. `[0, 0]` allowed for SKIPPED.
+- `rationale`: 1-3 sentence string. Embedded in TASK_
+  OUTCOME notification.
+
+**Mock binary distribution: per-test inline fake binary
+pattern** (Phase 4-5 carry-forward; reference:
+`src/tests/unit/validator_spawn.bats:52-99` +
+`src/tests/unit/mediator_spawn.bats` analogous setup).
+T6.05 implementation honors §5's env-var contract via
+direct `COORD_MOCK_CLAUDE_TASK_PATCH` read inside
+`coord_task_processor_spawn_claude` (`src/lib/task_processor.sh`)
+— no shared `src/lib/mock_claude.sh` helper file exists or is
+created in Phase 6. Tests exercise the contract by exporting
+the env-var to the desired JSON before invoking the
+processor; the function returns the env-var value verbatim
+(after jq validation of the status enum + affected_lines
+shape). When the env-var is unset, a deterministic default
+fires:
+
+```bash
+'{"status":"COMPLETED","diff":"","affected_lines":[0,0],"rationale":"mock default"}'
+```
+
+(literal string returned by `coord_task_processor_spawn_claude`
+when `COORD_MOCK_CLAUDE_TASK_PATCH` is empty/unset).
+
+Phase 7 real-Claude integration will replace the env-var
+read with `claude -p` invocation against the same JSON
+contract; the env-var path remains as a test override for
+deterministic CI fixtures. If a shared mock-helper file
+becomes desirable for cross-test consistency at that point,
+introduce as `src/tests/helpers/mock_claude.sh` (NEW, NOT
+"extend") and migrate Phase 4/5 inline fakes piecewise.
+
+> **+ UPDATED 2026-04-27 at T6.05 close** reflecting actual
+> Phase 4-5 mock pattern. Earlier draft of this section
+> assumed `src/lib/mock_claude.sh` existed as a shared
+> Phase 4-5 helper and described a hypothetical case-branch
+> extension. The file does not exist; Phase 4-5 mock pattern
+> is per-test inline fake binaries written to `$TMP/bin/claude`
+> via `cat <<...` heredocs. T6.05 implementation deferred
+> the shared-helper question to Phase 7 by using the
+> env-var path exclusively. Mirrors Phase 6 T6.02
+> PR-PHASE6-03 §3 supersession + T6.01 ambiguity C/D §8
+> inline-edit precedents.
+
+#### 6. Lock-held-by-other deny banner (toggle true vs false)
+
+`pre_tool_use_write.sh` lock-held-by-other branch (the
+EXISTING deny location; Decision 6 preserved). Banner
+production wording at T6.09 stub-removal:
+
+**Toggle TRUE (default):**
+
+> File `<file>` is locked by session `<holder_id>` since
+> `<ts>` (~`<mins>` min). Options:
+> (a) Delegate a SIMPLE/MODERATE task: `Bash: coord task-open
+> --file <file> --complexity SIMPLE --anchor '{"search":"…","window_lines":"…"}'
+> --instruction '…' [--rationale '…']`.
+> (b) Self-delegate (do other work, return later): `Bash:
+> coord self-delegate --file <file> --instruction '…'`.
+> (c) Passively wait: `Bash: coord wait <file> --timeout
+> 570` (blocks until unlocked or timeout).
+> Pick (a) for small self-contained edits; (b) if you have
+> other productive work; (c) only if the change is too
+> complex to delegate AND you have no other work.
+
+**Toggle FALSE (config.json `task_delegation: false`):**
+
+> File `<file>` is locked by session `<holder_id>` since
+> `<ts>` (~`<mins>` min). Options (note: task delegation is
+> disabled in this repo):
+> (b) Self-delegate (do other work, return later): `Bash:
+> coord self-delegate --file <file> --instruction '…'`.
+> (c) Passively wait: `Bash: coord wait <file> --timeout
+> 570` (blocks until unlocked or timeout).
+> Pick (b) if you have other productive work; (c) only if
+> the change is too complex AND you have no other work.
+
+`coord task-open` invoked under toggle FALSE → exit 1 +
+stderr "Error: task_delegation disabled per repo
+(config.json task_delegation: false)".
+
+#### 7. Full task record schema (locks[<file>].tasks[<i>])
+
+```json
+{
+  "task_id": "<sid_B>-task-<created_at_ms>-<random_4_hex>",
+  "opener": "<sid_B>",
+  "file": "/absolute/path/to/file",
+  "instruction": "human-readable task description",
+  "complexity": "SIMPLE|MODERATE|COMPLEX",
+  "anchor": {
+    "search": "<exact_string>",
+    "window_lines": "<start>-<end>"
+  },
+  "rationale": "<optional caller-supplied; nullable>",
+  "created_at": "<ISO8601 with ms>",
+  "affected_lines_at_open": [<start>, <end>],
+  "status": "PENDING|COMPLETED|CONFLICT|SKIPPED",
+  "outcome_diff": "<filled by processor on completion>",
+  "outcome_rationale": "<filled by processor on completion>",
+  "outcome_at": "<ISO8601 with ms; null until completion>"
+}
+```
+
+self_tasks slot is a different schema; uses Decision 2.13
+shape verbatim:
+
+```json
+{
+  "self_tasks": {
+    "<sid>": [
+      {
+        "file": "/absolute/path/to/file",
+        "instruction": "human-readable task description",
+        "created_at": "<ISO8601 with ms>",
+        "prompt_id": "<sid>-self-<created_at_ms>-<random_4_hex>"
+      }
+    ]
+  }
+}
+```
+
+#### 8. TASK_OUTCOME notification payload
+
+When the task processor writes an outcome (T6.05), it
+appends the per-task banner to opener B via the canonical
+`.notifications[<opener_sid>][<file>]` slot (the existing
+Phase 1+2 array-of-strings notification queue, consumed by
+`pre_tool_use_read.sh` + `pre_tool_use_any.sh` on B's next
+PreToolUse). The slot key is `<opener_sid>` (B's session
+id) and the inner key is `<file>` (the target the task
+was opened on); the value is an array of notification
+strings appended in arrival order.
+
+Banner string format (one entry per archived task; appended
+to `.notifications[<opener_sid>][<file>]`):
+
+> Task `<task_id>` on `<file>` completed by session
+> `<holder_session>`. Status: `<COMPLETED|CONFLICT|SKIPPED>`.
+> Rationale: `<rationale>`. Diff:
+> ```
+> <truncated diff>
+> ```
+
+(Banner template uses `<holder_session>` placeholder
+matching the JSON payload field name; T6.05 substitutes
+via field-name match. Ambiguity C disposition at T6.01
+close.)
+
+Audit-trail event payload (`TASK_OUTCOME_PERSISTED` in
+`events.jsonl`; structured object with full untruncated
+diff per ambiguity D + below):
+
+```json
+{
+  "kind": "TASK_OUTCOME_PERSISTED",
+  "file": "<file>",
+  "task_id": "<task_id>",
+  "opener": "<opener_sid>",
+  "holder_session": "<sid_A>",
+  "status": "COMPLETED|CONFLICT|SKIPPED",
+  "rationale": "<from mock-Claude or processor verdict>",
+  "diff_full": "<unified diff; UNTRUNCATED>",
+  "completed_at": "<ISO8601 with ms>"
+}
+```
+
+The notification banner string is inherently lossy (4KB
+diff cap + structure-flattened); the
+`TASK_OUTCOME_PERSISTED` event is the canonical audit
+record.
+
+> **+ UPDATED 2026-04-27 at T6.05 close** reflecting
+> production slot name (Phase 1+2 canonical). Earlier
+> draft of this section named the slot
+> `pending_notifications[<sid_B>]`. The actual canonical
+> schema slot used by the existing notify_waiters.sh +
+> state_query.sh + pre_tool_use_*.sh consumers is
+> `.notifications[<sid>][<path>]` — keyed by session AND
+> path, value array of strings. T6.05 implementation
+> appends to this slot directly. The structured JSON
+> payload originally listed inline at §8 is the
+> `TASK_OUTCOME_PERSISTED` event-payload shape (full diff
+> in audit), not the notification entry shape (banner
+> string in `.notifications`). Two payloads, two
+> destinations; this update separates them explicitly.
+> Mirrors Phase 6 T6.02 PR-PHASE6-03 §3 supersession +
+> T6.01 ambiguity C/D §8 inline-edit precedents.
+
+Diff truncation: 4KB byte-cap with UTF-8 codepoint-boundary
+safe truncation. Recommended pattern: `head -c 4096 |
+iconv -f UTF-8 -t UTF-8//IGNORE` to drop invalid sequences
+spanning the cut boundary. Alternative perl-based
+codepoint-aware truncator (decode UTF-8 → truncate at
+character count → re-encode) documented in §A.13 if iconv
+unavailable on host. POSIX portability note: iconv ships in
+base macOS + Linux (POSIX-mandated); fallback only relevant
+to extreme minimal containers. Full diff persists in
+events.jsonl `TASK_OUTCOME_PERSISTED` event payload (no cap)
+for later inspection. (Ambiguity D disposition at T6.01
+close.)
+
+### Implementation surface (cross-task)
+
+**Code:**
+- `src/bin/coord` — `coord task-open` subcommand (T6.02);
+  `coord self-delegate` subcommand (T6.03).
+- `src/lib/self_tasks.sh` (NEW; T6.03) — 5 functions: open,
+  list, list_unresolved (used by reminder + Stop),
+  archive_skipped, cleanup_session.
+- `src/lib/task_processor.sh` (NEW; T6.04) — 3-4 functions:
+  process_queue, check_affected_lines, spawn_claude_for_task
+  (mock-binary in Phase 6), write_outcome.
+- `src/hooks/post_tool_use_write.sh` — extend with task
+  processor invocation on lock release (T6.04).
+- `src/hooks/pre_tool_use_any.sh` — extend with self-task
+  reminder injection (T6.05) + F-015 banner (T6.05;
+  PR-PHASE6-01).
+- `src/hooks/pre_tool_use_write.sh` — banner production
+  wording stub removal (T6.09).
+- `src/hooks/stop.sh` — extend with self-task block-once-
+  then-allow (T6.06; PR-PHASE6-02).
+- `src/lib/atomic_write.sh` — schema template extension
+  (locks[].tasks[] richer shape; self_tasks slot already
+  Decision 2.13 baseline).
+
+**Tests:**
+- T6.02 (coord task-open): 15-20 bats.
+- T6.03 (coord self-delegate + self_tasks): 12-18 bats.
+- T6.04 (task processor): 15-20 bats.
+- T6.05 (reminder + F-015 banner): 10+ bats.
+- T6.06 (Stop block-once): 8-12 bats.
+- T6.09 (e2e + banner stub removal): 12-18 integration bats
+  in `phase6_e2e.bats`.
+- T6.10 (ship-gate): 5 fixture scenarios per plan §5 Done-
+  when (01_task_open_simple_happy_path,
+  02_anchor_ambiguous_conflict,
+  03_chain_depth_cycle_rejected,
+  04_self_delegation_defer_continue_return,
+  05_task_delegation_toggle_disabled).
+
+**Cumulative ship-gate fixtures at Phase 6 close** (per Q6
+preserve-precedent): 19 fixtures across 5 dirs
+(two_session_warn 2 + phase3_ship_gate 4 + phase4_ship_gate
+4 + phase5_ship_gate 4 + phase6_ship_gate 5).
+
+### Schema bump consideration
+
+Phase 6 adds fields to `locks[<file>].tasks[<i>]` and
+extends `self_tasks` schema (already Decision 2.13
+baseline; only `prompt_id` synthesis is new). User binding
+needed at T6.01 close on whether `schema_version` bumps to
+`1.1` (additive-only) or stays at `1.0`. Phase 4-5
+precedent: stayed at 1.0 because additions were additive.
+Default proposal: stay at `1.0` (additive). User may
+override.
+
+### Non-changes (deliberate)
+
+- 2-location deny invariant unchanged (Decision 6).
+- `pending_notifications` mechanism reused for TASK_OUTCOME;
+  no new notification queue.
+- mock_claude.sh existing modes unchanged; task-patch is
+  additive.
+- Decision 2.13's self_tasks schema kept intact (file,
+  instruction, created_at, prompt_id); prompt_id synthesis
+  is the only Phase 6 specification.
+
+### Acknowledgement
+
+DRAFT. Pending user approval at T6.01 close. Final merge into
+IMPLEMENTATION_PLAN.md / CLAUDE.md folds into
+phase-6-signoff.md.
+
+---
+
 *Future entries append below.*
 
 
