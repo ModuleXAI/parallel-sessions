@@ -39,6 +39,14 @@
 # timestamp on each reminder emission. Throttle window: 5
 # minutes (300s) — coord_self_task_check_reminder_due returns
 # rc 0 only when null OR more than 5 minutes have elapsed.
+#
+# T6.07 additive field: stop_block_count — integer, default 0.
+# Incremented by stop.sh when a Stop attempt encounters this
+# self-task as unresolved (file unlocked) per Decision 2.13.
+# stop_block_count == 0 → first Stop blocks with reminder.
+# stop_block_count >= 1 → second Stop allows + archives the
+# task as SKIPPED with reason=stop_second_attempt.
+#
 # Schema additive; schema_version stays at 1.0 per user T6.04
 # binding (Phase 6 additive-only).
 #
@@ -212,7 +220,8 @@ coord_self_task_open() {
 
     # Append new entry. Field order per Decision 2.13 +
     # T6.06 additive last_reminded_at (null until first
-    # reminder).
+    # reminder) + T6.07 additive stop_block_count
+    # (default 0; incremented by stop.sh on each block).
     if ! coord_atomic_edit "$state" '
           .self_tasks[$s] = (.self_tasks[$s] // [])
           | .self_tasks[$s] += [{
@@ -220,7 +229,8 @@ coord_self_task_open() {
               instruction:      $ins,
               created_at:       $cat,
               prompt_id:        $pid,
-              last_reminded_at: null
+              last_reminded_at: null,
+              stop_block_count: 0
             }]
         ' \
         --arg s   "$sid" \
@@ -611,6 +621,114 @@ coord_self_task_record_reminder() {
   rm -f "$out_tmp"
   case "$mode" in
     recorded) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# ---------------------------------------------------------------
+# Phase 6 T6.07 — Stop block-count helper
+# ---------------------------------------------------------------
+
+# coord_self_task_increment_stop_block <sid> <prompt_id>
+#   Atomically increment self_tasks[<sid>][?(.prompt_id ==
+#   <pid>)].stop_block_count by 1. Used by stop.sh on the first
+#   Stop attempt encountering an unresolved self-task; the
+#   incremented count is what stop.sh reads on the SECOND Stop
+#   attempt to know "we already blocked this once → allow +
+#   archive SKIPPED" per Decision 2.13.
+#
+#   Stdout: new count value (post-increment), e.g. "1" / "2".
+#   Returns: 0 success
+#            1 args missing / atomic_edit failure / prompt_id
+#              not found
+#            2 flock timeout
+coord_self_task_increment_stop_block() {
+  local sid="$1" prompt_id="$2"
+  if [ -z "$sid" ] || [ -z "$prompt_id" ]; then
+    return 1
+  fi
+  if [ -z "${COORD_DIR:-}" ] || [ ! -d "${COORD_DIR}" ]; then
+    return 1
+  fi
+  if ! _coord_st_ensure_dirs; then
+    return 1
+  fi
+
+  local state lock_path timeout
+  state=$(_coord_st_state) || return 1
+  lock_path=$(_coord_st_lock_path "$sid")
+  timeout=$(_coord_st_flock_timeout)
+
+  local out_tmp
+  out_tmp="${COORD_DIR}/self_tasks/.stopblock.$$.$(_coord_st_sanitize "$sid").out"
+  : >"$out_tmp"
+
+  (
+    flock -x -w "$timeout" 9 || exit 2
+
+    # Confirm the prompt_id exists.
+    local present
+    present=$(jq -r --arg s "$sid" --arg pid "$prompt_id" \
+      '(.self_tasks[$s] // []) | map(select(.prompt_id == $pid)) | length' \
+      "$state" 2>/dev/null) || present=0
+    case "$present" in
+      ''|*[!0-9]*) present=0 ;;
+    esac
+    if [ "$present" = "0" ]; then
+      printf 'not_found\n' >"$out_tmp"
+      exit 0
+    fi
+
+    # Atomic increment: |= map(if pid match then add 1 else
+    # passthrough). Coalesce missing field to 0 before adding.
+    if ! coord_atomic_edit "$state" '
+          .self_tasks[$s] = (.self_tasks[$s] // [])
+          | .self_tasks[$s] |= map(
+              if .prompt_id == $pid
+              then .stop_block_count = (((.stop_block_count // 0)) + 1)
+              else .
+              end
+            )
+        ' \
+        --arg s "$sid" --arg pid "$prompt_id"; then
+      printf 'atomic_fail\n' >"$out_tmp"
+      exit 0
+    fi
+
+    # Read the new count for stdout return.
+    local new_count
+    new_count=$(jq -r --arg s "$sid" --arg pid "$prompt_id" \
+      '(.self_tasks[$s] // [])
+       | map(select(.prompt_id == $pid))
+       | (first.stop_block_count // 0)' \
+      "$state" 2>/dev/null) || new_count=0
+    case "$new_count" in
+      ''|*[!0-9]*) new_count=0 ;;
+    esac
+    printf 'incremented\t%s\n' "$new_count" >"$out_tmp"
+    exit 0
+  ) 9>"$lock_path"
+  local rc=$?
+  if [ "$rc" -ne 0 ]; then
+    rm -f "$out_tmp"
+    return "$rc"
+  fi
+
+  local out mode count
+  out=$(cat "$out_tmp" 2>/dev/null || printf '')
+  rm -f "$out_tmp"
+  mode=$(printf '%s' "$out" | awk -F'\t' 'NR==1{print $1}')
+  count=$(printf '%s' "$out" | awk -F'\t' 'NR==1{print $2}')
+
+  case "$mode" in
+    incremented)
+      coord_log_event kind=SELF_TASK_STOP_BLOCKED \
+        session="$sid" prompt_id="$prompt_id" \
+        stop_block_count="$count" \
+        2>/dev/null || true
+      printf '%s\n' "$count"
+      return 0
+      ;;
     *) return 1 ;;
   esac
 }

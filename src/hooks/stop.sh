@@ -46,6 +46,8 @@ LIB_DIR="$(cd "$HOOK_DIR/../lib" && pwd)"
 . "$LIB_DIR/notify_waiters.sh"
 # shellcheck disable=SC1091
 . "$LIB_DIR/lockdown.sh"
+# shellcheck disable=SC1091
+[ -f "$LIB_DIR/self_tasks.sh" ] && . "$LIB_DIR/self_tasks.sh"
 # T5.04 / PR-PHASE5-02 §5: notify_waiters' 4-tier diff_summary chain.
 # shellcheck disable=SC1091
 [ -f "$LIB_DIR/hash.sh" ] && . "$LIB_DIR/hash.sh"
@@ -114,6 +116,105 @@ STATE="$COORD_DIR/sessions.json"
 # parse fail.
 if coord_lockdown_check && coord_lockdown_emit_deny "Stop"; then
   exit 0
+fi
+
+# Phase 6 T6.07 self-task block-once-then-allow per PR-PHASE6-02 +
+# Decision 2.13. Decision contract:
+#   "On `Stop`, unresolved self-tasks trigger `decision: 'block'`
+#    once with a reminder; second `Stop` lets the session end and
+#    archives the self-task as SKIPPED."
+# "Unresolved" semantic per PR-PHASE6-02 = file currently NOT held
+# by any peer (file is unlocked OR self-held; B could acquire now).
+# coord_self_task_check_unlocked returns the unresolved subset.
+#
+# Per-task stop_block_count discriminates first-Stop (block) vs
+# second-Stop (allow + archive SKIPPED). Tasks within the same Stop
+# attempt that haven't been blocked before (count==0) trigger the
+# block; tasks whose count >= 1 from a prior Stop are archived
+# SKIPPED on this attempt.
+#
+# CRITICAL: this branch emits `decision: "block"` (Stop hook's
+# permission grammar — distinct from `permissionDecision: "deny"`
+# which the Phase 3+4+5+6 invariant restricts to two architectural
+# locations). Decision 2.13 explicitly authorizes `decision: "block"`
+# at stop.sh; the 2-location deny invariant remains unchanged.
+ST_TO_BLOCK=""    # newline-separated "<file>\t<instr>\t<pid>" for Stop #1
+ST_TO_ARCHIVE="" # newline-separated "<pid>" for Stop #2
+ST_BLOCK_COUNT=0
+ST_ARCHIVE_COUNT=0
+if command -v coord_self_task_check_unlocked >/dev/null 2>&1; then
+  ST_UNLOCKED=$(coord_self_task_check_unlocked "$SESSION_ID" 2>/dev/null || printf '[]')
+  ST_LEN=$(printf '%s' "$ST_UNLOCKED" | jq -r 'length' 2>/dev/null || printf '0')
+  case "$ST_LEN" in ''|*[!0-9]*) ST_LEN=0 ;; esac
+  ST_IDX=0
+  while [ "$ST_IDX" -lt "$ST_LEN" ]; do
+    ST_TASK=$(printf '%s' "$ST_UNLOCKED" | jq -c --argjson i "$ST_IDX" '.[$i]' 2>/dev/null)
+    ST_PID=$(printf '%s' "$ST_TASK" | jq -r '.prompt_id' 2>/dev/null)
+    ST_FILE=$(printf '%s' "$ST_TASK" | jq -r '.file' 2>/dev/null)
+    ST_INSTR=$(printf '%s' "$ST_TASK" | jq -r '.instruction' 2>/dev/null)
+    ST_BC=$(printf '%s' "$ST_TASK" | jq -r '.stop_block_count // 0' 2>/dev/null)
+    case "$ST_BC" in ''|*[!0-9]*) ST_BC=0 ;; esac
+    if [ "$ST_BC" = "0" ]; then
+      ST_TO_BLOCK="${ST_TO_BLOCK:+$ST_TO_BLOCK$'\n'}${ST_FILE}"$'\t'"${ST_INSTR}"$'\t'"${ST_PID}"
+      ST_BLOCK_COUNT=$((ST_BLOCK_COUNT + 1))
+    else
+      ST_TO_ARCHIVE="${ST_TO_ARCHIVE:+$ST_TO_ARCHIVE$'\n'}${ST_PID}"
+      ST_ARCHIVE_COUNT=$((ST_ARCHIVE_COUNT + 1))
+    fi
+    ST_IDX=$((ST_IDX + 1))
+  done
+fi
+
+# Stop #1 path: at least one task with stop_block_count==0 → block
+# the Stop with a reminder enumerating the unresolved tasks. Increment
+# stop_block_count for each blocking task so the next Stop attempt
+# falls into the archive branch.
+if [ "$ST_BLOCK_COUNT" -gt 0 ]; then
+  # Build the reminder text.
+  ST_LIST=""
+  ST_OLD_IFS="$IFS"
+  IFS='
+'
+  set -- $ST_TO_BLOCK
+  IFS="$ST_OLD_IFS"
+  for entry in "$@"; do
+    [ -z "$entry" ] && continue
+    f=$(printf '%s' "$entry" | awk -F'\t' '{print $1}')
+    inst=$(printf '%s' "$entry" | awk -F'\t' '{print $2}')
+    pid=$(printf '%s' "$entry" | awk -F'\t' '{print $3}')
+    ST_LIST="${ST_LIST:+$ST_LIST$'\n'}  - ${f} :: ${inst}"
+    coord_self_task_increment_stop_block "$SESSION_ID" "$pid" >/dev/null 2>&1 || true
+  done
+  ST_REASON=$(printf 'Stop blocked: %s unresolved self-task(s) with file(s) now free for action.\n%s\nIssue Stop again to skip these tasks (will archive as SKIPPED), or `coord self-delegate` next iteration after addressing them.' \
+    "$ST_BLOCK_COUNT" "$ST_LIST")
+  jq -nc --arg reason "$ST_REASON" '{decision: "block", reason: $reason}'
+  coord_log_event kind=STOP_HOOK_INVOKED source=stop \
+    blocked_count="$ST_BLOCK_COUNT" archived_count=0 \
+    decision=block 2>/dev/null || true
+  exit 0
+fi
+
+# Stop #2 path (or no unresolved tasks at all): if any tasks were
+# previously blocked (count >= 1) and remain unresolved at this
+# Stop attempt, archive them as SKIPPED. Then proceed to lock
+# release as the existing Phase 2 path expects.
+if [ "$ST_ARCHIVE_COUNT" -gt 0 ]; then
+  ST_OLD_IFS="$IFS"
+  IFS='
+'
+  set -- $ST_TO_ARCHIVE
+  IFS="$ST_OLD_IFS"
+  for pid in "$@"; do
+    [ -z "$pid" ] && continue
+    coord_self_task_archive "$SESSION_ID" "$pid" "stop_second_attempt" \
+      >/dev/null 2>&1 || true
+  done
+fi
+
+if [ "$ST_BLOCK_COUNT" -gt 0 ] || [ "$ST_ARCHIVE_COUNT" -gt 0 ]; then
+  coord_log_event kind=STOP_HOOK_INVOKED source=stop \
+    blocked_count="$ST_BLOCK_COUNT" archived_count="$ST_ARCHIVE_COUNT" \
+    decision=allow 2>/dev/null || true
 fi
 
 # Collect all locks held by this session, with acquired_at + verdict_ts,
