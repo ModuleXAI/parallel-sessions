@@ -644,7 +644,7 @@ If this banner is absent, you are not in a coordinated session and none of the r
        - **MINOR**: banner line appended ("Drift on `<file>`: `<diff_summary>`. Validator classified as MINOR. Proceeding."); cache write MINOR with diff_summary.
        - **CRITICAL**: write `kind=critical_drift` pending entry to `pending.jsonl`; spawn Mediator INLINE (synchronous; ~20–35 s); apply Mediator verdict's `actions[]` via `verdict_apply.sh` (release_lock / evict_session / clear_read_set); advance per-session `last_consumed_verdict` pointer; banner line composed from Mediator's `action_type` + `message_to_caller`. CRITICAL is NEVER cached.
        - **Pipeline failure** (cache error, validator spawn fail, Mediator spawn fail): per-file Phase 1 fallback line ("Drift on `<file>` (modified since read; pipeline failed). Pipeline unavailable; consider re-reading before proceeding.") — fail-open per CLAUDE.md §A.5.
-   - The hook then continues to lock acquisition. **Phase 4 invariant: validator pipeline emits NO `permissionDecision: deny`.** CRITICAL → Mediator → lockdown (when scope is system-wide) routes through the existing Phase 3 lockdown gate. The two-location deny invariant (lock-held + lockdown active) is preserved through Phase 4.
+   - The hook then continues to lock acquisition. **Phase 4 invariant: validator pipeline emits NO `permissionDecision: deny`.** CRITICAL → Mediator → lockdown (when scope is system-wide) routes through the existing Phase 3 lockdown gate. The two-location deny invariant (lock-held + lockdown active) is preserved through Phases 4+5+6.
 
 2. **Lock held by another session:**
    - Exit with `permissionDecision: "deny"` and a `permissionDecisionReason` like:
