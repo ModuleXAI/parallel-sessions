@@ -242,26 +242,31 @@ _prime_read() {
   echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null
   # Reason is a string (not stringified-JSON or null).
   echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | type == "string"' >/dev/null
-  # All three option markers present.
+  # All three option markers present (Phase 6 T6.09: toggle TRUE
+  # banner enumerates (a) coord task-open + (b) coord self-delegate
+  # + (c) coord wait per PR-PHASE6-05 §6).
   echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("\\(a\\) Delegate")' >/dev/null
   echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("\\(b\\) Self-delegate")' >/dev/null
   echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("\\(c\\) Passively wait")' >/dev/null
-  # (a)+(b) reference the subcommand abstractly — name only, no full arg
-  # shape (Phase 6 hasn't frozen the contract yet). They MUST point at
-  # option (c) for the disabled fallback path.
-  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | contains("`coord task-open`")' >/dev/null
-  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | contains("`coord self-delegate`")' >/dev/null
-  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("Phase 6 . currently disabled")' >/dev/null
-  # The deny reason MUST NOT freeze Phase 6 argument syntax — guard
-  # against accidental regression to "--file ... --complexity ... --anchor".
-  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | (contains("task-open --file") | not)' >/dev/null
-  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | (contains("self-delegate --file") | not)' >/dev/null
-  # Embedded `coord wait` syntax is exact + copy-paste-runnable (option (c)
-  # IS active in Phase 2 — its CLI is stable).
+  # Phase 6 production wording: option (a) embeds the FULL coord
+  # task-open CLI argument shape (T6.03 deliverable; --file +
+  # --complexity + --anchor + --instruction with optional
+  # --rationale per ambiguity A binding). Option (b) embeds full
+  # coord self-delegate shape (T6.04 deliverable).
+  echo "$output" | jq -e --arg t "$TARGET" '.hookSpecificOutput.permissionDecisionReason | contains("coord task-open --file " + $t + " --complexity SIMPLE")' >/dev/null
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | contains("--instruction")' >/dev/null
+  echo "$output" | jq -e --arg t "$TARGET" '.hookSpecificOutput.permissionDecisionReason | contains("coord self-delegate --file " + $t + " --instruction")' >/dev/null
+  # Embedded `coord wait` syntax is exact + copy-paste-runnable
+  # (option (c) carry-forward).
   echo "$output" | jq -e --arg t "$TARGET" '.hookSpecificOutput.permissionDecisionReason | contains("coord wait " + $t + " --timeout 570")' >/dev/null
-  # Both timestamps surfaced in human-readable form.
-  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("acquired .* ago")' >/dev/null
-  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("last activity .* ago")' >/dev/null
+  # T6.09 production wording uses "since X (~Y)" instead of the
+  # Phase 2 stub "acquired X, last activity Y" — assert the new
+  # form per PR-PHASE6-05 §6 verbatim.
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | test("since .* \\(~.* ago\\)")' >/dev/null
+  # Phase 6 T6.09 stub-removal regression-guard: deny banner MUST
+  # NOT contain Phase 2's stub wording "Phase 6 — currently
+  # disabled" anywhere. If this fires, T6.09 changes were reverted.
+  echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | (test("Phase 6 . currently disabled") | not)' >/dev/null
   # additionalContext field preserves multi-line structure (newlines round-trip).
   # The reason string itself contains literal newline characters (jq passes them
   # through; Claude Code then surfaces them to Claude verbatim).

@@ -388,24 +388,68 @@ coord_human_age() {
   fi
 }
 
-# Build the §B.2 three-options deny reason. Inputs:
+# Read task_delegation toggle from .coord/config.json. Default true
+# when config is missing or field absent. Cand-14 awareness: jq's
+# `// alt` triggers on null OR false (jq spec), so a literal `false`
+# value would silently bypass the check via `// true`. Use explicit
+# `if has("task_delegation") then .task_delegation else true end`
+# pattern to distinguish absent-key from present-and-false (mirrors
+# coord task-open T6.03 toggle handling at src/bin/coord).
+_coord_pwh_task_delegation_enabled() {
+  local cfg
+  if [ -n "${COORD_DIR:-}" ]; then
+    cfg="$COORD_DIR/config.json"
+  else
+    cfg=""
+  fi
+  if [ -z "$cfg" ] || [ ! -f "$cfg" ]; then
+    printf 'true'
+    return 0
+  fi
+  local val
+  val=$(jq -r 'if has("task_delegation") then .task_delegation else true end' \
+        "$cfg" 2>/dev/null) || val="true"
+  printf '%s' "$val"
+}
+
+# Build the §B.2 three-options deny reason — Phase 6 T6.09 production
+# wording per PR-PHASE6-05 §6 (toggle TRUE + toggle FALSE variants).
+# Inputs:
 #   $1 holder_short  — first 8 chars of holder session_id
 #   $2 acquired_age  — humane "X min ago" string
 #   $3 refresh_age   — humane "X sec ago" string
 #   $4 target        — the path being denied
+#
+# Toggle TRUE banner: enumerates options (a) coord task-open + (b)
+# coord self-delegate + (c) coord wait (full production CLI syntax
+# from T6.03 + T6.04 + T5.x deliverables).
+# Toggle FALSE banner (config.json task_delegation: false): omits
+# option (a) entirely; states "task delegation is disabled in this
+# repo" + offers only (b) + (c).
+#
+# Decision 6 binding: option (a) is the gated capability; option (b)
+# coord self-delegate + option (c) coord wait remain available
+# regardless of toggle (verified by T6.04 Category 4 toggle-false-
+# still-works test).
 build_deny_reason() {
   local holder_short="$1"
   local acquired_age="$2"
   local refresh_age="$3"
   local target="$4"
-  # The (a)/(b) CLI references are abstract — they name the subcommand
-  # without freezing its full argument shape, since Phase 6 has not yet
-  # finalized its contract. Running the disabled stubs prints the
-  # current syntax (when Phase 6 enables them) along with a pointer at
-  # option (c). Option (c) is verbatim because `coord wait` is the
-  # active Phase 2 deliverable with stable syntax.
-  printf 'File `%s` is locked by session `%s...` (acquired %s, last activity %s). Options:\n(a) Delegate a SIMPLE/MODERATE task: `coord task-open` (Phase 6 — currently disabled; running it now points you at option (c) and shows current syntax when enabled).\n(b) Self-delegate (do other work, return later): `coord self-delegate` (Phase 6 — currently disabled; running it now points you at option (c) and shows current syntax when enabled).\n(c) Passively wait: `Bash: coord wait %s --timeout 570` (blocks your Bash call until unlocked or timeout; 570 s is the max — it sits just below Claude Code'"'"'s 600 s Bash-tool ceiling).\nPick (a) for small, self-contained edits; (b) if you have other productive work; (c) only if the change is too complex to delegate AND you have no other work. Phase 2 only enables option (c); options (a)+(b) become available in Phase 6.' \
-    "$target" "$holder_short" "$acquired_age" "$refresh_age" "$target"
+  local toggle
+  toggle=$(_coord_pwh_task_delegation_enabled)
+
+  if [ "$toggle" = "true" ]; then
+    # Toggle TRUE — three-options banner.
+    printf 'File `%s` is locked by session `%s...` since %s (~%s). Options:\n(a) Delegate a SIMPLE/MODERATE task: `Bash: coord task-open --file %s --complexity SIMPLE --anchor '"'"'{"search":"\xE2\x80\xA6","window_lines":"\xE2\x80\xA6"}'"'"' --instruction '"'"'\xE2\x80\xA6'"'"' [--rationale '"'"'\xE2\x80\xA6'"'"']`.\n(b) Self-delegate (do other work, return later): `Bash: coord self-delegate --file %s --instruction '"'"'\xE2\x80\xA6'"'"'`.\n(c) Passively wait: `Bash: coord wait %s --timeout 570` (blocks until unlocked or timeout).\nPick (a) for small self-contained edits; (b) if you have other productive work; (c) only if the change is too complex to delegate AND you have no other work.' \
+      "$target" "$holder_short" "$acquired_age" "$refresh_age" \
+      "$target" "$target" "$target"
+  else
+    # Toggle FALSE — option (a) hidden; (b)+(c) only.
+    printf 'File `%s` is locked by session `%s...` since %s (~%s). Options (note: task delegation is disabled in this repo):\n(b) Self-delegate (do other work, return later): `Bash: coord self-delegate --file %s --instruction '"'"'\xE2\x80\xA6'"'"'`.\n(c) Passively wait: `Bash: coord wait %s --timeout 570` (blocks until unlocked or timeout).\nPick (b) if you have other productive work; (c) only if the change is too complex AND you have no other work.' \
+      "$target" "$holder_short" "$acquired_age" "$refresh_age" \
+      "$target" "$target"
+  fi
 }
 
 # --- main ---
