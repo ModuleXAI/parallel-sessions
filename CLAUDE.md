@@ -412,7 +412,196 @@ Surfaced in T5.05 `cycle_detection.sh` edges builder. Caught at bats setup phase
 
 **Lesson #4 reinforcement (T5.05 case study).** `head -n -1` is a GNU extension; macOS BSD `head` rejects negative line counts (`illegal line count -- -1`). Initial `cycle_path` session-array dedup used `head -n -1` to drop the closing duplicate of `start_sid`. Fix: use `jq unique` instead of `head -n -1` for natural deduplication. Pattern: prefer pure-jq pipelines over CLI-tool composition where deduplication / sorting is needed; jq is portable and feature-complete for these operations.
 
-These rules apply to any future hook / pipeline / spawn-helper / fixture construction. The Phase 5 implementations of `lib/wait_queue.sh` (T5.02), `lib/wait_backend.sh` (T5.03), `lib/notify_waiters.sh` extension (T5.04), `lib/cycle_detection.sh` (T5.05), and `phase5_ship_gate` fixtures (T5.09) are the canonical references for these new patterns.
+**11. Bash 3.2 multi-assign `local` RHS-eval-before-assign with set -u** (T6.04 lesson, F-018 portability family).
+
+Bash 3.2 evaluates all RHS expressions in a multi-assign `local` statement BEFORE binding any of the variables. With `set -u` inherited from sourced libs (atomic_write.sh / log_event.sh), referencing an earlier assign's left-hand variable inside a later RHS triggers unbound-variable error.
+
+```bash
+# WRONG — bash 3.2 + set -u: $f and $opener unbound when tid evaluates:
+_add_task() {
+  local f="$1" opener="$2" tid="${3:-tid-$f-$opener}"
+}
+```
+
+RIGHT — split into separate `local` lines per assignment:
+
+```bash
+_add_task() {
+  local f="$1"
+  local opener="$2"
+  local tid="${3:-tid-$f-$opener}"
+}
+```
+
+Surfaced in T6.04 self_tasks.bats `_add_task` helper. Caught at first run; helper rewrite + 18 tests PASS post-fix. The same rule applies anywhere multi-assign `local` is used in code that may run under set -u inheritance.
+
+**12. `coord_log_event` reserved-key collision in payload args** (T6.02 lesson).
+
+`coord_log_event` reserves four key names for top-level event metadata: `kind`, `tool`, `file`, `hash`. Payload extras passed as additional `key=value` args MUST use distinct names. Reusing a reserved key as a payload arg silently overwrites the top-level slot — the event ends up with an unexpected `kind`, breaking downstream consumers / grep gates / invariant tests.
+
+```bash
+# WRONG — payload `kind=cycle` overwrites top-level
+# kind=TASK_GRAPH_VIOLATION_DETECTED; event surfaces in
+# events.jsonl with kind=cycle (no longer matches kind grep gate):
+coord_log_event kind=TASK_GRAPH_VIOLATION_DETECTED \
+  session="$start_sid" target="$target_file" \
+  kind=cycle path="$rendered" duration_ms="$elapsed_ms"
+```
+
+RIGHT — payload key uses non-reserved name (`violation`):
+
+```bash
+coord_log_event kind=TASK_GRAPH_VIOLATION_DETECTED \
+  session="$start_sid" target="$target_file" \
+  violation=cycle path="$rendered" duration_ms="$elapsed_ms"
+```
+
+Surfaced in T6.02 `coord_cycle_detect_task_graph` event emission. Reserved set: `kind`, `tool`, `file`, `hash`.
+
+**13. `var=$(cmd) || alt` inside `$()` concatenates stdout** (T6.03 lesson).
+
+The `var=$(grep -F -c X file 2>/dev/null || printf '0')` form does NOT replace stdout on failure. The `||` runs INSIDE the command substitution: when grep prints "0\n" with rc=1 (no match found), the `||` triggers `printf '0'` which APPENDS another "0" to the same subshell stdout. Captured value becomes "0\n0" — non-numeric, fails `[ -gt 1 ]` integer comparison, silently bypasses guards.
+
+```bash
+# WRONG — match_count="0\n0" on no-match (grep prints "0",
+# `|| printf '0'` appends another "0"):
+match_count=$(grep -F -c -- "$anchor" "$file" 2>/dev/null || printf '0')
+```
+
+RIGHT — `if var=$(cmd); then ... else ... fi` (lesson #5 pattern) + post-capture numeric sanitize via `case` glob:
+
+```bash
+if match_count=$(grep -F -c -- "$anchor" "$file" 2>/dev/null); then
+  : # rc 0: grep found ≥1 match
+else
+  : # rc 1/2: var captured stdout already; sanitize below
+fi
+case "$match_count" in
+  ''|*[!0-9]*) match_count=0 ;;
+esac
+```
+
+Surfaced in T6.03 `cmd_task_open` anchor uniqueness check.
+
+**14. jq `// alt` triggers on FALSE in addition to null** (T6.03 lesson).
+
+jq's `//` operator is the "alternative operator" — by spec it returns the right-hand value when the left-hand is null OR false. When reading a boolean config field where you want to distinguish absent-key from present-and-false, `// true` silently bypasses the present-and-false case.
+
+```bash
+# WRONG — task_delegation: false in config.json reads as true via
+# // alt (jq spec: false triggers alternative):
+toggle=$(jq -r '.task_delegation // true' config.json)
+```
+
+RIGHT — explicit `if has(...) then ... else <default> end` to distinguish absent-key from present-and-false:
+
+```bash
+toggle=$(jq -r 'if has("task_delegation") then .task_delegation else true end' config.json)
+```
+
+Surfaced in T6.03 cmd_task_open + T6.09 build_deny_reason toggle handling. Same fix applied at both sites.
+
+**15. ms-precision idempotency window flake at second-truncation boundaries** (T6.04 lesson).
+
+When implementing time-windowed idempotency / dedup logic with `Time::HiRes` ms-precision new timestamps compared against `fromdateiso8601 * 1000` truncated existing timestamps (jq lacks native ms parsing on fractional ISO8601), the comparison can flake at .999 / .001 boundaries. Existing entry stored at `2026-04-27T13:10:15.999Z` truncates to second `2026-04-27T13:10:15Z` × 1000 = ...15000 ms. New ms-call at ...16001 ms. Difference = 1001 ms; if window is `<= 1000`, it fails. The two calls were ~2ms apart in wall-clock.
+
+Mitigation options (not fixed in T6.04 — flake observed 1/~10 runs and stable in normal use; documented for future reference): (a) widen window to ≥ 2000 ms; (b) store created_at_ms as a separate numeric field alongside ISO created_at and compare directly; (c) use jq's `gsub("\\.\\d+Z$";"Z") | fromdateiso8601 * 1000 + (extracted ms part)` to recover full precision.
+
+Surfaced in T6.04 self_tasks.bats test 2 idempotency 1/~10 flake. Three consecutive 15/15 reruns confirmed stability in practice. Future mitigation if flake observed under production load.
+
+**16. jq context-rebind in `$x | filter` pipelines** (T6.04 lesson).
+
+When piping `$variable_object | filter` inside a `select` or `map`, the pipe rebinds `.` to `$variable_object` inside `filter`. References to outer scope's `.field` become `$variable_object.field` — not the surrounding task's field. Save the outer object as `$t` BEFORE the pipeline to access outer scope.
+
+```jq
+# WRONG — `.file` inside `has(.file)` reads $lk.file
+# (always absent), not the outer task's file:
+.self_tasks[$s] // []
+| map(select(
+    ($lk | has(.file) | not)
+    or ($lk[.file].session == $s)
+  ))
+```
+
+RIGHT — save outer task as `$t`:
+
+```jq
+.self_tasks[$s] // []
+| map(. as $t | select(
+    ($lk | has($t.file) | not)
+    or ($lk[$t.file].session == $s)
+  ))
+```
+
+Surfaced in T6.04 `coord_self_task_check_unlocked`. Also applies to `as $key | filter` patterns where outer scope access is needed.
+
+**17. bats integration tests for hook invocation MUST use `bash -c` subshell wrapper** (T6.05 lesson).
+
+Direct pipe `printf '%s' "$input" | "$hook"` from inside a bats `@test` body loses backgrounded log_event subshells when the @test body's outer pipe context exits. The hook spawns `coord_log_event &` with `disown`, but bats's pipe lifetime ends before the disowned subshell can flush events.jsonl writes. Result: events.jsonl appears empty after the hook runs; downstream assertions fail.
+
+```bash
+# WRONG — direct pipe; backgrounded log_event lost:
+_run_hook() {
+  CLAUDE_COORD=1 printf '%s' "$1" | "$HOOK"
+}
+```
+
+RIGHT — wrap with `bash -c "..."` subshell so backgrounded subshells inherit the wrapper's lifetime:
+
+```bash
+_run_hook() {
+  CLAUDE_COORD=1 bash -c "printf '%s' '$1' | '$HOOK'"
+}
+```
+
+Surfaced in T6.05 `post_tool_use_write_task_processor.bats`. Mirrored at T6.06 + T6.07 + T6.09 helpers.
+
+**18. bats inline `bash -c` env-prefix scoping** (T6.09 lesson).
+
+When a single-line bats command sets env-prefix INSIDE the quoted bash -c command:
+
+```bash
+# WRONG — CLAUDE_COORD=1 only scopes to printf, NOT
+# the piped hook (env-prefix is per-command, not
+# per-pipeline):
+run bash -c "CLAUDE_COORD=1 printf '%s' '$INPUT' | '$HOOK'"
+```
+
+The hook receives no CLAUDE_COORD=1 → exits 0 silently without producing additionalContext.
+
+RIGHT — env-prefix on the OUTER `bash -c` invocation so the inner pipeline inherits via process env:
+
+```bash
+run env CLAUDE_COORD=1 bash -c "printf '%s' '$INPUT' | '$HOOK'"
+```
+
+Surfaced in T6.09 phase6_e2e.bats S6/S8/S9/S10. Helper-defined invocations (`_pre_acquire`, etc.) already used the correct outer-prefix pattern; only inline `bash -c` calls regressed.
+
+**19. Fixture timeline.sh inherits set -e + pipefail from init.sh; `var=$(failing_cmd)` aborts silently** (T6.10 lesson).
+
+Fixture timeline.sh files run inside a shell sourced from init.sh which has `set -euo pipefail` at top. Under inherited set -e, `var=$(failing_cmd)` triggers script abort immediately — without ever reaching the `var_RC=$?` capture or downstream assertion logic. The driver loop sees the timeline source completing "successfully" (because the abort happens INSIDE the sourced timeline subshell which exits 0 from the abort), but scenario_assert is undefined, so the driver reports an error or hangs.
+
+```bash
+# WRONG — set -e inherited from init.sh aborts when cmd
+# returns non-zero:
+TASK_OPEN_OUT=$(coord_fixture_p6_task_open ... 2>&1)
+TASK_OPEN_RC=$?     # never reached when cmd fails
+```
+
+RIGHT — wrap with `set +e ... set -e` block when capturing expected-non-zero rc:
+
+```bash
+set +e
+TASK_OPEN_OUT=$(coord_fixture_p6_task_open ... 2>&1)
+TASK_OPEN_RC=$?
+set -e
+```
+
+Alternative: append `|| true` to the assignment line (Phase 5 fixture style). The `set +e/-e` block is preferred when followed by `RC=$?` capture for clarity.
+
+Surfaced in T6.10 phase6_ship_gate scenarios 02/03/05. Phase 5 fixtures used the `|| true` pattern; Phase 6 chose the explicit set +e/-e block.
+
+These rules apply to any future hook / pipeline / spawn-helper / fixture construction. The Phase 6 implementations of `lib/task_processor.sh` (T6.05), `lib/self_tasks.sh` (T6.04+T6.06+T6.07), `lib/cycle_detection.sh` task-graph extension (T6.02), `src/bin/coord` task-open + self-delegate subcommands (T6.03+T6.04), `pre_tool_use_any.sh` reminder + F-015 banner (T6.06), `stop.sh` block-once-then-allow (T6.07), `pre_tool_use_write.sh` banner production wording (T6.09), and `phase6_ship_gate` fixtures (T6.10) are the canonical references for these new patterns. Phase 5 references (T5.02/T5.03/T5.04/T5.05/T5.09) remain canonical for lessons #7-#10.
 
 ---
 
@@ -751,34 +940,46 @@ These are cases where Claude sometimes tries to "help" in ways that undermine co
 
 If Part A is silent on a construction question: follow the Section 10 decision tree in `IMPLEMENTATION_PLAN.md`. If Part B is silent on a runtime question: act conservatively (do not write; ask the user; prefer `coord status` over guessing).
 
-### C.4a Phase 5 architectural invariant (carry-forward from Phase 3+4)
+### C.4a Phase 6 architectural invariant (carry-forward from Phase 3+4+5)
 
-**`permissionDecision: "deny"` appears in EXACTLY two architectural locations** (UNCHANGED through Phases 3+4+5 — the wait queue + cycle detection layers introduce NO new deny location):
+**`permissionDecision: "deny"` appears in EXACTLY two architectural locations** (UNCHANGED through Phases 3+4+5+6 — the task delegation + self-delegation layers introduce NO new deny location):
 
-1. `pre_tool_use_write.sh` lock-held-by-other branch (existing Phase 2).
-2. Any hook reading `.coord/mediator/lockdown.json` with `active=true` via `lib/lockdown.sh::coord_lockdown_emit_deny` (existing Phase 3 — Mediator lockdown verdicts on `cycle_detected` payloads route through this gate).
+1. `pre_tool_use_write.sh` lock-held-by-other branch (existing Phase 2; banner production wording landed at T6.09 per PR-PHASE6-05 §6 toggle TRUE / toggle FALSE binding — the toggle-aware rewrite emits via the same `emit_deny` helper as the Phase 2 stub, preserving Guard #3's exactly-1 emit_deny call site).
+2. Any hook reading `.coord/mediator/lockdown.json` with `active=true` via `lib/lockdown.sh::coord_lockdown_emit_deny` (existing Phase 3 — Mediator lockdown verdicts route through this gate).
 
-Phase 5 adds **2 NEW architectural guards** + **3 NEW bonus guards** on top of Phase 4's carry-forward set:
+Phase 6 adds **3 NEW bonus guards** (#15 `lib/task_processor.sh` + #16 `lib/self_tasks.sh` + #17 `src/bin/coord`) on top of Phase 5's 14-guard set. The 8 architectural guards (#1-#8) + 6 Phase 4+5 bonus guards (#9-#14) carry forward verbatim with Phase 6 scope updates.
 
-**Phase 5 NEW architectural guards:**
+**Architectural guards #1-#8 (Phase 3+4+5 carry-forward):**
 
-7. **Mediator dispatch is kind-agnostic.** `lib/mediator_spawn.sh`, `lib/mediator_pending.sh`, and `lib/verdict_apply.sh` contain ZERO `case ... cycle_detected` or `if ... critical_drift` branches in production code. Decision 4 binding (PR-PHASE5-04): cycle_detected is handled by the same kind-agnostic 3-action contract (advice / surgical_fix / lockdown) that Phase 3 established. Future kinds (Phase 6+) MUST also fit this contract without code changes.
-8. **Watchdog probe enforces 3-signal conservative model.** `lib/watchdog.sh` calls `ps -p` for Signal 1 (PID liveness) — mandatory for the alive verdict per PR-PHASE3-02 §A. Signals 2 (`last_activity_at` staleness) and 3 (lock-context unrefreshed) alone cannot promote to alive; only suspicion. Cross-references `watchdog.bats` for full 3-outcome semantics.
+1. `permissionDecision` occurrences in `hooks/*.sh` confined to `pre_tool_use_write.sh`.
+2. `permissionDecision` occurrences in `lib/*.sh` confined to `lockdown.sh`.
+3. `pre_tool_use_write.sh` exactly 1 `emit_deny` call site.
+4. `lib/lockdown.sh` exactly 1 deny-emit.
+5. Every coord-owned hook sources `lib/lockdown.sh` and calls `coord_lockdown_check` + `coord_lockdown_emit_deny`.
+6. Every hook is exit-0 fail-open (no exit 1/2 in error paths).
+7. Mediator dispatch is kind-agnostic: `lib/mediator_spawn.sh`, `lib/mediator_pending.sh`, `lib/verdict_apply.sh` contain ZERO `case ... cycle_detected` / `if ... critical_drift` / `case ... task_cycle_detected` branches in production code. Decision 4 (PR-PHASE5-04) + Decision 6 (PR-PHASE6-04) binding: future kinds MUST fit the 3-action contract (advice / surgical_fix / lockdown) without code changes. Phase 6 task-graph cycles route via CLI-level rejection at `coord task-open`, NOT via Mediator pending kind — so no `task_cycle_detected` branching is expected.
+8. Watchdog probe enforces 3-signal conservative model: `lib/watchdog.sh` calls `ps -p` for Signal 1 (PID liveness) — mandatory for the alive verdict per PR-PHASE3-02 §A. Signals 2 / 3 alone cannot promote to alive.
 
 **Phase 4+5 bonus guards (zero permissionDecision in component libs):**
 
 9.  `lib/validator_spawn.sh` (Phase 4 carry-forward).
 10. `lib/validator_prefilter.sh` (Phase 4 carry-forward).
 11. `lib/validator_cache.sh` (Phase 4 carry-forward bonus).
-12. `lib/wait_queue.sh` (Phase 5 T5.02 NEW — queue ops are advisory; deny happens at the existing lock-acquire path).
-13. `lib/cycle_detection.sh` (Phase 5 T5.05 NEW — cycle detection routes through the Mediator pending pipeline; lockdown is the deny mechanism if scope is global).
-14. `lib/wait_backend.sh` (Phase 5 T5.03 NEW — backend abstraction is mechanical; deny is not a backend concern).
+12. `lib/wait_queue.sh` (Phase 5 carry-forward).
+13. `lib/cycle_detection.sh` (Phase 5 carry-forward; T6.02 added `coord_cycle_detect_task_graph` function in same file — both functions remain deny-free).
+14. `lib/wait_backend.sh` (Phase 5 carry-forward from T5.03).
 
-Total: **8 architectural guards + 6 bonus guards = 14 guards** in `phase5_invariant.bats`. The static-grep gate fails the test if (a) any other code path emits `permissionDecision` outside the two allowed locations, OR (b) Mediator dispatch grows kind-branching, OR (c) the watchdog regresses to non-Signal-1-mandatory alive verdicts.
+**Phase 6 NEW bonus guards:**
 
-When future phases (6+) extend the system, every new `lib/` or `hooks/` file MUST be added to the invariant test's enumeration and pass the zero-deny grep — UNLESS it is the Mediator's lockdown gate (which has an explicit allowlist). New pending kinds MUST flow through the existing kind-agnostic dispatch and 3-action contract; any addition of `case ... <new_kind>)` branching in `mediator_spawn.sh` / `mediator_pending.sh` / `verdict_apply.sh` is a Phase 5 invariant violation.
+15. `lib/task_processor.sh` (Phase 6 NEW from T6.05) — task outcomes are advisory notifications written to `.notifications[<opener>][<file>]` + `TASK_OUTCOME_PERSISTED` events; CONFLICT outcome (anchor overlap with holder edit) is a TASK VERDICT, not a hook deny. Decision 6 binding.
+16. `lib/self_tasks.sh` (Phase 6 NEW from T6.04 + T6.06 + T6.07 extensions) — self-task management is record-keeping; deny happens only at the existing `pre_tool_use_write.sh` lock-held branch (architectural guard #1). Stop hook's `decision: "block"` (T6.07 + Decision 2.13) is Stop's permission grammar — distinct from `permissionDecision: "deny"` and explicitly authorized at `stop.sh`; the 2-location deny invariant is preserved.
+17. `src/bin/coord` task-open + self-delegate CLI subcommands (Phase 6 NEW from T6.03 + T6.04) — chain depth / cycle / anchor uniqueness / toggle disabled all reject via exit 1 + stderr per Decision 6 (PR-PHASE6-04). CLI rejection is informational error, NOT permissionDecision. Hook layer (`pre_tool_use_*.sh`) does NOT participate in CLI-level enforcement. Comment-only references like `# never permissionDecision.` are stripped by the comment-aware grep guard.
 
-`phase4_invariant.bats` deleted at T5.07 (superseded by `phase5_invariant.bats`); mirrors the Phase 3 → Phase 4 transition pattern (T4.06 deleted `phase3_invariant.bats`). Phase 6+ will continue the rolling supersession.
+Total: **8 architectural guards + 9 bonus guards = 17 guards** in `phase6_invariant.bats`. The static-grep gate fails the test if (a) any code path emits `permissionDecision` outside the two allowed locations, OR (b) Mediator dispatch grows kind-branching, OR (c) the watchdog regresses to non-Signal-1-mandatory alive verdicts, OR (d) any of the 9 bonus-guarded files / CLI dispatcher grows a `permissionDecision` string.
+
+When future phases (7+) extend the system, every new `lib/` or `hooks/` file MUST be added to the invariant test's enumeration. New pending kinds MUST flow through the existing kind-agnostic dispatch and 3-action contract; any addition of `case ... <new_kind>)` branching in `mediator_spawn.sh` / `mediator_pending.sh` / `verdict_apply.sh` is a Phase 6 invariant violation. Stop hook's `decision: "block"` usage (T6.07) is permitted as a separate verb; `permissionDecision: "deny"` literal grep is the canonical guard scope.
+
+`phase5_invariant.bats` deleted at T6.08 (superseded by `phase6_invariant.bats`); mirrors the Phase 4 → Phase 5 transition pattern (T5.07 deleted `phase4_invariant.bats`) and Phase 3 → Phase 4 transition (T4.06 deleted `phase3_invariant.bats`). Phase 7+ will continue the rolling supersession.
 
 ### C.5 Version
 
