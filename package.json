@@ -1,0 +1,39 @@
+{
+  "name": "gearcode",
+  "version": "1.0.0",
+  "description": "Multi-session coordination for Claude Code — prevent concurrent edits, recover from crashes, delegate work between sessions.",
+  "bin": {
+    "gearcode": "./bin/gearcode"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "scripts/",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "bash src/tests/manual/phase7_ship_gate.sh"
+  },
+  "keywords": [
+    "claude-code",
+    "multi-session",
+    "coordination",
+    "lock",
+    "hooks",
+    "anthropic"
+  ],
+  "author": "Sezer Yavuz",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sezeryavuz/gearcode.git"
+  },
+  "bugs": {
+    "url": "https://github.com/sezeryavuz/gearcode/issues"
+  },
+  "homepage": "https://github.com/sezeryavuz/gearcode#readme",
+  "engines": {
+    "node": ">=14.0.0"
+  }
+}

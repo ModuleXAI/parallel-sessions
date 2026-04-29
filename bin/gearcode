@@ -1,0 +1,86 @@
+#!/usr/bin/env node
+
+const { spawn, spawnSync } = require('child_process');
+const path = require('path');
+const fs = require('fs');
+
+const command = process.argv[2];
+const args = process.argv.slice(3);
+
+const PACKAGE_ROOT = path.resolve(__dirname, '..');
+const SRC_ROOT = path.join(PACKAGE_ROOT, 'src');
+const SCRIPTS_ROOT = path.join(PACKAGE_ROOT, 'scripts');
+
+function showHelp() {
+  console.log(`
+GearCode - Multi-session coordination for Claude Code
+
+Usage:
+  npx gearcode init       Install hooks into current project
+  npx gearcode status     Show coordination state
+  npx gearcode test       Run ship-gate fixtures
+  npx gearcode help       Show this help
+
+Documentation: https://github.com/sezeryavuz/gearcode
+`);
+}
+
+function runBash(scriptPath, scriptArgs) {
+  if (!fs.existsSync(scriptPath)) {
+    console.error(`Error: ${scriptPath} not found in package`);
+    process.exit(1);
+  }
+  const child = spawn('bash', [scriptPath, ...scriptArgs], {
+    stdio: 'inherit',
+    cwd: process.cwd(),
+  });
+  child.on('exit', (code) => process.exit(code || 0));
+  child.on('error', (err) => {
+    console.error('Failed to run bash script:', err.message);
+    process.exit(1);
+  });
+}
+
+switch (command) {
+  case 'init': {
+    const checkGit = spawnSync('git', ['rev-parse', '--show-toplevel'], {
+      cwd: process.cwd(),
+      encoding: 'utf8',
+    });
+
+    if (checkGit.status !== 0) {
+      console.error(`
+Error: GearCode requires a git repository.
+
+Run 'git init' first, then 'npx gearcode init'.
+
+Current directory: ${process.cwd()}
+`);
+      process.exit(1);
+    }
+
+    const installerPath = path.join(SRC_ROOT, 'install.sh');
+    runBash(installerPath, []);
+    break;
+  }
+  case 'status': {
+    const coordPath = path.join(SRC_ROOT, 'bin', 'coord');
+    runBash(coordPath, ['status']);
+    break;
+  }
+  case 'test': {
+    const testPath = path.join(SRC_ROOT, 'tests', 'manual', 'phase7_ship_gate.sh');
+    runBash(testPath, []);
+    break;
+  }
+  case 'help':
+  case '--help':
+  case '-h':
+  case undefined:
+    showHelp();
+    break;
+  default:
+    console.error(`Unknown command: ${command}`);
+    showHelp();
+    process.exit(1);
+}
