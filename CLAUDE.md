@@ -803,6 +803,30 @@ The watchdog NEVER returns `alive` solely on activity/lock signals — Signal 1 
 
 For Phase 5, the depth ≥ 2 trigger is sufficient for the done-when criterion. Silent-2-cycle handling is deferred to Phase 7.
 
+### B.8b Phase 7 mode switch + cost-guard tunables (operational guidance, T7.09)
+
+**`COORD_TEST_MODE` env-var** routes the 3 spawn sites between mock and real `claude -p` per PR-PHASE7-01 OQ4 binding. Three values:
+
+- `mock` (default; CI + daily dev) — all 3 spawn sites use mock binaries / mock fakes. No real-Claude cost.
+- `semi` (weekly stakes-coverage smoke) — Mediator + Task Processor route to real `claude -p`; Validator stays mock (high-frequency, mid-stakes; CRITICAL escalation routes through Mediator).
+- `realistic` (pre-release smoke) — all 3 sites route to real `claude -p`.
+
+Invalid values fail-closed to `mock` with a one-time stderr `WARNING` + `COORD_TEST_MODE_INVALID` audit event. Empty string is treated as unset (no warning). Mode resolved once per process and cached; the chosen mode emits one `COORD_SPAWN_MODE_RESOLVED` event per process.
+
+**Cost-guard tunables** (PR-PHASE7-03 OQ5 binding) enforce rate limits in semi + realistic modes; mock mode bypasses entirely:
+
+```
+COORD_MEDIATOR_MIN_SECONDS_BETWEEN_INVOCATIONS=300   # 5 min default
+COORD_MEDIATOR_MAX_INVOCATIONS_PER_HOUR=12           # hourly ceiling
+COORD_VALIDATOR_MAX_SPAWNS_PER_HOUR=120              # validator hi-freq
+```
+
+Rate-limit hits emit dedicated `*_SPAWN_RATE_LIMITED` audit events (Mediator + Validator + Task-Processor variants). Mediator rate-limit: caller fail-open per existing Phase 3-4 contract. Validator rate-limit: pipeline degrades to MINOR with `[validator rate-limited]` banner suffix per PR-PHASE7-03 §"Hard block vs graceful degrade".
+
+**Manual stress scripts** (PR-PHASE7-04 / T7.08): `scripts/stress_semi.sh` + `scripts/stress_realistic.sh` orchestrate ship-gate fixtures + cost-guard exercise under each mode. Operator-driven; not run in CI. Output to `scripts/stress_<mode>_out/<ISO_ts>.log` (gitignored).
+
+**Bats realistic-tag opt-in** (PR-PHASE7-04 / T7.09): tests carrying `# bats test_tags=realistic` skip by default. To run: `COORD_TEST_MODE=realistic bats --filter-tags realistic src/tests/integration/spawn_helper_modes.bats`. CI safety preserved — without explicit opt-in, no real-Claude tests fire.
+
 ### B.9 Edge-case rules
 
 #### B.9.1 Missing state file
