@@ -27,6 +27,10 @@ phase-*-poc-*.md
 # State-of-system briefings (reporting artifacts, not deliverables).
 STATE_OF_SYSTEM.md
 
+# Manual stress test outputs (per-run logs; Phase 7 / T7.08).
+scripts/stress_semi_out/
+scripts/stress_realistic_out/
+
 # OS / editor cruft that has no place in VCS.
 .DS_Store
 Thumbs.db
