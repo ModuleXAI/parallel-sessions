@@ -5917,6 +5917,1187 @@ phase-6-signoff.md.
 
 ---
 
+## PR-PHASE7-01 — `COORD_TEST_MODE` three-mode env-var switch + spawn site routing matrix (OQ4 binding)
+
+**Date:** 2026-04-28
+**Author:** Phase 7 builder (T7.01).
+**Status:** APPROVED 2026-04-29 at T7.01 close. Gates
+T7.02 (`lib/spawn_helper.sh`) and T7.03 (3-site refactor) and
+T7.09 (bats integration mode handling).
+**Driver:** User-resolved Phase 7 Open Question 4 ("Real-Claude
+integration: three-mode environment-variable switch") + OQ4
+follow-up ("Complexity Classifier: SKIPPED — caller-supplied
+--complexity flag from Phase 6 is sufficient").
+
+### Observed gap requiring change
+
+Plan §5 Phase 7 says "Real-Claude semantic verification of
+both Mediator and Validator (Phase 4 carry-forward / Decision
+1.1)" but does not specify the **runtime switching mechanism**
+between mock binaries (used by daily bats / CI) and real
+`claude -p` (used by stress tests / pre-release smoke). Phase
+4-6 inline-fake mock binaries are bats-test-local; Phase 7
+must add a process-wide mode switch that routes spawn sites
+between mock and real backends without code branches at every
+call site.
+
+Three operational modes are needed (rather than a binary on/off):
+- A pure-mock mode for CI + daily dev (lowest cost, fastest).
+- A pure-real mode for pre-release smoke (highest fidelity,
+  highest cost).
+- A semi mode mixing real Claude on high-stakes/low-frequency
+  spawn sites with mock on high-frequency/mid-stakes sites
+  (cost/fidelity midpoint for weekly stakes-coverage runs).
+
+Additionally, Phase 6's task-complexity flag was caller-
+supplied (`coord task-open --complexity SIMPLE|MODERATE|
+COMPLEX`) and is production-tested. The original Phase 7 plan
+implied a Claude-spawned classifier that would inspect the
+instruction text and emit a complexity verdict. The user has
+re-evaluated and bound that an auto-classifier provides
+marginal value (the caller writing the task already knows
+complexity) — the additional spawn site is not justified for
+v1.
+
+### User-resolved decision
+
+**Env-var name:** `COORD_TEST_MODE`.
+
+**Values (case-sensitive):**
+- `mock` — DEFAULT when env-var is unset OR explicitly set to
+  `mock`. All spawn sites use mock binaries / mock fakes.
+- `semi` — Mediator and Task Processor use real `claude -p`;
+  Validator uses mock.
+- `realistic` — All three spawn sites use real `claude -p`.
+
+Any other value (including empty string OR `MOCK` / `Mock` /
+typos) → fail-closed to `mock` with a one-time stderr warning
+on first spawn-helper resolution per process:
+
+> WARNING: COORD_TEST_MODE='<value>' invalid; defaulting to
+> 'mock'. Valid values: mock | semi | realistic.
+
+The warning is emitted once per process via a guard variable
+in `lib/spawn_helper.sh` (PR-PHASE7-02), NOT per-spawn-site.
+An audit event `COORD_TEST_MODE_INVALID` is logged on the
+warning emission.
+
+### Spawn site routing matrix
+
+| Site | mock (default) | semi | realistic |
+|---|---|---|---|
+| Mediator (`lib/mediator_spawn.sh`) | mock binary | real `claude -p` | real `claude -p` |
+| Validator (`lib/validator_spawn.sh`) | mock binary | mock binary | real `claude -p` |
+| Task Processor (`lib/task_processor.sh::coord_task_processor_spawn_claude`) | env-var `COORD_MOCK_CLAUDE_TASK_PATCH` | real `claude -p` | real `claude -p` |
+| Complexity Classifier | **SKIPPED** (OQ4 follow-up) | **SKIPPED** | **SKIPPED** |
+
+**Rationale for the semi mode mixing:** Mediator is low-
+frequency (≤12/hour cap per OQ5) but high-stakes (its verdict
+applies actions[] to coord state); Task Processor is mid-
+frequency (per task delegation) and high-stakes for the opener
+B's expectations; Validator is high-frequency (every stale-
+read drift) but mid-stakes (CRITICAL escalation routes through
+Mediator anyway, so mock-Validator + real-Mediator preserves
+the safety-net path). This preserves the user's stated cost/
+fidelity-balance intent for weekly stakes-coverage runs.
+
+### Complexity Classifier — SKIPPED disposition
+
+The Phase 7 spec's original four spawn sites (Mediator,
+Validator, Task Processor, Complexity Classifier) is reduced
+to three. Caller-supplied `--complexity` from Phase 6 is the
+sole source of task-complexity classification in v1.
+
+**Phase 7+1 (post-v1) enhancement candidate**: a real-Claude
+auto-classifier could replace caller-supplied complexity for
+edge-cases where the caller is uncertain. Out of scope for v1;
+documented as Phase 7+1 enhancement in `phase-7-signoff.md` at
+T7.13.
+
+**Effort saved**: ~5 hours of Phase 7 implementation (no new
+spawn site, no new prompt template, no new mock binary case
+branch).
+
+### Implementation surface
+
+**Code (PR-PHASE7-02 lands the file):**
+- `src/lib/spawn_helper.sh` (NEW; T7.02) — exposes
+  `coord_spawn_helper_resolve_mode` (returns one of
+  mock|semi|realistic with fail-closed validation) and
+  `coord_spawn_helper_should_use_real_claude <site>` (returns
+  rc=0 if site uses real claude in current mode; rc=1
+  otherwise).
+- `src/lib/mediator_spawn.sh` (T7.03 refactor) — replace
+  hard-coded `claude -p` invocation with helper call; mock
+  branch reads existing `COORD_MOCK_CLAUDE_*` env-vars (Phase
+  3 pattern preserved).
+- `src/lib/validator_spawn.sh` (T7.03 refactor) — same
+  pattern.
+- `src/lib/task_processor.sh` (T7.03 refactor) — replace the
+  current `COORD_MOCK_CLAUDE_TASK_PATCH`-only branch with
+  helper-driven mode dispatch; preserve env-var override for
+  bats-fixture determinism even when mode != mock (per
+  PR-PHASE6-05 §5 acknowledgement that env-var path remains
+  as a test override).
+
+**Documentation (T7.13 sign-off):**
+- `CLAUDE.md` §B operational guidance — new subsection
+  enumerating modes + when to use each + per-mode cost
+  estimate.
+- `CLAUDE.md` §A.13 lessons — any mode-switching lessons
+  added during T7.02-T7.03 implementation.
+
+**Tests (T7.09):**
+- bats default: `COORD_TEST_MODE` UNSET; suite passes (mock
+  routing).
+- bats explicit mock: `COORD_TEST_MODE=mock` baseline; same
+  results.
+- bats invalid: `COORD_TEST_MODE=garbage` → warning emitted +
+  audit event + fall-through to mock.
+- bats realistic-mode opt-in tag: `bats --filter-tags
+  realistic` exercises a small subset gated on
+  `COORD_TEST_MODE=realistic`; default CI runs do NOT
+  exercise the tag.
+- bats unit: `coord_spawn_helper_resolve_mode` happy/edge
+  cases (10+ tests).
+- bats unit: `coord_spawn_helper_should_use_real_claude` × 3
+  sites × 3 modes = 9 routing assertions.
+
+**Events:**
+- `COORD_TEST_MODE_INVALID` (NEW; emitted once per process on
+  invalid env-var; payload: `value=<raw>`, `defaulted_to=mock`).
+- `COORD_SPAWN_MODE_RESOLVED` (NEW; emitted on first resolve
+  per process; payload: `mode=<resolved>`, `source=env|default`).
+
+### Non-changes (deliberate)
+
+- **Mock binary contract (PR-PHASE6-05 §5)** unchanged. Per-
+  test inline fake binaries via `cat <<...` heredoc remain the
+  canonical Phase 4-5-6 mock pattern. PR-PHASE7-02 does NOT
+  introduce a shared `src/tests/helpers/mock_claude.sh` (still
+  deferred per PR-PHASE6-05 supersession trailer).
+- **Existing claude-binary-missing degradation** unchanged.
+  When `command -v claude` fails AND mode requires real claude
+  (semi or realistic for a routed site), the spawn site emits
+  `<SITE>_SPAWN_REFUSED reason=claude_binary_missing` and
+  returns rc=1 — caller falls open per existing Phase 3-4
+  contracts.
+- **2-location deny invariant** unchanged. Mode switching is
+  helper-internal; no new architectural deny location.
+- **Spawn-site-specific guards** (recursion guard
+  `CLAUDE_CODE_VALIDATOR=1` / `CLAUDE_CODE_MEDIATOR=<depth>`)
+  unchanged — passed verbatim to `claude -p` regardless of
+  mode.
+- **`COORD_MOCK_CLAUDE_TASK_PATCH` env-var override** preserved
+  (test-fixture determinism use-case from PR-PHASE6-05 §5).
+  When this env-var is set AND mode != mock, the override
+  takes precedence (bats-friendly).
+
+### Acknowledgement
+
+DRAFT. Pending user approval at T7.01 close. Final merge into
+CLAUDE.md folds into phase-7-signoff.md at T7.13.
+
+---
+
+## PR-PHASE7-02 — `lib/spawn_helper.sh` + 3-site spawn refactor (OQ4 implementation)
+
+**Date:** 2026-04-28
+**Author:** Phase 7 builder (T7.01).
+**Status:** APPROVED 2026-04-29 at T7.01 close. Gates
+T7.02 (lib creation + unit tests) and T7.03 (Mediator +
+Validator + Task Processor refactor).
+**Driver:** PR-PHASE7-01 §"Implementation surface" requires a
+production-grade helper file before the three site-specific
+refactors land; this PR specifies the helper's API and refactor
+contract so T7.03 has zero ambiguity.
+
+### Observed gap requiring change
+
+PR-PHASE7-01 binds the routing matrix and env-var contract
+but is silent on the helper file's function signatures, error
+modes, and how the three existing spawn sites integrate the
+helper without breaking their existing return-rc contracts
+(rc=0 success, rc=1 spawn-refused with audit event, rc=2
+reserved for verdict-parse failure per Phase 3-4 patterns).
+
+The 3-site refactor is high-blast-radius: any regression in
+`mediator_spawn.sh::coord_mediator_spawn` breaks the Phase 4
+CRITICAL synchronous pathway and the Phase 5 cycle-detected
+deadlock-breaking pathway; any regression in
+`validator_spawn.sh::coord_validator_spawn` breaks the Phase 4
+3-stage pipeline; any regression in
+`task_processor.sh::coord_task_processor_spawn_claude` breaks
+Phase 6 lock-release task application.
+
+### User-resolved decision
+
+#### Helper API
+
+**File:** `src/lib/spawn_helper.sh` (NEW).
+
+**Public functions (3):**
+
+```bash
+# Returns the resolved mode on stdout: mock | semi | realistic.
+# Cached in process-scoped variable _COORD_SPAWN_MODE_CACHED;
+# re-resolves only if cache is unset. Always succeeds (rc=0)
+# — invalid values fall through to mock with a one-time stderr
+# warning and an audit event (PR-PHASE7-01 §"User-resolved
+# decision").
+coord_spawn_helper_resolve_mode() { ... }
+
+# Returns rc=0 if <site> uses real claude in current mode;
+# rc=1 otherwise. <site> ∈ {mediator, validator, task_processor}.
+# Internal: calls coord_spawn_helper_resolve_mode then matches
+# the site against the routing matrix (PR-PHASE7-01 table).
+coord_spawn_helper_should_use_real_claude() { ... }
+
+# Convenience wrapper: emits COORD_SPAWN_MODE_RESOLVED event
+# with payload (mode, source). Idempotent per process via
+# guard variable. Called once at first resolve for audit
+# trail.
+_coord_spawn_helper_emit_resolved_event() { ... }
+```
+
+**Cost-guard interlock (PR-PHASE7-03 binding):**
+
+```bash
+# Returns rc=0 if cost-guard rate-limit allows spawn for
+# <site>; rc=1 if rate-limited. NOT in lib/spawn_helper.sh
+# itself — lives in lib/cost_guards.sh per PR-PHASE7-03 — but
+# the spawn-site refactor MUST call coord_cost_guards_check
+# before invoking real claude in semi or realistic modes. Mock
+# mode skips the cost-guard check (irrelevant).
+```
+
+#### 3-site refactor pattern
+
+Each spawn site follows this pattern:
+
+```bash
+# After the existing claude-binary-presence check + before the
+# real claude -p invocation:
+
+if coord_spawn_helper_should_use_real_claude <site>; then
+  # Cost-guard interlock (PR-PHASE7-03):
+  if ! coord_cost_guards_check <site>; then
+    # rate-limited → emit event, return rate_limited payload
+    # via existing return-rc-1 contract (callers fail-open).
+    return 1
+  fi
+  # Invoke real claude -p (existing code, unchanged).
+else
+  # Mode-routed to mock; invoke existing mock branch.
+  # For Validator + Mediator: existing per-test inline fake
+  # binary at $TMP/bin/claude (PATH manipulation in bats fixture
+  # — no code change needed; the helper just doesn't gate the
+  # real-claude path).
+  # For Task Processor: read COORD_MOCK_CLAUDE_TASK_PATCH or
+  # default literal (PR-PHASE6-05 §5 contract).
+fi
+```
+
+**Mediator + Validator integration (T7.03):** The existing
+inline fake binary mock pattern (per-test `cat <<EOF >
+$TMP/bin/claude` heredoc) works WITHOUT helper involvement —
+the helper only gates whether the spawn site invokes
+`claude -p` in real mode. Mock mode (default) lets the test's
+PATH manipulation point `claude` at the fake. So the refactor
+for Mediator + Validator is small: insert a guard around the
+existing `claude -p` block.
+
+**Task Processor integration (T7.03):** The current code has
+ONLY a mock branch (env-var read or default literal) — no
+real-claude path exists. T7.03 ADDS the real-claude branch
+behind the helper guard:
+
+```bash
+if coord_spawn_helper_should_use_real_claude task_processor; then
+  if ! coord_cost_guards_check task_processor; then
+    # rate-limited path
+    return 1
+  fi
+  # Real claude -p invocation against the same JSON contract
+  # as PR-PHASE6-05 §5.
+  out=$(claude -p "$prompt" --output-format json \
+        --max-budget-usd "$COORD_TASK_PROCESSOR_BUDGET_USD" \
+        ...)
+elif [ -n "${COORD_MOCK_CLAUDE_TASK_PATCH:-}" ]; then
+  # Existing env-var override path (preserved for test
+  # determinism even in non-mock modes per PR-PHASE7-01
+  # non-changes).
+  out="$COORD_MOCK_CLAUDE_TASK_PATCH"
+else
+  # Default literal (PR-PHASE6-05 §5).
+  out='{"status":"COMPLETED","diff":"","affected_lines":[0,0],"rationale":"mock default"}'
+fi
+```
+
+#### Real-claude task-processor prompt template
+
+A new prompt template lives in `lib/task_processor.sh` next
+to the spawn helper. Returns the same JSON contract as
+PR-PHASE6-05 §5. Tool restrictions: `--allowedTools "Bash"
+"Read"` + `--disallowedTools "Write" "Edit" "NotebookEdit"
+"Task"`. Recursion guard env: `CLAUDE_COORD=0` +
+`CLAUDE_CODE_TASK_PROCESSOR=1` (NEW marker; existing Validator
++ Mediator markers unchanged).
+
+Cost guard tunable name (introduced for the new spawn site):
+`COORD_TASK_PROCESSOR_BUDGET_USD` (default $0.50 — same as
+Mediator/Validator per existing precedent).
+`COORD_TASK_PROCESSOR_TIMEOUT_SEC` default 120 (same as
+Validator).
+
+### Implementation surface
+
+**Code:**
+- `src/lib/spawn_helper.sh` (NEW; T7.02; ~80-120 lines).
+- `src/lib/mediator_spawn.sh` — refactor §line 280-294 with
+  helper guard (~10 line delta).
+- `src/lib/validator_spawn.sh` — refactor §line 311-324 with
+  helper guard (~10 line delta).
+- `src/lib/task_processor.sh` — extend
+  `coord_task_processor_spawn_claude` with real-claude branch
+  + prompt template (~80-100 line delta).
+
+**Tests (T7.02):**
+- `src/tests/unit/spawn_helper.bats` (NEW; 12-18 tests):
+  - resolve_mode unset → mock.
+  - resolve_mode mock → mock.
+  - resolve_mode semi → semi.
+  - resolve_mode realistic → realistic.
+  - resolve_mode invalid → mock + warning + event.
+  - resolve_mode caching (second call doesn't re-emit warn).
+  - should_use_real_claude × 3 sites × 3 modes = 9 cases.
+
+**Tests (T7.03):**
+- Existing `mediator_spawn.bats`, `validator_spawn.bats`,
+  `task_processor.bats` extended:
+  - Default mode regression: existing 100% PASS preserved.
+  - `COORD_TEST_MODE=realistic` smoke (per-suite gated under
+    `--filter-tags realistic` opt-in).
+  - Cost-guard rate-limit interaction (cross-references
+    PR-PHASE7-03).
+
+**Events:**
+- (Inherited from PR-PHASE7-01.) Plus `TASK_PROCESSOR_SPAWN_
+  STARTED` / `TASK_PROCESSOR_SPAWN_FAILED` / `TASK_PROCESSOR_
+  SPAWN_REFUSED` (mirroring Mediator/Validator audit triple).
+
+### Non-changes (deliberate)
+
+- Existing per-test inline fake binary pattern unchanged.
+- `lib/mediator_pending.sh` + `lib/verdict_apply.sh` (kind-
+  agnostic dispatch per Phase 5 PR-PHASE5-04 / Phase 6
+  PR-PHASE6-04) unchanged. Mode switching is local to the spawn
+  helper file + 3 spawn sites.
+- 2-location deny invariant preserved.
+- Cost-guard tunables themselves (the three OQ5 vars) live in
+  `lib/cost_guards.sh` per PR-PHASE7-03; this PR only specifies
+  the call-site interlock.
+- Existing claude-binary-missing degradation behavior preserved
+  (rc=1 + audit event; caller fail-open).
+
+### Acknowledgement
+
+DRAFT. Pending user approval at T7.01 close. Final merge into
+CLAUDE.md folds into phase-7-signoff.md at T7.13.
+
+---
+
+## PR-PHASE7-03 — `lib/cost_guards.sh` + tunables enforcement + sliding-window counter design (OQ5 binding)
+
+**Date:** 2026-04-28
+**Author:** Phase 7 builder (T7.01).
+**Status:** APPROVED 2026-04-29 at T7.01 close. Gates
+T7.04 (lib creation + unit tests) and T7.05 (cost-guard
+interlock with semi + realistic modes).
+**Driver:** User-resolved Phase 7 Open Question 5 ("Cost guard
+tunables: mandatory enforcement under semi + realistic modes")
++ Plan §5 Phase 7 carry-forward "Cost-guard tunable
+formalization (Phase 4 carry-forward / Decision 1.2)".
+
+### Observed gap requiring change
+
+Plan §5 Phase 7 says "Cost-guard tunable formalization" but
+does not specify the **enforcement mechanism** (per-site
+counter? sliding window? hard block vs degraded fallback?
+which spawn sites?). Phase 4-6 introduced cost concerns (real
+claude -p cost ~$0.10-$0.50 per Mediator invocation; Validator
+spawns can run dozens of times per active session; Task
+Processor adds another high-cost spawn site for v1) but
+deferred concrete tunables to Phase 7 measurement.
+
+Without enforcement, real-claude runs (semi + realistic modes)
+have no rate ceiling. A pathological scenario (e.g., a
+runaway loop triggering Validator on every drift detection
+across many active sessions) could spend hundreds of dollars
+in minutes before manual intervention.
+
+### User-resolved decision
+
+#### Three tunables
+
+```bash
+# Min seconds between consecutive Mediator invocations across
+# the entire repo (per-process global, NOT per-session).
+COORD_MEDIATOR_MIN_SECONDS_BETWEEN_INVOCATIONS=300
+
+# Max Mediator invocations per rolling 1-hour window.
+COORD_MEDIATOR_MAX_INVOCATIONS_PER_HOUR=12
+
+# Max Validator invocations per rolling 1-hour window.
+COORD_VALIDATOR_MAX_SPAWNS_PER_HOUR=120
+```
+
+**Defaults** are conservative seed values. Phase 7
+measurement (T7.08 stress scripts) MAY calibrate the defaults
+before Phase 7 close based on observed legitimate-load
+distributions; defaults documented in `CLAUDE.md` §B at T7.13.
+
+**Task Processor:** initially NOT rate-limited (Phase 6 task
+delegation is opt-in per `coord task-open`; the human-rate
+limit on issuing `task-open` commands is the natural ceiling).
+Reserved env-var name `COORD_TASK_PROCESSOR_MAX_SPAWNS_PER_HOUR`
+documented but unset (rate-limit branch returns "allow" when
+unset). Phase 7+1 enhancement candidate if observed task-spawn
+rate exceeds expectations.
+
+#### Sliding-window counter design
+
+**State location:** `.coord/cost_guards/<site>.counter`
+(gitignored via `.coord/` blanket).
+
+**Format:** JSON file holding a sorted timestamps array
+(epoch seconds, integer):
+
+```json
+{
+  "site": "mediator",
+  "timestamps_sec": [1714286400, 1714286700, 1714287000],
+  "schema_version": 1
+}
+```
+
+**Lock:** `.coord/cost_guards/<site>.lock` (per-site flock;
+mirrors wait_queue per-file flock pattern from T5.02).
+
+**Window pruning:** on every `coord_cost_guards_check`
+invocation, prune timestamps older than `now - 3600` (1 hour
+sliding window). Prune happens INSIDE the flock-held section
+to avoid races.
+
+**Min-interval check:** for Mediator only, after pruning,
+compare `now - timestamps[-1] >= COORD_MEDIATOR_MIN_SECONDS_
+BETWEEN_INVOCATIONS`. If not, rate_limited.
+
+**Per-hour cap:** after pruning, compare `len(timestamps) <
+COORD_<SITE>_MAX_*_PER_HOUR`. If not, rate_limited.
+
+**Allow path:** append `now` to timestamps; atomic write back
+via `lib/atomic_write.sh` consumer pattern; release flock;
+return rc=0.
+
+**Block path:** do NOT append; emit
+`COST_GUARD_RATE_LIMITED` event with payload (site, current_
+count, limit, reset_at = oldest_timestamp + 3600); release
+flock; return rc=1.
+
+**TTL/reset:** there is no explicit reset; pruning IS the
+reset. If a counter file is ≥ 1 hour old AND no new
+invocations occurred, the next invocation finds an empty post-
+prune array → rate-limit clears naturally.
+
+**Audit event TTL reset:** when pruning empties an array that
+was previously over-limit, emit `COST_GUARD_COUNTER_RESET`
+event for observability (payload: site, prev_count, new_
+count=0).
+
+#### Hard block vs graceful degrade
+
+**Mediator rate-limit hit:** `lib/mediator_spawn.sh::coord_
+mediator_spawn` returns rc=1 + emits `MEDIATOR_SPAWN_REFUSED
+reason=rate_limited`. The Phase 5 PR-PHASE5-04 kind-agnostic
+3-action contract already handles spawn refusal — caller
+proceeds without Mediator verdict (existing fail-open
+contract).
+
+For `cycle_detected` and `critical_drift` pending entries
+(Phase 5 + Phase 4), the synchronous-Mediator path's spawn
+refusal means the deny banner / drift banner reverts to the
+Phase 1 fallback wording. This is degraded-but-correct: the
+operator sees a Phase 1-equivalent warning + an event log
+entry indicating Mediator was rate-limited.
+
+**Validator rate-limit hit:** `lib/validator_spawn.sh::coord_
+validator_spawn` returns rc=1 + emits `VALIDATOR_SPAWN_
+REFUSED reason=rate_limited`. The Phase 4 3-stage pipeline
+(`pre_tool_use_write.sh::_coord_phase4_run_pipeline`) already
+handles spawn failure as Phase 1 fallback; rate_limited is a
+new sub-reason but consumes the same fallback path.
+
+Banner addition (T7.05): the Phase 1 fallback line gains a
+"validator rate-limited" suffix when the rc=1 reason is
+specifically `rate_limited` (vs claude_binary_missing or
+empty_output):
+
+> Drift on `<file>` (modified since read; validator rate-
+> limited). Pipeline temporarily degraded; consider re-reading
+> before proceeding.
+
+**Task Processor rate-limit hit:** RESERVED. Documented but
+unenforced in v1. If `COORD_TASK_PROCESSOR_MAX_SPAWNS_PER_HOUR`
+is set explicitly by an operator, the same rc=1 +
+`TASK_PROCESSOR_SPAWN_REFUSED reason=rate_limited` path
+applies (the task processor invocation in `post_tool_use_
+write.sh` falls open: task is left in PENDING status with
+notification to opener indicating rate-limit).
+
+#### Mode interlock
+
+Cost guards apply differently per mode:
+
+| Mode | Cost guard enforcement |
+|---|---|
+| `mock` | BYPASSED (mock spawns are free; no flock contention) |
+| `semi` | ENFORCED for sites routed to real claude (Mediator + Task Processor); NOT enforced for Validator (mock-routed in semi) |
+| `realistic` | ENFORCED for all 3 routed sites |
+
+The enforcement gating happens in
+`coord_spawn_helper_should_use_real_claude` at the spawn site:
+the call-site only invokes `coord_cost_guards_check` when the
+helper says "yes, use real claude." Mock-routed sites skip
+the cost-guard call entirely.
+
+### Implementation surface
+
+**Code:**
+- `src/lib/cost_guards.sh` (NEW; T7.04; ~150-200 lines).
+  Public functions:
+  - `coord_cost_guards_check <site>` — rc=0 allow / rc=1
+    rate_limited; emits audit events.
+  - `coord_cost_guards_status <site>` — prints current count +
+    limit + reset_at on stdout (used by `coord status` if
+    extended for cost-guard reporting in T7.13).
+  - `coord_cost_guards_clear <site>` — operator escape-hatch
+    to manually clear a counter file (audit event
+    `COST_GUARD_MANUAL_CLEAR`).
+- Spawn-site integrations land in PR-PHASE7-02 §"Cost-guard
+  interlock" + T7.05.
+
+**Tests (T7.04):**
+- `src/tests/unit/cost_guards.bats` (NEW; 18-25 tests):
+  - first invocation allows + counter created.
+  - Nth invocation under cap allows.
+  - cap+1 invocation rate-limits + event emitted.
+  - hour-old timestamps pruned + array shrinks.
+  - empty post-prune array → COUNTER_RESET event.
+  - min-interval check (Mediator only): two back-to-back
+    invocations within 300s → second blocks.
+  - concurrent invocations under flock: two parallel
+    incrementers serialize; counter ends at 2 not 1.
+  - missing counter file → created on demand.
+  - corrupted counter file → reset to empty + RESET event.
+  - cross-site independence: Mediator counter doesn't affect
+    Validator counter.
+
+**Tests (T7.05 cross-mode):**
+- `src/tests/integration/cost_guards_modes.bats` (NEW; 6-10
+  tests):
+  - mock mode: Mediator over-cap → still allows (bypass).
+  - semi mode: Mediator over-cap → blocks; Validator
+    over-cap → still allows (mock in semi).
+  - realistic mode: all 3 sites enforce.
+
+**Events:**
+- `COST_GUARD_RATE_LIMITED` (NEW; payload: site, count,
+  limit, reset_at).
+- `COST_GUARD_COUNTER_RESET` (NEW; payload: site, prev_
+  count).
+- `COST_GUARD_MANUAL_CLEAR` (NEW; payload: site).
+- Per-site `<SITE>_SPAWN_REFUSED reason=rate_limited`
+  variants reuse existing event kinds with new reason value.
+
+**Documentation (T7.13):**
+- `CLAUDE.md` §A.5 — three tunables documented in the
+  configuration section.
+- `CLAUDE.md` §B operational guidance — when rate-limit
+  fires, expected behavior + operator-recovery path
+  (`coord_cost_guards_clear` + investigation).
+
+### Non-changes (deliberate)
+
+- Existing fail-open contract for spawn failures unchanged
+  (rate_limited is a new reason, same fallback path).
+- 2-location deny invariant preserved (rate-limit is fail-
+  open at the call site, never a hook deny).
+- Phase 5 PR-PHASE5-04 kind-agnostic Mediator dispatch
+  unchanged (rate_limited refusal happens BEFORE the
+  Mediator pipeline reads pending kind).
+- Mock mode behavior unchanged (no cost-guard overhead).
+- Counter file is operational state, NOT coord state schema —
+  does NOT bump `schema_version`.
+
+### Acknowledgement
+
+DRAFT. Pending user approval at T7.01 close. Final merge into
+CLAUDE.md folds into phase-7-signoff.md at T7.13.
+
+---
+
+## PR-PHASE7-04 — Manual stress test scripts + bats integration mode handling + Plan §5 Phase 7 4-config harness descope (OQ4/OQ6 binding)
+
+**Date:** 2026-04-28
+**Author:** Phase 7 builder (T7.01).
+**Status:** APPROVED 2026-04-29 at T7.01 close (with Plan §5
+Phase 7 4-config harness DESCOPE explicitly approved per user
+T7.01-close note: "implicit downstream effect of OQ6
+disposition; spec gap mine; implementer F-011 reporting
+caught the deviation correctly"). Gates T7.08 (stress
+scripts) + T7.09 (bats integration mode handling).
+**Driver:** User-resolved Phase 7 Open Question 4
+("Real-Claude integration: three-mode environment-variable
+switch") implementation deliverable list + Open Question 6
+("Multi-machine coord: out of scope reaffirmed"). Implicit
+re-scoping of Plan §5 Phase 7 four-configuration comparative
+harness.
+
+### Observed gap requiring change
+
+Plan §5 Phase 7 (lines 1029-1054) lists a four-configuration
+comparative harness as the headline deliverable:
+
+> 1. N sessions coordinated (our system).
+> 2. N sessions sequential, no coordination.
+> 3. 1 session, all prompts bundled.
+> 4. 1 session, prompts in sequence.
+>
+> Metrics per run: total tokens (scraped from transcript),
+> wall-clock, git-diff-against-expected, correctness pass/fail,
+> task-delegation counters.
+
+The Phase 7 binding decisions (OQ1-OQ7) re-scope this. The
+four-config harness premise — running real `claude -p` across
+N sessions in parallel against multi-machine fixture
+scenarios — implicitly assumed multi-machine team workflows.
+OQ6 binds multi-machine team scenarios as out-of-scope for
+v1 (single-developer / single-machine scope only). Without
+the multi-machine premise, the comparative-harness payoff
+shrinks substantially: a single developer running 4 parallel
+configs is just measuring local Claude variability, not
+coordination effectiveness.
+
+The user's binding decisions instead specify:
+
+- Manual stress test scripts (`scripts/stress_semi.sh` +
+  `scripts/stress_realistic.sh`) for stakes-coverage smoke +
+  pre-release verification.
+- Bats integration mode handling: `COORD_TEST_MODE=mock` as
+  default + `realistic`-mode opt-in via `--filter-tags`.
+
+The four-config harness is **descoped**. Manual stress
+scripts replace it at smaller scope (single-config-per-mode
+smoke + cost guard exercise + real-Claude semantic
+verification on a curated fixture corpus).
+
+### User-resolved decision
+
+#### Plan §5 Phase 7 4-config harness — DESCOPED
+
+The four-configuration comparative harness specified in Plan
+§5 Phase 7 is **descoped** for v1 with the following
+disposition:
+
+- **Removed deliverables**: parallel-session orchestration
+  driver, multi-config metrics scraper, `phase7-results.json`
+  + `phase7-report.md` comparative report, abandonment-
+  trigger metric thresholds (cost multiple > 10×, correctness
+  regressions).
+- **Replaced by**: manual stress test scripts (semi +
+  realistic modes; `scripts/stress_*.sh`) exercising a
+  curated 5-7 prompt scenario corpus per mode + cost-guard
+  rate-limit interaction + spawn-helper mode dispatch.
+- **Retained from §5**: real-Claude semantic verification of
+  Mediator + Validator on synthetic SAFE/MINOR/CRITICAL
+  drifts (≥90% verdict accuracy criterion); task-delegation
+  counter inspection.
+- **Phase 7+1 candidate**: full four-configuration harness
+  with multi-machine team-scenario fixtures, deferred to next
+  major version per OQ6.
+- **Plan §5 textual update at T7.13**: not a Plan §5 amendment
+  in the body (Plan §5 stays the historical record); CLAUDE.md
+  §B Phase 7 limitations subsection captures the descope +
+  rationale + Phase 7+1 candidate explicitly. STATE_OF_SYSTEM
+  Phase 7 update (post-merge separate task) documents the same.
+
+#### Manual stress test scripts
+
+**Files (T7.08):**
+- `scripts/stress_semi.sh` (NEW; ~150-200 lines).
+- `scripts/stress_realistic.sh` (NEW; ~150-200 lines).
+
+**Location rationale:** repo-root `scripts/` directory is the
+natural home for operator-facing scripts not part of bats /
+production code. Mirrors common open-source convention. Both
+files are executable (`chmod +x`); shebang `#!/usr/bin/env
+bash` per CLAUDE.md §A.5.
+
+**Per-script structure:**
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+# scripts/stress_<mode>.sh
+#
+# Manual stress test for COORD_TEST_MODE=<mode>.
+#
+# Usage: bash scripts/stress_<mode>.sh [scenario_id]
+#
+# Exercises:
+#   - Spawn-helper mode dispatch
+#   - Cost-guard rate-limit interaction
+#   - Real-Claude semantic verification on curated drifts
+#
+# Cost estimate: ~$<X>/full run (semi) or ~$<Y>/full run
+# (realistic). Refer to CLAUDE.md §B for current calibrated
+# estimates.
+#
+# Prerequisites:
+#   - claude -p binary on PATH
+#   - .coord/ initialized (run coord install first)
+#   - ANTHROPIC_API_KEY env-var set (or equivalent auth)
+
+# 5-7 fixture scenarios per script:
+#   1. Single-session SAFE drift (validator path)
+#   2. Single-session MINOR drift (validator path)
+#   3. Single-session CRITICAL drift (validator → mediator
+#      synchronous path)
+#   4. Two-session lock-held + task delegation (mediator
+#      verdict applied)
+#   5. Cost-guard rate-limit boundary test (Mediator at cap)
+#   ... (semi-specific or realistic-specific)
+```
+
+**Output:** each script writes `scripts/stress_<mode>_
+out/<ISO_ts>.log` containing fixture-by-fixture pass/fail +
+event log excerpts + cost summary (total tokens + estimated
+USD per OQ5 cost-guard counter inspection).
+
+**Idempotence:** scripts clean their `.coord/` workspace at
+start (operator confirmation prompt to avoid clobbering
+production state).
+
+**CI integration:** scripts NOT run in CI by default. Manual
+operator invocation only. Pre-release smoke test workflow:
+operator runs `scripts/stress_realistic.sh` once before
+tagging v1.0.
+
+#### Bats integration mode handling
+
+**Default behavior:** `COORD_TEST_MODE` UNSET → all bats
+tests run in mock mode (existing behavior preserved). CI
+runs no `claude -p` real-mode invocations.
+
+**Realistic-mode opt-in:** specific bats tests carry the
+`@realistic` tag (bats supports `# bats test_tags=realistic`
+inline metadata):
+
+```bash
+# bats test_tags=realistic
+@test "spawn_helper: realistic mode dispatches Mediator to
+real claude -p" {
+  [ "${COORD_TEST_MODE:-}" = "realistic" ] || skip
+  # ... real claude invocation ...
+}
+```
+
+Tag-gated tests `skip` unless `COORD_TEST_MODE=realistic` is
+explicitly exported. Operator runs them via:
+
+```bash
+COORD_TEST_MODE=realistic bats --filter-tags realistic \
+  src/tests/integration/spawn_helper_modes.bats
+```
+
+**Tag inventory (T7.09):**
+- `realistic` — exercises real `claude -p`. Approx 5-10 tests
+  per spawn site; each test has a small explicit cost (<$0.10)
+  documented in test comments.
+
+**CI safety:** primary `bats` invocation in CI uses
+`--filter-tags '!realistic'` to exclude realistic-tagged
+tests, OR runs WITHOUT setting `COORD_TEST_MODE`, where the
+tests skip naturally. Both belt-and-suspenders.
+
+### Implementation surface
+
+**Code:**
+- `scripts/stress_semi.sh` (NEW; T7.08).
+- `scripts/stress_realistic.sh` (NEW; T7.08).
+- `scripts/stress_semi_out/` (gitignored; output dir).
+- `scripts/stress_realistic_out/` (gitignored; output dir).
+
+**.gitignore additions:**
+```
+# Manual stress test outputs (per-run logs).
+scripts/stress_semi_out/
+scripts/stress_realistic_out/
+```
+
+**Tests (T7.09):**
+- `src/tests/integration/spawn_helper_modes.bats` (NEW; 6-10
+  tests with `realistic` tag for the real-claude paths).
+- Existing `bats` suites: extended with realistic-tag opt-in
+  cases for spawn_helper, mediator_spawn, validator_spawn,
+  task_processor.
+
+**Documentation (T7.13):**
+- `CLAUDE.md` §B Phase 7 subsection — when to use each mode +
+  per-mode cost estimate + "v1 single-developer scope; multi-
+  machine team scenarios deferred to next major version per
+  OQ6" callout + Plan §5 4-config harness descope rationale.
+- Cumulative ship-gate fixtures expected at Phase 7 close
+  (per Q6 preserve-precedent): 23-24 fixtures across 6 dirs
+  (existing 19 from Phases 0-6 + Phase 7's 4-5 new ship-gate
+  fixtures from T7.11). The stress scripts at
+  `scripts/stress_*.sh` are SEPARATE from ship-gate fixtures
+  — they exercise real-claude paths for stakes-coverage
+  rather than the deterministic invariant-verification role
+  of ship-gate fixtures.
+
+### Non-changes (deliberate)
+
+- Plan §5 Phase 7 historical text NOT amended (Phase 5/6
+  precedent: Plan §5 is the historical record; revisions live
+  in plan-revisions.md). PR-PHASE7-04 IS the canonical
+  amendment.
+- Bats default behavior preserved (mock mode, ~582+ unit +
+  19+ ship-gate fixtures pre-T7.11; +4-5 ship-gate fixtures
+  at T7.11 closing).
+- 2-location deny invariant preserved (stress scripts and
+  bats mode handling are operational, not architectural).
+- Existing per-test inline mock binary pattern unchanged (mock
+  mode is the default mock pattern path).
+
+### Acknowledgement
+
+DRAFT. Pending user approval at T7.01 close. Plan §5 Phase 7
+4-config harness descope is the most consequential element
+of this PR — user binding required explicitly at T7.01 close
+before T7.08 begins. Final merge into CLAUDE.md folds into
+phase-7-signoff.md at T7.13.
+
+---
+
+## PR-PHASE7-05 — F-016/F-017/F-019 dispositions + Phase 7 architectural invariant 17→19 guard transition + multi-machine OOS reaffirmation (OQ1/OQ2/OQ3/OQ6/OQ7 binding)
+
+**Date:** 2026-04-28
+**Author:** Phase 7 builder (T7.01).
+**Status:** APPROVED 2026-04-29 at T7.01 close. Gates T7.06
+(F-016 audit) + T7.07 (F-019 relocation) + T7.10
+(`phase7_invariant.bats` + delete `phase6_invariant.bats`).
+**Driver:** User-resolved Phase 7 Open Questions 1, 2, 3, 6,
+7 dispositions for the three open findings carrying into
+Phase 7 + the architectural invariant transition + the
+multi-machine out-of-scope reaffirmation.
+
+### Observed gap requiring change
+
+Phase 6 closed with three OPEN findings carrying into Phase 7
++ a 17-guard architectural invariant + an implicit
+multi-machine scope question:
+
+- **F-016** (`coord wait` SIGINT runtime test deferred): test-
+  harness flake under bats parallel execution; production
+  trap behavior verified manually correct.
+- **F-017** (109ms ambient-suspicion scan latency): higher
+  than PR-PHASE3-02's <50ms estimate; well below the 2-second
+  hard ceiling.
+- **F-019** (Linux probe driver gitignored): phase additions
+  to `.coord/experiments/linux-parity/linux_probe.sh` don't
+  propagate across fresh checkouts because the `.coord/`
+  blanket gitignore excludes the file.
+
+Phase 7 needs explicit dispositions for all three plus the
+architectural invariant count update (17 → 19 reflecting
+PR-PHASE7-02 + PR-PHASE7-03 NEW lib files) plus the multi-
+machine scope reaffirmation per OQ6.
+
+### User-resolved decision
+
+#### F-016 — Hybrid Audit-First (OQ1)
+
+**Phase 7 effort: 1-4 hours (audit outcome dependent).**
+
+**Phase 1 (T7.06; ~1 hour):** SIGINT-path audit.
+- Read `src/bin/coord` (cmd_wait function) + `lib/wait_
+  queue.sh` + `lib/wait_backend.sh` from a fresh perspective.
+- Map the trap registration → fswatch/inotifywait child
+  PID lifecycle → wake_file content read sequence under SIGINT
+  delivery.
+- Inspect bats test scaffolding (`src/tests/unit/coord_
+  wait.bats` + `cmd_wait_signal.bats` if exists) for the
+  flake-trigger pattern.
+- Cross-reference §A.13 lessons #4 (claude -p spawn
+  discipline — child process lifecycle) + #7 (Bash 3.2
+  parser fragility — flock-held subshells) + #17 (bats
+  bash -c subshell wrapper).
+
+**Phase 2 (T7.06a, conditional; ~2-3 hours):**
+- **Audit clean (no specific cause found):** F-016 →
+  RESOLVED-as-DEFERRED with rationale documented in
+  `phase-7-signoff.md` findings table:
+  > "Production-correct (manual verification across 5 macOS
+  > terminal sessions); test-harness flake acceptable for v1.
+  > Phase 7+1 enhancement candidate: re-test under
+  > integration harness with real `claude -p` processes
+  > outside bats parallel execution context."
+- **Audit fix (specific cause found):** targeted fix lands in
+  the offending file; F-016 → RESOLVED with 1000-iteration
+  parallel-bats green run as evidence (the target evidence
+  bar; current test passes ~80% of runs).
+
+**Audit deliverables (always produced):**
+- T7.06 close report includes the audit findings even on
+  "no specific cause found" verdict.
+- Audit notes archived in IMPLEMENTATION_LOG.md T7.06 entry
+  for future reference.
+
+#### F-017 — Pragmatic Acceptance (OQ2)
+
+**Phase 7 effort: ~30 minutes (documentation-only).**
+
+F-017 status: **KNOWN/ACCEPTED** in FINDINGS.md.
+
+**Rationale:** "109ms median is well below CLAUDE.md §A.6's
+2-second hard ceiling (~5% of budget). At 5+ concurrent
+sessions the heavy-load p99 estimate of 200-300ms remains
+~10-15% of budget. Acceptable for v1 single-developer scope.
+Optimization options (a)-(d) from F-017 Action remain valid
+post-v1 candidates if user-visible impact emerges from
+production telemetry."
+
+**No production code changes.** No optimization effort.
+
+**Documentation (T7.13):**
+- FINDINGS.md F-017 entry: status flipped to KNOWN/ACCEPTED
+  + resolution paragraph documenting the rationale.
+- `phase-7-signoff.md` findings table: F-017 row with
+  KNOWN/ACCEPTED tag.
+- STATE_OF_SYSTEM Phase 7 limitations section (post-merge
+  task): "ambient-suspicion scan p99 latency is 200-300ms
+  under 5+ concurrent sessions; well below 2s hard ceiling
+  but a known optimization candidate."
+
+#### F-019 — Relocate Linux Probe Driver (OQ3)
+
+**Phase 7 effort: ~45 minutes.**
+
+**Source:** `.coord/experiments/linux-parity/linux_probe.sh`
+(gitignored via `.coord/` blanket).
+
+**Target:** `src/tests/manual/linux_probe.sh` (committed,
+mirrors existing `src/tests/manual/phase{3,4,5,6}_ship_
+gate.sh` location convention).
+
+**T7.07 sequence:**
+1. `cp .coord/experiments/linux-parity/linux_probe.sh src/
+   tests/manual/linux_probe.sh`.
+2. Verify all Phase 3/4/5/6 invocation blocks present (file
+   contains `phase3_ship_gate.sh`, `phase4_ship_gate.sh`,
+   `phase5_ship_gate.sh`, `phase6_ship_gate.sh` invocations
+   per `grep` audit).
+3. Update internal path references inside `linux_probe.sh`
+   (e.g., if it sources `.coord/experiments/linux-parity/
+   common.sh`, update to relative-from-new-location path or
+   inline the helper).
+4. `chmod +x src/tests/manual/linux_probe.sh`.
+5. `git add src/tests/manual/linux_probe.sh`.
+6. Update `CLAUDE.md` references (if any to the old path):
+   §A.13 lesson preamble references "Linux re-probe via
+   `.coord/experiments/linux-parity/run.sh`" — update to
+   `bash src/tests/manual/linux_probe.sh` (or whatever the
+   new invocation pattern resolves to). T7.07 builder verifies
+   F-018 RESOLVED resolution paragraph in FINDINGS.md still
+   makes sense post-relocation.
+7. Run Linux Docker probe via the new path; verify 582+
+   unit + 19+ ship-gate fixtures still PASS on Ubuntu
+   24.04.
+8. Delete `.coord/experiments/linux-parity/linux_probe.sh`
+   (or leave with a one-line forwarding stub if operator
+   habit needs it; default: delete cleanly).
+9. F-019 → RESOLVED at Phase 7 close.
+
+**Old-path forwarding stub (optional):**
+
+If operator muscle-memory invokes
+`.coord/experiments/linux-parity/run.sh` (the existing 1052-
+byte runner that wraps `linux_probe.sh`), the runner can
+remain unchanged but its internal call updates to `bash src/
+tests/manual/linux_probe.sh`. Decision deferred to T7.07
+builder based on what the file actually does.
+
+#### Phase 7 architectural invariant — 17 → 19 guards (OQ7)
+
+`phase7_invariant.bats` supersedes `phase6_invariant.bats`
+(mirrors prior phase transitions: T6.08 deleted
+`phase5_invariant.bats`; T5.07 deleted `phase4_invariant.bats`;
+T4.06 deleted `phase3_invariant.bats`).
+
+**Architectural guards #1-#8 (Phase 3+4+5+6+7 carry-forward):**
+
+1. `permissionDecision` occurrences in `hooks/*.sh` confined
+   to `pre_tool_use_write.sh`.
+2. `permissionDecision` occurrences in `lib/*.sh` confined to
+   `lockdown.sh`.
+3. `pre_tool_use_write.sh` exactly 1 `emit_deny` call site.
+4. `lib/lockdown.sh` exactly 1 deny-emit.
+5. Every coord-owned hook sources `lib/lockdown.sh` and calls
+   `coord_lockdown_check` + `coord_lockdown_emit_deny`.
+6. Every hook is exit-0 fail-open.
+7. Mediator dispatch is kind-agnostic (zero `case ... <kind>)`
+   branches in `lib/mediator_spawn.sh` / `lib/mediator_
+   pending.sh` / `lib/verdict_apply.sh`).
+8. Watchdog probe enforces 3-signal conservative model
+   (Signal 1 mandatory for alive verdict).
+
+**Phase 4+5+6 bonus guards (carry-forward, #9-#17):**
+
+9. `lib/validator_spawn.sh` (Phase 4).
+10. `lib/validator_prefilter.sh` (Phase 4).
+11. `lib/validator_cache.sh` (Phase 4).
+12. `lib/wait_queue.sh` (Phase 5).
+13. `lib/cycle_detection.sh` (Phase 5; Phase 6 added
+    `coord_cycle_detect_task_graph` function in same file).
+14. `lib/wait_backend.sh` (Phase 5).
+15. `lib/task_processor.sh` (Phase 6).
+16. `lib/self_tasks.sh` (Phase 6).
+17. `src/bin/coord` task-open + self-delegate CLI subcommands
+    (Phase 6).
+
+**Phase 7 NEW bonus guards:**
+
+18. `lib/spawn_helper.sh` (Phase 7 NEW from T7.02) — mode-
+    aware spawn dispatch is operational helper; cost-guard
+    interlock at call site is fail-open (rc=1 = caller
+    fail-open per existing Phase 3-4 contracts), NEVER
+    `permissionDecision: "deny"`.
+19. `lib/cost_guards.sh` (Phase 7 NEW from T7.04) — sliding-
+    window rate-limit counters; rate_limited verdict is
+    rc=1 fail-open at spawn-site call (caller proceeds with
+    Phase 1 fallback), NEVER `permissionDecision: "deny"`.
+
+**Total: 8 architectural guards + 11 bonus guards = 19 guards.**
+
+The static-grep gate fails the test if (a) any code path
+emits `permissionDecision` outside the two allowed locations,
+OR (b) Mediator dispatch grows kind-branching, OR (c) the
+watchdog regresses to non-Signal-1-mandatory alive verdicts,
+OR (d) any of the 11 bonus-guarded files / CLI dispatcher
+grows a `permissionDecision` string.
+
+**2-location deny invariant prediction:** PRESERVED through
+Phases 3+4+5+6+7. Cost-guard rate-limit enforcement uses
+rc=1 fail-open at spawn-site call (caller proceeds with Phase
+1 fallback wording per PR-PHASE7-03 §"Hard block vs graceful
+degrade"); NO new architectural deny location is introduced.
+Mode switching is helper-internal; spawn helper returns rc=0
+or rc=1 with no permission verbs.
+
+**Future phases (8+):** every new `lib/` or `hooks/` file MUST
+be added to the invariant test's enumeration. New pending
+kinds (if any future phase introduces them despite the
+no-new-kind preference) MUST flow through the existing
+kind-agnostic dispatch and 3-action contract.
+
+#### Multi-machine coord OOS reaffirmation (OQ6)
+
+**Phase 7 effort: ~0 hours (documentation paragraph only).**
+
+v1 explicitly single-developer / single-machine scope.
+
+**Rationale:** the `.coord/` directory layout, file-locking
+strategy (`flock` on local lock files), wake-file backend
+(local fswatch/inotifywait/polling), session ID generation
+(local UUID), and event log (`.coord/events.jsonl` local
+append) all assume a single machine. Multi-machine team
+coordination (e.g., shared Git repo accessed from multiple
+developer laptops simultaneously) requires distributed
+locking, network-file-system-aware backends, distributed
+event log, conflict resolution across machine boundaries —
+fundamentally different architecture.
+
+**Documentation (T7.13):**
+- `CLAUDE.md` §B Phase 7 subsection — "v1 scope: single-
+  developer / single-machine. Multi-machine team scenarios
+  (shared NFS / SSHFS / etc.) are not supported and will
+  produce undefined behavior. Multi-machine coord deferred to
+  next major version."
+- `phase-7-signoff.md` Phase 7+1 enhancement candidates list
+  — multi-machine coordination as the headline next-major-
+  version candidate.
+- STATE_OF_SYSTEM Phase 7 limitations section.
+
+**No code changes.**
+
+### Implementation surface
+
+**Code (PR-PHASE7-02 + PR-PHASE7-03 land the bonus-guard
+target files; this PR specifies the invariant-test update):**
+- `src/tests/unit/phase7_invariant.bats` (NEW; T7.10) — 19
+  static-grep guards.
+- `src/tests/unit/phase6_invariant.bats` DELETED at T7.10
+  (mirror of T6.08 / T5.07 / T4.06 transitions).
+- `src/tests/manual/linux_probe.sh` (RELOCATED from
+  `.coord/experiments/linux-parity/`; T7.07).
+- `.coord/experiments/linux-parity/linux_probe.sh` deleted at
+  T7.07 (or replaced with one-line forwarding stub per T7.07
+  builder discretion).
+
+**Documentation (T7.13):**
+- `CLAUDE.md` §C.4a — Phase 7 19-guard section (replaces
+  Phase 6 17-guard section). 2-location deny invariant
+  preservation note expanded to cite Phases 3+4+5+6+7. New
+  bonus-guard files (#18, #19) enumerated.
+- `CLAUDE.md` §B Phase 7 subsection — three-mode env-var
+  switch + cost-guard tunables + Phase 7 limitations + multi-
+  machine OOS reaffirmation.
+- `CLAUDE.md` §A.13 — any Phase 7 lessons added (T7.02-T7.11
+  candidates per pre-implementation audit checklist).
+- FINDINGS.md — F-016 disposition (RESOLVED-DEFERRED or
+  RESOLVED with fix), F-017 KNOWN/ACCEPTED, F-019 RESOLVED.
+- `phase-7-signoff.md` (NEW; gitignored; T7.13).
+
+**Tests (T7.10):**
+- `phase7_invariant.bats`: 19 static-grep tests + 2-location
+  deny invariant grep gate + Mediator dispatch
+  kind-agnosticity grep gate + watchdog Signal-1 mandate grep
+  gate.
+
+### Non-changes (deliberate)
+
+- 2-location deny invariant unchanged (no Phase 7 addition).
+- Plan §5 Phase 7 historical text unchanged (Phase 5/6
+  precedent — historical record preserved).
+- Multi-machine coord scope unchanged (was never v1; OQ6
+  reaffirms).
+- F-018 RESOLVED resolution unchanged (Phase 3 fix carry-
+  forward; T7.07 audits the FINDINGS.md prose for path
+  consistency post-relocation).
+
+### Acknowledgement
+
+DRAFT. Pending user approval at T7.01 close. F-016 audit
+outcome (RESOLVED with fix vs RESOLVED-DEFERRED) is the
+remaining variable; user reviews the audit report at T7.06
+close before T7.06a (conditional fix) opens. Final merge into
+CLAUDE.md folds into phase-7-signoff.md at T7.13.
+
+---
+
 *Future entries append below.*
 
 
