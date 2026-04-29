@@ -58,7 +58,7 @@ v1's `events.jsonl` schema is designed to feed this UI. When building the UI, ve
 - Payload fields are consistent per kind.
 - New event kinds are added with backward-compatible additive fields only; never repurpose an existing kind.
 
-If during UI construction the schema proves inadequate, propose additions via `plan-revisions.md` — do not silently change the event format.
+If during UI construction the schema proves inadequate, propose additions via `docs/development-history/plan-revisions.md` — do not silently change the event format.
 
 ### Relation to cost / abandonment
 

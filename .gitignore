@@ -5,7 +5,12 @@
 .coord/
 
 # Hook registrations and local overrides.
-.claude/settings.local.json
+.claude/
+
+# Local dev environment — Claude Code skills + agents
+# installed by the developer, not ship surface.
+.agents/
+skills-lock.json
 
 # Construction-time logs and findings.
 IMPLEMENTATION_LOG.md
