@@ -46,6 +46,14 @@
 : "${COORD_VALIDATOR_MAX_EMBEDDED_BYTES:=102400}"   # 100 KB truncation
 : "${COORD_VALIDATOR_MAX_DIFF_BYTES:=51200}"        # 50 KB truncation
 
+# Phase 7 / T7.05 process-scoped sentinel — communicates the
+# specific reason for the most recent coord_validator_spawn rc=1.
+# Empty string when last spawn succeeded or failed for non-
+# rate-limit reason. Read by `_coord_phase4_run_pipeline` after
+# stage-3 spawn to decide whether to degrade to MINOR with
+# rate-limited banner suffix or fall through to Phase 1 fallback.
+_COORD_VALIDATOR_LAST_FAIL_REASON="${_COORD_VALIDATOR_LAST_FAIL_REASON:-}"
+
 # Internal helpers ---------------------------------------------------------
 
 _coord_validator_warn() {
@@ -239,6 +247,10 @@ _coord_validator_pick_latest_valid_verdict() {
 coord_validator_spawn() {
   local sid="$1" file="$2" rhash="$3" chash="$4"
 
+  # Phase 7 / T7.05: reset rate-limit sentinel at every entry. It
+  # is set non-empty only on the cost-guard rate-limited path.
+  _COORD_VALIDATOR_LAST_FAIL_REASON=""
+
   if [ -z "$sid" ] || [ -z "$file" ] || [ -z "$rhash" ] || [ -z "$chash" ]; then
     _coord_validator_warn "missing args (sid=$sid file=$file rhash=$rhash chash=$chash)"
     return 1
@@ -303,12 +315,20 @@ coord_validator_spawn() {
       || _spawn_mode_resolved=mock
     if coord_spawn_helper_should_use_real_claude validator 2>/dev/null; then
       _spawn_real_claude=1
+      # T7.05 cost-guard interlock (filled): rate-limited → set
+      # process-scoped sentinel _COORD_VALIDATOR_LAST_FAIL_REASON
+      # so the upstream pipeline can detect rate-limited (vs other
+      # spawn failures) and degrade to MINOR conservative classify
+      # with banner suffix per PR-PHASE7-03 §"Hard block vs
+      # graceful degrade".
       if command -v coord_cost_guards_check >/dev/null 2>&1; then
         if ! coord_cost_guards_check validator 2>/dev/null; then
           _coord_validator_warn "cost-guard rate-limited validator spawn"
+          _COORD_VALIDATOR_LAST_FAIL_REASON=rate_limited
           if command -v coord_log_event >/dev/null 2>&1; then
-            coord_log_event kind=VALIDATOR_SPAWN_FAILED \
-              file="$file" reason=rate_limited 2>/dev/null || true
+            coord_log_event kind=VALIDATOR_SPAWN_RATE_LIMITED \
+              file="$file" mode_resolved="$_spawn_mode_resolved" \
+              2>/dev/null || true
           fi
           return 1
         fi

@@ -67,6 +67,11 @@ LIB_DIR="$(cd "$HOOK_DIR/../lib" && pwd)"
 . "$LIB_DIR/validator_prefilter.sh"
 # shellcheck disable=SC1091
 . "$LIB_DIR/validator_spawn.sh"
+# Phase 7 / T7.05 — mode-aware spawn dispatch + cost-guard
+# interlock activation. Optional sources (graceful degrade if
+# absent) per CLAUDE.md §A.5 fail-open posture.
+[ -f "$LIB_DIR/spawn_helper.sh" ] && . "$LIB_DIR/spawn_helper.sh"
+[ -f "$LIB_DIR/cost_guards.sh" ] && . "$LIB_DIR/cost_guards.sh"
 # shellcheck disable=SC1091
 . "$LIB_DIR/mediator_pending.sh"
 # shellcheck disable=SC1091
@@ -310,6 +315,21 @@ _coord_phase4_run_pipeline() {
   verdict_path=$(coord_validator_spawn "${SESSION_ID:-unknown}" "$file" "$rhash" "$chash" 2>/dev/null) \
     || verdict_path=""
   if [ -z "$verdict_path" ] || [ ! -f "$verdict_path" ]; then
+    # Phase 7 / T7.05: graceful degrade on cost-guard rate-limit.
+    # The validator_spawn helper sets _COORD_VALIDATOR_LAST_FAIL_REASON
+    # to "rate_limited" only on the cost-guard rate-limit path;
+    # any other failure leaves the sentinel empty.  Rate-limited
+    # → conservative MINOR classification with banner suffix
+    # (PR-PHASE7-03 §"Hard block vs graceful degrade"); other
+    # failures fall through to Phase 1 fallback (existing
+    # contract).
+    if [ "${_COORD_VALIDATOR_LAST_FAIL_REASON:-}" = "rate_limited" ]; then
+      coord_log_event kind=VALIDATOR_PIPELINE_DEGRADED file="$file" \
+        reason=rate_limited classified_as=MINOR || true
+      printf 'Drift on %s: classified as MINOR. Proceeding. [validator rate-limited]' \
+        "$file"
+      return 0
+    fi
     coord_log_event kind=VALIDATOR_PIPELINE_FAILED file="$file" \
       reason=validator_spawn_failed || true
     return 1

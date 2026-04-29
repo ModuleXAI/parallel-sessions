@@ -270,15 +270,20 @@ coord_mediator_spawn() {
       || _spawn_mode_resolved=mock
     if coord_spawn_helper_should_use_real_claude mediator 2>/dev/null; then
       _spawn_real_claude=1
-      # T7.05 cost-guard interlock slot: when coord_cost_guards_check
-      # is implemented, call it here. Rate-limited → REFUSED return 1
-      # via Phase 1 fallback contract (caller fail-open).
+      # T7.05 cost-guard interlock (filled): cost_guards.sh
+      # provides coord_cost_guards_check; rate-limited → return 1
+      # with dedicated MEDIATOR_SPAWN_RATE_LIMITED audit kind +
+      # rate_limited dispatch payload (kind-agnostic Mediator
+      # dispatch handles per Phase 5 PR-PHASE5-04 / Phase 6
+      # PR-PHASE6-04). Caller fail-open per existing Phase 3-4
+      # contract.
       if command -v coord_cost_guards_check >/dev/null 2>&1; then
         if ! coord_cost_guards_check mediator 2>/dev/null; then
           _coord_mediator_warn "cost-guard rate-limited mediator spawn"
           if command -v coord_log_event >/dev/null 2>&1; then
-            coord_log_event kind=MEDIATOR_SPAWN_REFUSED \
-              reason=rate_limited 2>/dev/null || true
+            coord_log_event kind=MEDIATOR_SPAWN_RATE_LIMITED \
+              pending_entry_id="$pending_id" depth="$depth" \
+              mode_resolved="$_spawn_mode_resolved" 2>/dev/null || true
           fi
           return 1
         fi

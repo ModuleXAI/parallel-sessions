@@ -42,6 +42,11 @@ LIB_DIR="$(cd "$HOOK_DIR/../lib" && pwd)"
 . "$LIB_DIR/lockdown.sh"
 # shellcheck disable=SC1091
 [ -f "$LIB_DIR/task_processor.sh" ] && . "$LIB_DIR/task_processor.sh"
+# Phase 7 / T7.05 — mode-aware spawn dispatch + cost-guard
+# interlock activation for the task processor. Optional sources
+# (graceful degrade if absent).
+[ -f "$LIB_DIR/spawn_helper.sh" ] && . "$LIB_DIR/spawn_helper.sh"
+[ -f "$LIB_DIR/cost_guards.sh" ] && . "$LIB_DIR/cost_guards.sh"
 # T5.04 / PR-PHASE5-02 §5: notify_waiters' 4-tier diff_summary chain
 # uses validator_cache (tier 2), validator_prefilter + read_snapshots
 # (tier 3), and hash (tier 2/3 inputs). Source defensively — present

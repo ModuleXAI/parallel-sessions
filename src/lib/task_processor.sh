@@ -233,12 +233,16 @@ coord_task_processor_spawn_claude() {
 _coord_tp_real_claude_spawn() {
   local task_record_json="${1:-}"
 
-  # Cost-guard interlock (T7.05; no-op until lib/cost_guards.sh
-  # ships).
+  # Phase 7 / T7.05 cost-guard interlock (filled): cost_guards.sh
+  # provides coord_cost_guards_check. task_processor in Phase 7 is
+  # reserved-but-unset (max=0 sentinel = always-allow per
+  # PR-PHASE7-03 §"Three tunables"); the call falls through to
+  # rc=0 every time. Path remains for forward-compat (Phase 7+1
+  # may set the tunable).
   if command -v coord_cost_guards_check >/dev/null 2>&1; then
     if ! coord_cost_guards_check task_processor 2>/dev/null; then
-      coord_log_event kind=TASK_PROCESSOR_SPAWN_REFUSED \
-        reason=rate_limited 2>/dev/null || true
+      coord_log_event kind=TASK_PROCESSOR_SPAWN_RATE_LIMITED \
+        2>/dev/null || true
       return 1
     fi
   fi
