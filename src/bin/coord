@@ -345,8 +345,21 @@ cmd_wait() {
   fi
 
   # SIGINT/SIGTERM trap: dequeue self + kill any backend watcher pid.
+  # Phase 7 / T7.06a (F-016 fix):
+  #   1. Use coord_log_event_sync (NOT async) so events.jsonl write
+  #      completes before exit 130 fires; closes the
+  #      backgrounded-flush race documented in F-016 audit.
+  #   2. Explicitly kill _COORD_WAIT_FSWATCH_PID + _COORD_WAIT_SLEEPER_PID
+  #      (set by coord_wait_for_release_fswatch) before exit so the
+  #      child watchers don't orphan to PID 1.
   cleanup_interrupt() {
-    coord_log_event kind=WAIT_TIMEOUT file="$path" \
+    if [ -n "${_COORD_WAIT_FSWATCH_PID:-}" ]; then
+      kill -TERM "$_COORD_WAIT_FSWATCH_PID" 2>/dev/null || true
+    fi
+    if [ -n "${_COORD_WAIT_SLEEPER_PID:-}" ]; then
+      kill -TERM "$_COORD_WAIT_SLEEPER_PID" 2>/dev/null || true
+    fi
+    coord_log_event_sync kind=WAIT_TIMEOUT file="$path" \
       requested="$timeout_req" applied="$timeout_applied" \
       reason=interrupted \
       waited_for=$(( $(date -u +%s) - started_epoch ))

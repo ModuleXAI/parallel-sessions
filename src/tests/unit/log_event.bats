@@ -94,3 +94,52 @@ teardown() {
   # "bad key" (space in key) must NOT become a field.
   [ "$(echo "$line" | jq -r '.payload | keys | length')" -eq 1 ]
 }
+
+# -----------------------------------------------------------------
+# Phase 7 / T7.06a — coord_log_event_sync (F-016 fix)
+# -----------------------------------------------------------------
+
+@test "log_event_sync: write completes BEFORE function returns (no sleep needed)" {
+  # Critical contract: caller can grep events.jsonl immediately
+  # after sync return, no sleep delay required (vs the async
+  # variant which needs sleep 0.2 above).
+  run "$LOG" --sync kind=WAIT_TIMEOUT reason=interrupted file=/foo
+  [ "$status" -eq 0 ]
+  # NO sleep here — write must already be flushed.
+  [ -s "$COORD_DIR/events.jsonl" ]
+  local line
+  line=$(head -1 "$COORD_DIR/events.jsonl")
+  [ "$(echo "$line" | jq -r .kind)" = "WAIT_TIMEOUT" ]
+  [ "$(echo "$line" | jq -r .payload.reason)" = "interrupted" ]
+}
+
+@test "log_event_sync: payload shape identical to async variant" {
+  run "$LOG" --sync kind=WAIT_TIMEOUT tool=Bash file=/x hash=ff reason=interrupted
+  [ "$status" -eq 0 ]
+  local line
+  line=$(head -1 "$COORD_DIR/events.jsonl")
+  [ "$(echo "$line" | jq -r .kind)" = "WAIT_TIMEOUT" ]
+  [ "$(echo "$line" | jq -r .tool)" = "Bash" ]
+  [ "$(echo "$line" | jq -r .file)" = "/x" ]
+  [ "$(echo "$line" | jq -r .hash)" = "ff" ]
+  [ "$(echo "$line" | jq -r .session)" = "$SESSION_ID" ]
+  [ "$(echo "$line" | jq -r .payload.reason)" = "interrupted" ]
+}
+
+@test "log_event_sync: missing COORD_DIR → silent no-op (same as async)" {
+  unset COORD_DIR
+  run "$LOG" --sync kind=INFO message=nocoord
+  [ "$status" -eq 0 ]
+}
+
+@test "log_event_sync: 5 concurrent sync appends serialize via flock" {
+  for i in 1 2 3 4 5; do
+    ( "$LOG" --sync kind=LOCK_ACQUIRE tool=Write file=/sf/$i hash=s$i index="$i" ) &
+  done
+  wait
+  # NO post-wait sleep — sync semantics guarantee writes complete
+  # before each `wait` $! returns.
+  local k
+  k=$(jq -r 'select(.kind == "LOCK_ACQUIRE") | .kind' "$COORD_DIR/events.jsonl" | wc -l | tr -d ' ')
+  [ "$k" -eq 5 ]
+}

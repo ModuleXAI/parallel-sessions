@@ -149,18 +149,93 @@ _release() {
 }
 
 @test "coord wait: SIGINT trap is registered in source (static check)" {
-  # Runtime SIGINT delivery in a bats subprocess is fragile (job-control
-  # interactions, output buffering before exit 130, signal-vs-pgid
-  # delivery quirks across platforms). The TRAP itself is what we
-  # control in source — that the cleanup handler is defined and bound
-  # to INT and TERM, that on fire it logs WAIT_TIMEOUT(reason=interrupted),
-  # writes an "interrupted" message, and exits 130. Verify those source-
-  # level invariants here; production-runtime behavior is exercised
-  # implicitly through Phase 7's full integration harness.
+  # Source-level invariants: trap binding + cleanup-handler
+  # contract. Runtime behavior is verified by the Phase 7 / T7.06a
+  # SIGINT runtime test below.
   grep -q "trap cleanup_interrupt INT TERM" "$CLI"
   grep -q "reason=interrupted" "$CLI"
   grep -qE 'exit 130' "$CLI"
   grep -q "coord wait: interrupted" "$CLI"
+  # Phase 7 / T7.06a: cleanup_interrupt MUST use sync log variant.
+  grep -q "coord_log_event_sync kind=WAIT_TIMEOUT" "$CLI"
+}
+
+@test "coord wait: SIGTERM runtime — emits WAIT_TIMEOUT(interrupted) + dequeue (T7.06a F-016 fix)" {
+  # Phase 7 / T7.06a re-enables runtime signal-delivery testing
+  # after the F-016 root cause was identified (backgrounded
+  # coord_log_event flush race on exit-130) and fixed via
+  # coord_log_event_sync. Pre-T7.06a this test was a static-grep
+  # placeholder.
+  #
+  # Signal choice: SIGTERM (not SIGINT). Under bats with job
+  # control disabled, backgrounded async commands inherit SIG_IGN
+  # for SIGINT per bash(1) — the kernel never delivers SIGINT to
+  # the bg coord wait. SIGTERM IS delivered, and cleanup_interrupt
+  # is bound to BOTH INT and TERM, so the trap fires identically.
+  # Production users hitting Ctrl-C in a foreground terminal use
+  # the SIGINT path; this test exercises the equivalent SIGTERM
+  # path that goes through the SAME cleanup_interrupt handler.
+  # Both paths use coord_log_event_sync — the F-016 fix.
+  _acquire "$TARGET"
+
+  local out_file="$TMP/coord_wait.out"
+  local err_file="$TMP/coord_wait.err"
+
+  # Background coord wait directly as a child of the bats test
+  # shell so `kill -INT $!` and `wait $!` operate on it. A
+  # bash -c "...; echo $!" wrapper would put the PID in a sub-
+  # shell that exits immediately; the backgrounded process would
+  # reparent to PID 1 and `wait` would fail rc=127.
+  SESSION_ID="$WAITER" "$CLI" wait "$TARGET" --timeout 60 \
+    >"$out_file" 2>"$err_file" &
+  local wait_pid=$!
+  # Allow enqueue + trap registration + backend startup to complete
+  # before SIGINT (>100 ms covers lib sourcing per F-017 ~50 ms).
+  sleep 0.5
+
+  # Use SIGTERM (not SIGINT) for the kill: under bats with job
+  # control disabled (set -m off), backgrounded subshells inherit
+  # SIG_IGN for SIGINT per bash(1) "asynchronous commands ignore
+  # SIGINT and SIGQUIT" — the kernel never delivers SIGINT to the
+  # backgrounded coord wait. SIGTERM IS delivered normally and
+  # cleanup_interrupt is bound to BOTH INT and TERM, so the
+  # trap fires either way. Production users running `coord wait`
+  # in a foreground terminal hit the SIGINT path; the bats test
+  # exercises the equivalent SIGTERM path. Both reach
+  # cleanup_interrupt.
+  kill -TERM "$wait_pid" 2>/dev/null || true
+
+  # bats's ERR trap fires on non-zero rc even under `set +e`. Use
+  # the `|| rc=$?` form to capture wait's exit code without
+  # tripping the trap.
+  local rc=0
+  wait "$wait_pid" 2>/dev/null || rc=$?
+
+  # rc=130 expected: cleanup_interrupt exits with 130 regardless
+  # of whether the trap fired on INT or TERM. (Bash signal-exit
+  # convention is 128+signum, but our trap explicitly exits 130
+  # to match the SIGINT user-experience of Ctrl-C even when fired
+  # by SIGTERM — single audit-log signature for both paths.)
+  [ "$rc" -eq 130 ]
+
+  # Stdout should contain "coord wait: interrupted" message.
+  grep -q "coord wait: interrupted" "$out_file"
+
+  # events.jsonl MUST contain WAIT_TIMEOUT reason=interrupted —
+  # the F-016 fix guarantees the sync write completes before
+  # exit 130, so NO post-wait sleep is required here.
+  [ -s "$COORD_DIR/events.jsonl" ]
+  local count
+  count=$(jq -rs '[.[] | select(.kind=="WAIT_TIMEOUT" and .payload.reason=="interrupted")] | length' \
+    "$COORD_DIR/events.jsonl")
+  [ "$count" -ge 1 ]
+
+  # Wait queue dequeue: WAITER must be removed from wait_queues[$TARGET].
+  local in_queue
+  in_queue=$(jq --arg t "$TARGET" --arg w "$WAITER" \
+    '(.wait_queues[$t] // []) | map(.session_id) | index($w) // -1' \
+    "$COORD_DIR/sessions.json")
+  [ "$in_queue" = "-1" ]
 }
 
 @test "coord wait: subagent policy (A) — coord wait runs without parent/subagent gate" {

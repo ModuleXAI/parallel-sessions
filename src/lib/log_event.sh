@@ -36,25 +36,22 @@ coord_now_iso8601() {
   date -u +%Y-%m-%dT%H:%M:%SZ
 }
 
-coord_log_event() {
-  local coord_dir="${COORD_DIR:-}"
-  local session="${SESSION_ID:-unknown}"
-  if [ -z "$coord_dir" ] || [ ! -d "$coord_dir" ]; then
-    # No coord dir configured → nothing to log, silent no-op.
-    return 0
-  fi
-
-  # Build a jq -n invocation that shell-escapes every k=v pair.
-  # First argument set: required scalar keys. Additional pairs become object fields.
+# _coord_log_event_build_line <kv ...>
+#   Internal: parse the same k=v args coord_log_event accepts and
+#   build the JSON event line via jq -n. Stdout: JSON line on
+#   success; rc=0 always (silent on jq failure → empty line).
+#   Used by both coord_log_event (async) and coord_log_event_sync
+#   (foreground; T7.06a per F-016 fix). Logic factored verbatim
+#   from the pre-T7.06a coord_log_event implementation.
+_coord_log_event_build_line() {
   local ts
   ts=$(coord_now_iso8601)
+  local session="${SESSION_ID:-unknown}"
 
-  # Collect jq args. Non-reserved kv pairs land in .payload.
   local kind="" tool="" file="" hash=""
   local jq_payload_args=() jq_payload_builder='{}'
   local pair key val
   for pair in "$@"; do
-    # Split on the first '='.
     key="${pair%%=*}"
     val="${pair#*=}"
     case "$key" in
@@ -63,7 +60,6 @@ coord_log_event() {
       file) file="$val" ;;
       hash) hash="$val" ;;
       *)
-        # Reject keys with characters unsafe for jq identifier.
         if [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
           jq_payload_args+=(--arg "p_$key" "$val")
           jq_payload_builder="$jq_payload_builder | .$key = \$p_$key"
@@ -75,28 +71,39 @@ coord_log_event() {
     kind=INFO
   fi
 
+  jq -nc \
+    --arg ts      "$ts" \
+    --arg session "$session" \
+    --arg kind    "$kind" \
+    --arg tool    "$tool" \
+    --arg file    "$file" \
+    --arg hash    "$hash" \
+    ${jq_payload_args[@]+"${jq_payload_args[@]}"} \
+    '{
+      ts: $ts,
+      session: $session,
+      kind: $kind
+    }
+    + (if $tool != "" then {tool: $tool} else {} end)
+    + (if $file != "" then {file: $file} else {} end)
+    + (if $hash != "" then {hash: $hash} else {} end)
+    + {payload: ('"$jq_payload_builder"')}
+    ' 2>/dev/null || true
+  return 0
+}
+
+coord_log_event() {
+  local coord_dir="${COORD_DIR:-}"
+  if [ -z "$coord_dir" ] || [ ! -d "$coord_dir" ]; then
+    # No coord dir configured → nothing to log, silent no-op.
+    return 0
+  fi
+
   local line
-  # Build the event object atomically via jq -n. Never shell-concat JSON.
-  line=$(
-    jq -nc \
-      --arg ts      "$ts" \
-      --arg session "$session" \
-      --arg kind    "$kind" \
-      --arg tool    "$tool" \
-      --arg file    "$file" \
-      --arg hash    "$hash" \
-      ${jq_payload_args[@]+"${jq_payload_args[@]}"} \
-      '{
-        ts: $ts,
-        session: $session,
-        kind: $kind
-      }
-      + (if $tool != "" then {tool: $tool} else {} end)
-      + (if $file != "" then {file: $file} else {} end)
-      + (if $hash != "" then {hash: $hash} else {} end)
-      + {payload: ('"$jq_payload_builder"')}
-      '
-  ) 2>/dev/null || return 0
+  line=$(_coord_log_event_build_line "$@")
+  if [ -z "$line" ]; then
+    return 0  # jq failure → silent no-op
+  fi
 
   # Background append under brief flock. Failures print to stderr only.
   {
@@ -111,7 +118,51 @@ coord_log_event() {
   return 0
 }
 
+# coord_log_event_sync <kv ...>
+#   Phase 7 / T7.06a (F-016 fix). Same arg contract as
+#   coord_log_event, but the flock+append runs in the FOREGROUND
+#   subshell — the function returns only after events.jsonl write
+#   has completed and flock has been released. Use this in any
+#   "log-then-exit" path where the caller is about to exit before
+#   the kernel could schedule a backgrounded subshell to flush.
+#
+#   Canonical caller: src/bin/coord cmd_wait::cleanup_interrupt
+#   (SIGINT trap that emits WAIT_TIMEOUT(reason=interrupted) then
+#   `exit 130`). Async variant raced exit-130 in bats, leaving the
+#   audit-log entry missing intermittently (F-016 root cause).
+#
+#   Same fail-soft posture as the async variant: never raises rc=1
+#   to caller — silent on jq failure, no-op on missing COORD_DIR.
+coord_log_event_sync() {
+  local coord_dir="${COORD_DIR:-}"
+  if [ -z "$coord_dir" ] || [ ! -d "$coord_dir" ]; then
+    return 0
+  fi
+
+  local line
+  line=$(_coord_log_event_build_line "$@")
+  if [ -z "$line" ]; then
+    return 0
+  fi
+
+  # Foreground append under brief flock. Subshell runs to
+  # completion before this function returns — guaranteed
+  # events.jsonl flush before caller proceeds.
+  (
+    flock -x -w 5 9 || { printf '%s\n' "coord: log_event_sync flock timeout" >&2; exit 0; }
+    printf '%s\n' "$line" >>"$coord_dir/events.jsonl" 2>/dev/null || \
+      printf '%s\n' "coord: log_event_sync append failed" >&2
+  ) 9>"$coord_dir/events.lock"
+  return 0
+}
+
 # CLI shim for bats / ad-hoc:  log_event.sh kind=READ tool=Read file=/foo ...
+#   Optional --sync flag dispatches to coord_log_event_sync.
 if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
-  coord_log_event "$@"
+  if [ "${1:-}" = "--sync" ]; then
+    shift
+    coord_log_event_sync "$@"
+  else
+    coord_log_event "$@"
+  fi
 fi

@@ -165,6 +165,15 @@ coord_wait_read_content() {
 # Consumer: 3-mode dispatcher
 # ---------------------------------------------------------------
 
+# Phase 7 / T7.06a (F-016 fix): expose fswatch + sleeper PIDs to
+# cleanup_interrupt via globals. Initialized empty; set inside
+# coord_wait_for_release_fswatch after backgrounding; cleared
+# before that function returns. cleanup_interrupt reads them and
+# kills any still-alive PID before exit 130 — prevents orphaning
+# to PID 1 under SIGINT delivery.
+_COORD_WAIT_FSWATCH_PID="${_COORD_WAIT_FSWATCH_PID:-}"
+_COORD_WAIT_SLEEPER_PID="${_COORD_WAIT_SLEEPER_PID:-}"
+
 # coord_wait_for_release_fswatch <wake_file> <timeout_seconds>
 #   Block on fswatch; rc=0 on event, rc=1 on timeout. fswatch has no
 #   built-in timeout; we use a parallel `sleep` racer + kill.
@@ -176,6 +185,9 @@ coord_wait_for_release_fswatch() {
   fswatch_pid=$!
   ( sleep "$timeout"; ) &
   sleeper_pid=$!
+  # Phase 7 / T7.06a: expose to cleanup_interrupt.
+  _COORD_WAIT_FSWATCH_PID="$fswatch_pid"
+  _COORD_WAIT_SLEEPER_PID="$sleeper_pid"
   # Wait for either to exit. Use `wait -n` if available (bash 4+);
   # bash 3.2 fallback uses a polling loop on `kill -0`.
   while :; do
@@ -193,10 +205,16 @@ coord_wait_for_release_fswatch() {
   if [ "$winner_pid" = "$fswatch_pid" ]; then
     kill "$sleeper_pid" 2>/dev/null || true
     wait "$sleeper_pid" 2>/dev/null || true
+    # Both children gone; clear the globals so cleanup_interrupt
+    # doesn't try to kill stale PIDs.
+    _COORD_WAIT_FSWATCH_PID=""
+    _COORD_WAIT_SLEEPER_PID=""
     return 0
   else
     kill "$fswatch_pid" 2>/dev/null || true
     wait "$fswatch_pid" 2>/dev/null || true
+    _COORD_WAIT_FSWATCH_PID=""
+    _COORD_WAIT_SLEEPER_PID=""
     return 1
   fi
 }
