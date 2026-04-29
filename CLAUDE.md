@@ -601,7 +601,180 @@ Alternative: append `|| true` to the assignment line (Phase 5 fixture style). Th
 
 Surfaced in T6.10 phase6_ship_gate scenarios 02/03/05. Phase 5 fixtures used the `|| true` pattern; Phase 6 chose the explicit set +e/-e block.
 
-These rules apply to any future hook / pipeline / spawn-helper / fixture construction. The Phase 6 implementations of `lib/task_processor.sh` (T6.05), `lib/self_tasks.sh` (T6.04+T6.06+T6.07), `lib/cycle_detection.sh` task-graph extension (T6.02), `src/bin/coord` task-open + self-delegate subcommands (T6.03+T6.04), `pre_tool_use_any.sh` reminder + F-015 banner (T6.06), `stop.sh` block-once-then-allow (T6.07), `pre_tool_use_write.sh` banner production wording (T6.09), and `phase6_ship_gate` fixtures (T6.10) are the canonical references for these new patterns. Phase 5 references (T5.02/T5.03/T5.04/T5.05/T5.09) remain canonical for lessons #7-#10.
+**20. PR APPROVED status authoritative for downstream task specs; sign-off task spec messages must reference PR-X §implementation surface verbatim** (T7.04 F-011 surface + T7.09 echo).
+
+User T7.04 GO message paraphrased PR-PHASE7-03 §"Implementation surface" with imprecise naming (`coord_cost_guard_check_mediator <sid>` vs PR's `coord_cost_guards_check <site>`) AND a different concurrency model (split check + record_invocation vs PR's atomic check+append-on-allow). T7.09 repeated at smaller scope (`BATS_RUN_REALISTIC` env-var vs PR's `COORD_TEST_MODE=realistic` gate).
+
+```bash
+# WRONG — implementer pattern-matches user paraphrase:
+coord_cost_guard_check_mediator() { ... }
+coord_cost_guard_record_invocation() { ... }
+# Result: 3-site spawn refactor at T7.03 (commit c188b9a)
+# calls coord_cost_guards_check (PR-API-compliant); T7.04
+# implementation diverges; cost-guard SLOTs never fire;
+# F-011 surface required to surface ambiguity at T7.04 GO.
+
+# RIGHT — implementer surfaces ambiguity via F-011, user
+# CONFIRMS Option A (PR verbatim), implementation proceeds
+# against APPROVED PR contract:
+coord_cost_guards_check() { ... }
+coord_cost_guards_status() { ... }
+coord_cost_guards_clear() { ... }
+```
+
+Surfaced at T7.04 GO and again at T7.09 GO (env-var divergence echo). User-CONFIRMED disposition: PR APPROVED status binding for downstream tasks. Phase 4-5-6 precedent treats PR APPROVED status this way; T7.04 F-011 surface formalizes the rule.
+
+**21. Phase-close evidence bar tradeoff — target vs achievable budget; document v1 vs Phase N+1 follow-up candidates** (T7.06a 1000-iter target → 100-iter achievable).
+
+OQ1 binding referenced 1000-iteration parallel-bats target as F-016 fix evidence bar. T7.06a achieved 100-iter at 100/100 PASS within budget; 1000-iter would have pushed wall-clock budget by ~9× without material confidence improvement (P(single-iter fail) bound ~0.46% upper confidence at 100/100 → already ≪ 1%). 100-iter accepted as v1 evidence bar with concrete root cause + targeted fix already shipped.
+
+```bash
+# WRONG — implementer treats target as binary pass/fail
+# evidence bar; misses budget reality:
+# 1000-iter run = 80 minutes wall-clock, 8000% over the
+# OQ task budget. Implementer skips the run entirely OR
+# exceeds budget without surfacing.
+
+# RIGHT — implementer evaluates target vs budget,
+# achieves 100-iter at 100/100, documents:
+#   - achieved evidence bar
+#   - statistical bound on remaining risk
+#   - Phase N+1 follow-up candidate if audit-log gap
+#     concerns surface in production
+# User accepts at v1 close.
+```
+
+Surfaced at T7.06a close. User-ACCEPTED disposition: 100-iter is v1-acceptable evidence bar; 1000-iter as Phase 7+1 follow-up candidate documented in phase-7-signoff.md.
+
+**22. bats test environment SIGINT/SIGTERM semantics differ from production; test SIGTERM path through cleanup_interrupt handler bound to BOTH signals** (T7.06a).
+
+bats with job control off (`set -m off`, default) causes async background commands to inherit `SIG_IGN` for SIGINT per bash(1) "asynchronous commands ignore SIGINT and SIGQUIT". Tests sending `kill -INT $bg_pid` silently no-op — kernel never delivers SIGINT to the bg process.
+
+```bash
+# WRONG — test under bats:
+coord wait $TARGET --timeout 60 &
+pid=$!
+sleep 0.5
+kill -INT $pid    # Silently no-op under bats
+wait $pid         # Blocks until 60s timeout
+
+# RIGHT — test under bats:
+coord wait $TARGET --timeout 60 &
+pid=$!
+sleep 0.5
+kill -TERM $pid   # SIGTERM delivers normally
+wait $pid || rc=$?
+# cleanup_interrupt bound to BOTH INT and TERM, so SIGTERM
+# fires the SAME handler. Production users hitting Ctrl-C
+# use the SIGINT path; test exercises the equivalent
+# SIGTERM path through the SAME cleanup code.
+
+# PRODUCTION traps must bind both signals to identical
+# cleanup logic so test-via-SIGTERM is equivalent to
+# user-via-SIGINT:
+trap cleanup_interrupt INT TERM
+```
+
+Surfaced at T7.06a — real Unix semantics quirk. DEFERRED disposition would have left this obscured indefinitely; audit-first approach (Option α) surfaced the architectural reality. Cleanup helper must be signal-agnostic (same code path for INT + TERM).
+
+**23. bats setup() that unset's an env-var defeats per-process opt-in patterns; preserve operator's marker in setup, mutate per-test via subshell** (T7.09).
+
+setup() runs before each test body. If setup() does `unset COORD_TEST_MODE`, the operator's process-level opt-in marker is clobbered before the test's skip-gate sees it. Symptom: opt-in invocation (`COORD_TEST_MODE=realistic bats ...`) still skips realistic-tagged tests, BUT the default-skip meta-test passes (because in default no-opt-in mode, COORD_TEST_MODE really IS unset — the unset is cosmetic and matches reality). The bug is INVISIBLE under default-CI verification — only surfaces when an operator actively tries to opt in.
+
+```bash
+# WRONG — setup unset clobbers opt-in marker:
+setup() {
+  TMP="$(mktemp -d -t coord-XXXX)"
+  export COORD_DIR="$TMP/.coord"
+  unset COORD_TEST_MODE || true   # BUG
+}
+
+@test "realistic stub" {
+  [ "${COORD_TEST_MODE:-}" = "realistic" ] || skip
+  # Always skips even when operator opted in.
+}
+
+# RIGHT — preserve operator's marker; mutate per-test
+# via subshell:
+setup() {
+  TMP="$(mktemp -d -t coord-XXXX)"
+  export COORD_DIR="$TMP/.coord"
+  # Do NOT unset COORD_TEST_MODE — it's the operator's
+  # opt-in marker.
+}
+
+@test "default mode behavior" {
+  # Per-test cases that need a clean env use inline
+  # `env <var>=<val>` or sub-shell `bash -c`:
+  run env COORD_TEST_MODE=mock bash -c '...'
+}
+```
+
+Surfaced at T7.09 close. Real test-design bug that would have made the realistic-tag opt-in mechanism INOPERABLE despite passing the default-skip meta-test. Caught only by explicit opt-in path verification. **Verification rule corollary:** opt-in mechanisms require EXPLICIT opt-in path verification, not just default-skip meta-test.
+
+**24. lib CLI shims that delegate to functions depending on `coord_log_event` must source `log_event.sh` defensively; standalone CLI invocation otherwise silently skips audit emission** (T7.11).
+
+`lib/cost_guards.sh` CLI shim invokes `coord_cost_guards_check` which calls `coord_log_event` only when `command -v coord_log_event` resolves. Bats unit tests source log_event.sh + cost_guards.sh together so the check resolves; standalone CLI invocation (`bash $LIB_DIR/cost_guards.sh check mediator`) doesn't source log_event.sh — `command -v coord_log_event` returns non-zero — audit emission silently skipped. rc behavior is correct (rc=0/rc=1 from cost-guard semantics) but events.jsonl is empty — fixtures and stress scripts that verify audit events fail without an obvious root cause.
+
+```bash
+# WRONG — fixture invokes via CLI shim, expects audit events:
+scenario_run() {
+  bash "$LIB_DIR/cost_guards.sh" check mediator || RC=$?
+  # ... assertion on COST_GUARD_RATE_LIMITED event ...
+}
+# Symptom: rc behavior correct; events.jsonl empty;
+# assertion fails with "event not found" but cost-guard
+# semantics work.
+
+# RIGHT — fixture invokes via direct sourced subshell so
+# log_event.sh is sourced before cost_guards.sh:
+_check_in_subshell() {
+  bash -c '
+    source "$LIB_DIR/log_event.sh"
+    source "$LIB_DIR/cost_guards.sh"
+    if coord_cost_guards_check "$1"; then exit 0; else exit 1; fi
+  ' bash "$1"
+}
+
+# ARCHITECTURAL ALTERNATIVE (post-v1): update cost_guards.sh
+# CLI shim to source log_event.sh defensively at top of the
+# script (mirror of what the bats tests do explicitly).
+# Phase 7+1 candidate; cleaner but touches T7.04 commit
+# territory.
+```
+
+Surfaced at T7.11 close. Same architectural pattern likely affects T7.08 stress scripts (audit-event evidence check is opportunistic — `[ -s events.jsonl ]` short-circuits silently). Documented in phase-7-signoff.md as Phase 7+1 enhancement candidate (CLI shim defensive sourcing).
+
+**25. Test infrastructure relocations must include forward-compat invocation blocks for new phases in the SAME commit as the relocation, not as follow-up** (T7.07 + T7.12).
+
+T7.07 relocated `linux_probe.sh` from `.coord/experiments/linux-parity/` (gitignored) to `src/tests/manual/` (committed) — content preserved verbatim. The original probe driver predated Phase 7, so it didn't include a `phase7_ship_gate.sh` invocation block. T7.12 Linux Docker re-probe surfaced the gap: 19/19 ship-gate fixtures verified instead of the 24/24 cumulative target. Working-tree fix added the invocation block; T7.13 sign-off bundle absorbed the addition. The verbatim-relocation discipline traded coverage gap for content-preservation simplicity — wrong tradeoff.
+
+```bash
+# WRONG — relocation preserves verbatim, leaves new-phase
+# invocation as follow-up:
+# T7.07 commit:
+#   cp .coord/.../linux_probe.sh src/tests/manual/
+#   # Content unchanged — phase3-6 invocations preserved.
+# T7.12 verification surfaces the gap.
+
+# RIGHT — relocation includes forward-compat additions in
+# the SAME commit:
+# T7.07 commit:
+#   cp .coord/.../linux_probe.sh src/tests/manual/
+#   # ADD phaseN invocation for the current phase under
+#   # construction (Phase 7 at T7.07 time); even if the
+#   # new fixtures don't exist YET, the placeholder
+#   # invocation makes the gap visible at relocation time
+#   # not at sign-off time.
+
+# Or pre-condition: add the new phase's ship-gate driver +
+# invocation block in linux_probe.sh BEFORE the relocation
+# task. Then relocation IS verbatim and complete.
+```
+
+Surfaced at T7.12 (Cand-25 origin — initially logged as Phase 7+1 follow-up but folded into §A.13 batch at T7.13 sign-off per Phase 6 close precedent for organic gap-fix lessons). Future relocations of test infrastructure (linux_probe.sh, phase-N ship-gate drivers, fixture init scripts) MUST audit forward-compat checklist BEFORE the relocation commit, not after.
+
+These rules apply to any future hook / pipeline / spawn-helper / fixture / spawn-routing / cost-guard construction. The Phase 7 implementations of `lib/spawn_helper.sh` (T7.02), `lib/cost_guards.sh` (T7.04), 3-site spawn refactor (T7.03), cost-guard interlock + pipeline graceful degrade (T7.05), F-016 SIGINT path fix via `coord_log_event_sync` + watcher PID cleanup (T7.06a), F-019 `linux_probe.sh` relocation (T7.07), manual stress scripts (T7.08), bats integration mode handling (T7.09), `phase7_invariant.bats` 19 guards (T7.10), and `phase7_ship_gate` fixtures (T7.11) are the canonical references for lessons #20-#25. Phase 6 references (T6.04/T6.05/T6.10) remain canonical for lessons #11-#19. Phase 5 references (T5.02/T5.03/T5.04/T5.05/T5.09) remain canonical for lessons #7-#10. Phases 3-4 references remain canonical for lessons #1-#6. The system is v1-production-ready at single-developer scale post-Phase 7 close; multi-machine team scenarios are out of scope per OQ6 (next major version candidate).
 
 ---
 
@@ -964,16 +1137,16 @@ These are cases where Claude sometimes tries to "help" in ways that undermine co
 
 If Part A is silent on a construction question: follow the Section 10 decision tree in `IMPLEMENTATION_PLAN.md`. If Part B is silent on a runtime question: act conservatively (do not write; ask the user; prefer `coord status` over guessing).
 
-### C.4a Phase 6 architectural invariant (carry-forward from Phase 3+4+5)
+### C.4a Phase 7 architectural invariant (carry-forward from Phases 3+4+5+6, FINAL phase)
 
-**`permissionDecision: "deny"` appears in EXACTLY two architectural locations** (UNCHANGED through Phases 3+4+5+6 — the task delegation + self-delegation layers introduce NO new deny location):
+**`permissionDecision: "deny"` appears in EXACTLY two architectural locations** (UNCHANGED through Phases 3+4+5+6+7 — Phase 7 task delegation real-Claude integration + cost-guard rate-limit enforcement introduce NO new deny location):
 
-1. `pre_tool_use_write.sh` lock-held-by-other branch (existing Phase 2; banner production wording landed at T6.09 per PR-PHASE6-05 §6 toggle TRUE / toggle FALSE binding — the toggle-aware rewrite emits via the same `emit_deny` helper as the Phase 2 stub, preserving Guard #3's exactly-1 emit_deny call site).
+1. `pre_tool_use_write.sh` lock-held-by-other branch (existing Phase 2; banner production wording at T6.09 per PR-PHASE6-05 §6 toggle TRUE/FALSE binding; banner suffix `[validator rate-limited]` at T7.05 cosmetic addition to existing banner construction, NOT a new deny site).
 2. Any hook reading `.coord/mediator/lockdown.json` with `active=true` via `lib/lockdown.sh::coord_lockdown_emit_deny` (existing Phase 3 — Mediator lockdown verdicts route through this gate).
 
-Phase 6 adds **3 NEW bonus guards** (#15 `lib/task_processor.sh` + #16 `lib/self_tasks.sh` + #17 `src/bin/coord`) on top of Phase 5's 14-guard set. The 8 architectural guards (#1-#8) + 6 Phase 4+5 bonus guards (#9-#14) carry forward verbatim with Phase 6 scope updates.
+Phase 7 adds **2 NEW bonus guards** (#18 `lib/spawn_helper.sh` + #19 `lib/cost_guards.sh`) on top of Phase 6's 17-guard set. The 8 architectural guards (#1-#8) + 9 Phase 4+5+6 bonus guards (#9-#17) carry forward verbatim with Phase 7 scope updates.
 
-**Architectural guards #1-#8 (Phase 3+4+5 carry-forward):**
+**Architectural guards #1-#8 (Phase 3+4+5+6+7 carry-forward):**
 
 1. `permissionDecision` occurrences in `hooks/*.sh` confined to `pre_tool_use_write.sh`.
 2. `permissionDecision` occurrences in `lib/*.sh` confined to `lockdown.sh`.
@@ -981,29 +1154,40 @@ Phase 6 adds **3 NEW bonus guards** (#15 `lib/task_processor.sh` + #16 `lib/self
 4. `lib/lockdown.sh` exactly 1 deny-emit.
 5. Every coord-owned hook sources `lib/lockdown.sh` and calls `coord_lockdown_check` + `coord_lockdown_emit_deny`.
 6. Every hook is exit-0 fail-open (no exit 1/2 in error paths).
-7. Mediator dispatch is kind-agnostic: `lib/mediator_spawn.sh`, `lib/mediator_pending.sh`, `lib/verdict_apply.sh` contain ZERO `case ... cycle_detected` / `if ... critical_drift` / `case ... task_cycle_detected` branches in production code. Decision 4 (PR-PHASE5-04) + Decision 6 (PR-PHASE6-04) binding: future kinds MUST fit the 3-action contract (advice / surgical_fix / lockdown) without code changes. Phase 6 task-graph cycles route via CLI-level rejection at `coord task-open`, NOT via Mediator pending kind — so no `task_cycle_detected` branching is expected.
+7. Mediator dispatch is kind-agnostic: `lib/mediator_spawn.sh`, `lib/mediator_pending.sh`, `lib/verdict_apply.sh` contain ZERO `case ... cycle_detected` / `if ... critical_drift` / `case ... task_cycle_detected` branches in production code. Decision 4 (PR-PHASE5-04) + Decision 6 (PR-PHASE6-04) + OQ7 (PR-PHASE7-05) binding: future kinds MUST fit the 3-action contract (advice / surgical_fix / lockdown) without code changes. Phase 7 adds NO new pending kinds — rate-limit handling is at the spawn site, not Mediator dispatch.
 8. Watchdog probe enforces 3-signal conservative model: `lib/watchdog.sh` calls `ps -p` for Signal 1 (PID liveness) — mandatory for the alive verdict per PR-PHASE3-02 §A. Signals 2 / 3 alone cannot promote to alive.
 
-**Phase 4+5 bonus guards (zero permissionDecision in component libs):**
+Guards #1-#4 jointly enforce **TOTAL deny-site count = 2** across the entire codebase: each file confined + exact-1 emit count. Any code path that introduces a third `permissionDecision: "deny"` string trips at least one of these guards.
+
+**Phase 4+5+6 bonus guards (zero permissionDecision in component libs):**
 
 9.  `lib/validator_spawn.sh` (Phase 4 carry-forward).
 10. `lib/validator_prefilter.sh` (Phase 4 carry-forward).
 11. `lib/validator_cache.sh` (Phase 4 carry-forward bonus).
 12. `lib/wait_queue.sh` (Phase 5 carry-forward).
-13. `lib/cycle_detection.sh` (Phase 5 carry-forward; T6.02 added `coord_cycle_detect_task_graph` function in same file — both functions remain deny-free).
+13. `lib/cycle_detection.sh` (Phase 5 carry-forward + T6.02 task-graph extension; both functions remain deny-free).
 14. `lib/wait_backend.sh` (Phase 5 carry-forward from T5.03).
+15. `lib/task_processor.sh` (Phase 6 from T6.05; T7.03 added `_coord_tp_real_claude_spawn` helper for mode-aware real-claude branch; T7.05 renamed REFUSED→RATE_LIMITED kind — both extensions remain deny-free).
+16. `lib/self_tasks.sh` (Phase 6 from T6.04 + T6.06 + T6.07 extensions) — self-task management is record-keeping; deny happens only at the existing `pre_tool_use_write.sh` lock-held branch. Stop hook's `decision: "block"` (T6.07 + Decision 2.13) is Stop's permission grammar — distinct from `permissionDecision: "deny"` and explicitly authorized at `stop.sh`; the 2-location deny invariant is preserved.
+17. `src/bin/coord` task-open + self-delegate CLI subcommands (Phase 6 from T6.03 + T6.04; T7.06a added `cleanup_interrupt` sync log path — extension deny-free) — chain depth / cycle / anchor uniqueness / toggle disabled all reject via exit 1 + stderr per Decision 6. CLI rejection is informational error, NOT permissionDecision.
 
-**Phase 6 NEW bonus guards:**
+**Phase 7 NEW bonus guards:**
 
-15. `lib/task_processor.sh` (Phase 6 NEW from T6.05) — task outcomes are advisory notifications written to `.notifications[<opener>][<file>]` + `TASK_OUTCOME_PERSISTED` events; CONFLICT outcome (anchor overlap with holder edit) is a TASK VERDICT, not a hook deny. Decision 6 binding.
-16. `lib/self_tasks.sh` (Phase 6 NEW from T6.04 + T6.06 + T6.07 extensions) — self-task management is record-keeping; deny happens only at the existing `pre_tool_use_write.sh` lock-held branch (architectural guard #1). Stop hook's `decision: "block"` (T6.07 + Decision 2.13) is Stop's permission grammar — distinct from `permissionDecision: "deny"` and explicitly authorized at `stop.sh`; the 2-location deny invariant is preserved.
-17. `src/bin/coord` task-open + self-delegate CLI subcommands (Phase 6 NEW from T6.03 + T6.04) — chain depth / cycle / anchor uniqueness / toggle disabled all reject via exit 1 + stderr per Decision 6 (PR-PHASE6-04). CLI rejection is informational error, NOT permissionDecision. Hook layer (`pre_tool_use_*.sh`) does NOT participate in CLI-level enforcement. Comment-only references like `# never permissionDecision.` are stripped by the comment-aware grep guard.
+18. `lib/spawn_helper.sh` (Phase 7 NEW from T7.02) — mode-aware claude binary routing helper. `coord_spawn_helper_resolve_mode` + `coord_spawn_helper_should_use_real_claude` are read-only routing helpers — no deny decisions. Mode dispatch is helper-internal; the spawn site consumes rc=0/rc=1 for routing only, NEVER permission verbs. Per OQ7 binding (PR-PHASE7-05): "Mode switching is helper-internal; spawn helper returns rc=0 or rc=1 with no permission verbs."
+19. `lib/cost_guards.sh` (Phase 7 NEW from T7.04) — sliding-window rate-limit counters. `coord_cost_guards_check` returns rc=0 (allow) or rc=1 (rate_limited); rate-limit is fail-open at the spawn-site call (caller proceeds with Phase 1 fallback per PR-PHASE7-03 §"Hard block vs graceful degrade"). NEVER permission deny. T7.05 added `VALIDATOR_PIPELINE_DEGRADED` event + `[validator rate-limited]` banner suffix at `pre_tool_use_write.sh` — both COSMETIC additions to existing banner construction, NOT new deny sites. T7.05's `cost_guards_modes.bats` #14 cross-verifies this contract.
 
-Total: **8 architectural guards + 9 bonus guards = 17 guards** in `phase6_invariant.bats`. The static-grep gate fails the test if (a) any code path emits `permissionDecision` outside the two allowed locations, OR (b) Mediator dispatch grows kind-branching, OR (c) the watchdog regresses to non-Signal-1-mandatory alive verdicts, OR (d) any of the 9 bonus-guarded files / CLI dispatcher grows a `permissionDecision` string.
+Total: **8 architectural guards + 11 bonus guards = 19 guards** in `phase7_invariant.bats`. The static-grep gate fails the test if (a) any code path emits `permissionDecision` outside the two allowed locations, OR (b) Mediator dispatch grows kind-branching, OR (c) the watchdog regresses to non-Signal-1-mandatory alive verdicts, OR (d) any of the 11 bonus-guarded files / CLI dispatcher grows a `permissionDecision` string.
 
-When future phases (7+) extend the system, every new `lib/` or `hooks/` file MUST be added to the invariant test's enumeration. New pending kinds MUST flow through the existing kind-agnostic dispatch and 3-action contract; any addition of `case ... <new_kind>)` branching in `mediator_spawn.sh` / `mediator_pending.sh` / `verdict_apply.sh` is a Phase 6 invariant violation. Stop hook's `decision: "block"` usage (T6.07) is permitted as a separate verb; `permissionDecision: "deny"` literal grep is the canonical guard scope.
+Phase 7 mode-aware spawn routing (mock / semi / realistic) and cost-guard rate-limit enforcement use:
+- `spawn_helper.sh`: mode-aware claude binary selection (zero deny site).
+- `cost_guards.sh`: sliding-window rate-limit enforcement with audit events `COST_GUARD_RATE_LIMITED` + `COUNTER_RESET` + `MANUAL_CLEAR` (zero deny site; rate-limit hits return rc=1 + stderr CLI-level rejection per Decision 6).
+- Mediator `rate_limited` dispatch payload uses existing kind-agnostic dispatch (Phase 5 Decision 4 binding preserved through Phase 7).
+- Validator pipeline graceful degrade: pre-filter + cache + MINOR fallback (Phase 4 carry-forward) + cosmetic banner suffix.
+- Stop hook `decision: "block"` usage (T6.07) preserved as separate verb under invariant scope.
 
-`phase5_invariant.bats` deleted at T6.08 (superseded by `phase6_invariant.bats`); mirrors the Phase 4 → Phase 5 transition pattern (T5.07 deleted `phase4_invariant.bats`) and Phase 3 → Phase 4 transition (T4.06 deleted `phase3_invariant.bats`). Phase 7+ will continue the rolling supersession.
+When future system extensions (post-v1) extend the system, every new `lib/` or `hooks/` file MUST be added to the invariant test's enumeration. New pending kinds MUST flow through the existing kind-agnostic dispatch and 3-action contract; any addition of `case ... <new_kind>)` branching in `mediator_spawn.sh` / `mediator_pending.sh` / `verdict_apply.sh` is a Phase 7 invariant violation. Stop hook's `decision: "block"` usage (T6.07) is permitted as a separate verb; `permissionDecision: "deny"` literal grep is the canonical guard scope.
+
+`phase6_invariant.bats` deleted at T7.10 (superseded by `phase7_invariant.bats`); mirrors the Phase 5 → 6 transition (T6.08 deleted `phase5_invariant.bats`), Phase 4 → 5 (T5.07 deleted `phase4_invariant.bats`), and Phase 3 → 4 (T4.06 deleted `phase3_invariant.bats`). Phase 7 is the FINAL phase; v1 ships with this invariant surface.
 
 ### C.5 Version
 

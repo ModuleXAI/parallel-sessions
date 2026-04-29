@@ -119,6 +119,10 @@ banner 'phase6_ship_gate manual smoke (Phase 6 done-when 5 scenarios)'
 bash /work/src/tests/manual/phase6_ship_gate.sh
 echo "phase6_ship_gate exit=$?"
 
+banner 'phase7_ship_gate manual smoke (Phase 7 done-when 5 scenarios)'
+bash /work/src/tests/manual/phase7_ship_gate.sh
+echo "phase7_ship_gate exit=$?"
+
 banner 'watchdog ps lstart format compatibility (BSD vs GNU)'
 # Per PR-PHASE3-02 disposition #4: verify GNU `ps -p <pid> -o lstart=`
 # produces a parseable, trim-able string identical in shape to the BSD
