@@ -291,6 +291,31 @@ coord_validator_spawn() {
     return 1
   fi
 
+  # Phase 7 / T7.03 mode resolution + cost-guard interlock slot
+  # (PR-PHASE7-02 §"3-site refactor pattern"). In semi mode the
+  # validator routes to mock (mock binary on PATH); only realistic
+  # mode dispatches to real claude -p for validator. Cost-guard hook
+  # deferred until T7.05 implements lib/cost_guards.sh.
+  local _spawn_mode_resolved=mock
+  local _spawn_real_claude=0
+  if command -v coord_spawn_helper_resolve_mode >/dev/null 2>&1; then
+    _spawn_mode_resolved=$(coord_spawn_helper_resolve_mode 2>/dev/null) \
+      || _spawn_mode_resolved=mock
+    if coord_spawn_helper_should_use_real_claude validator 2>/dev/null; then
+      _spawn_real_claude=1
+      if command -v coord_cost_guards_check >/dev/null 2>&1; then
+        if ! coord_cost_guards_check validator 2>/dev/null; then
+          _coord_validator_warn "cost-guard rate-limited validator spawn"
+          if command -v coord_log_event >/dev/null 2>&1; then
+            coord_log_event kind=VALIDATOR_SPAWN_FAILED \
+              file="$file" reason=rate_limited 2>/dev/null || true
+          fi
+          return 1
+        fi
+      fi
+    fi
+  fi
+
   local verdict_dir="$COORD_DIR/validator/verdict"
   [ -d "$verdict_dir" ] || mkdir -p "$verdict_dir" 2>/dev/null
 
@@ -304,6 +329,8 @@ coord_validator_spawn() {
     coord_log_event kind=VALIDATOR_SPAWN_STARTED \
       file="$file" read_hash="$rhash" current_hash="$chash" \
       model="$COORD_VALIDATOR_MODEL" spawn_mode=no_bare \
+      mode_resolved="$_spawn_mode_resolved" \
+      real_claude="$_spawn_real_claude" \
       budget_usd="$COORD_VALIDATOR_BUDGET_USD" \
       timeout_sec="$COORD_VALIDATOR_TIMEOUT_SEC" 2>/dev/null || true
   fi

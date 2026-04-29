@@ -260,6 +260,32 @@ coord_mediator_spawn() {
     return 1
   fi
 
+  # Phase 7 / T7.03 mode resolution + cost-guard interlock slot
+  # (PR-PHASE7-02 §"3-site refactor pattern"). Mode-aware audit;
+  # cost-guard hook deferred until T7.05 implements lib/cost_guards.sh.
+  local _spawn_mode_resolved=mock
+  local _spawn_real_claude=0
+  if command -v coord_spawn_helper_resolve_mode >/dev/null 2>&1; then
+    _spawn_mode_resolved=$(coord_spawn_helper_resolve_mode 2>/dev/null) \
+      || _spawn_mode_resolved=mock
+    if coord_spawn_helper_should_use_real_claude mediator 2>/dev/null; then
+      _spawn_real_claude=1
+      # T7.05 cost-guard interlock slot: when coord_cost_guards_check
+      # is implemented, call it here. Rate-limited → REFUSED return 1
+      # via Phase 1 fallback contract (caller fail-open).
+      if command -v coord_cost_guards_check >/dev/null 2>&1; then
+        if ! coord_cost_guards_check mediator 2>/dev/null; then
+          _coord_mediator_warn "cost-guard rate-limited mediator spawn"
+          if command -v coord_log_event >/dev/null 2>&1; then
+            coord_log_event kind=MEDIATOR_SPAWN_REFUSED \
+              reason=rate_limited 2>/dev/null || true
+          fi
+          return 1
+        fi
+      fi
+    fi
+  fi
+
   local verdict_dir="$COORD_DIR/mediator/verdict"
   [ -d "$verdict_dir" ] || mkdir -p "$verdict_dir" 2>/dev/null
 
@@ -273,6 +299,8 @@ coord_mediator_spawn() {
     coord_log_event kind=MEDIATOR_SPAWN_STARTED \
       pending_entry_id="$pending_id" depth="$depth" \
       model="$COORD_MEDIATOR_MODEL" spawn_mode=no_bare \
+      mode_resolved="$_spawn_mode_resolved" \
+      real_claude="$_spawn_real_claude" \
       budget_usd="$COORD_MEDIATOR_BUDGET_USD" \
       timeout_sec="$COORD_MEDIATOR_TIMEOUT_SEC" 2>/dev/null || true
   fi

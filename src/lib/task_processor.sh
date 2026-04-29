@@ -28,10 +28,18 @@
 #   COORD_MOCK_CLAUDE_TASK_PATCH env. When set, returns its value
 #   verbatim as the task-patch JSON. When unset, returns a
 #   deterministic default ({status:COMPLETED, diff:"",
-#   affected_lines:[0,0], rationale:"mock default"}). Phase 7 will
-#   replace this with `claude -p` invocation against the same
-#   contract; until then, real-Claude task execution is out of
-#   scope (Decision 5 binding).
+#   affected_lines:[0,0], rationale:"mock default"}).
+#
+# Phase 7 / T7.03 (PR-PHASE7-02 §"Task Processor integration"):
+#   The mock-default branch is preserved for COORD_TEST_MODE=mock
+#   (default for bats / CI). The COORD_MOCK_CLAUDE_TASK_PATCH
+#   env-var override remains the test-fixture determinism
+#   path even in non-mock modes (PR-PHASE7-01 §"Non-changes").
+#   When mode resolves to semi or realistic AND the env-var is
+#   unset, the helper invokes `claude -p` with the same JSON
+#   contract. Recursion guard: CLAUDE_CODE_TASK_PROCESSOR=1 +
+#   CLAUDE_COORD=0 in spawn env. Tool restrictions: Bash + Read
+#   allowed; Write/Edit/NotebookEdit/Task disallowed.
 #
 # Notification slot: .notifications[<opener_sid>][<file>] is the
 # canonical schema slot (existing Phase 1+2 mechanism; see
@@ -61,10 +69,26 @@
 #   COORD_DIR                          — required.
 #   COORD_MOCK_CLAUDE_TASK_PATCH       — optional test override
 #                                         (mock claude task-patch
-#                                         JSON; Phase 6 default).
+#                                         JSON; Phase 6 default;
+#                                         takes precedence over
+#                                         all modes per PR-PHASE7-01
+#                                         non-changes).
+#   COORD_TEST_MODE                    — Phase 7 mode switch
+#                                         (mock|semi|realistic;
+#                                         resolved via spawn_helper).
+#   COORD_TASK_PROCESSOR_BUDGET_USD    — real-claude max cost
+#                                         (default 0.50; PR-PHASE7-02).
+#   COORD_TASK_PROCESSOR_TIMEOUT_SEC   — real-claude wall-clock cap
+#                                         (default 120; PR-PHASE7-02).
 #
 # Bash 3.2 compat. No `set -euo pipefail` (caller's options govern;
 # functions handle their own rc semantics).
+
+# Phase 7 / T7.03 tunables for the real-claude branch (introduced
+# per PR-PHASE7-02 §"Real-claude task-processor prompt template").
+: "${COORD_TASK_PROCESSOR_MODEL:=claude-haiku-4-5-20251001}"
+: "${COORD_TASK_PROCESSOR_BUDGET_USD:=0.50}"
+: "${COORD_TASK_PROCESSOR_TIMEOUT_SEC:=120}"
 
 # ---------------------------------------------------------------
 # Internal helpers
@@ -133,26 +157,47 @@ coord_task_processor_check_affected() {
 # ---------------------------------------------------------------
 
 # coord_task_processor_spawn_claude <task_record_json>
-#   Phase 6 mock-only spawn helper. Reads
-#   COORD_MOCK_CLAUDE_TASK_PATCH env when set; otherwise emits
-#   the deterministic default.
+#   Mode-aware spawn helper. Resolution priority (PR-PHASE7-01
+#   §"Non-changes" + PR-PHASE7-02 §"Task Processor integration"):
+#     1. COORD_MOCK_CLAUDE_TASK_PATCH env-var set → use verbatim
+#        (test override; precedence over all modes for bats
+#        determinism).
+#     2. coord_spawn_helper_should_use_real_claude task_processor
+#        rc=0 (semi or realistic mode) → invoke `claude -p` with
+#        the prompt template + JSON contract.
+#     3. Otherwise (mock mode + no env-var override) → return the
+#        deterministic default literal (PR-PHASE6-05 §5).
 #
 #   Stdout: task-patch JSON per PR-PHASE6-05 §5 contract:
 #     {"status": "COMPLETED|CONFLICT|SKIPPED",
 #      "diff": "<unified diff>",
 #      "affected_lines": [<start>, <end>],
 #      "rationale": "<text>"}
-#   Returns: 0 on success (env-var or default)
-#            1 on JSON validation failure (env-var override has
-#              malformed JSON or missing required fields)
+#   Returns: 0 on success (env-var, real-claude, or default)
+#            1 on JSON validation failure / spawn refusal / cost-
+#              guard rate-limit
 coord_task_processor_spawn_claude() {
   local task_record_json="${1:-}"
-  local out
+  local out=""
+
   if [ -n "${COORD_MOCK_CLAUDE_TASK_PATCH:-}" ]; then
+    # Test override: highest precedence.
     out="$COORD_MOCK_CLAUDE_TASK_PATCH"
+  elif command -v coord_spawn_helper_should_use_real_claude >/dev/null 2>&1 \
+       && coord_spawn_helper_should_use_real_claude task_processor 2>/dev/null; then
+    # Real-claude branch (semi or realistic mode). Per §A.13
+    # lesson #5: capture stdout AND check rc in one
+    # `if var=$(...)` form to avoid the set-e + pipefail trap.
+    if out=$(_coord_tp_real_claude_spawn "$task_record_json"); then
+      :
+    else
+      return 1
+    fi
   else
+    # Mock default literal.
     out='{"status":"COMPLETED","diff":"","affected_lines":[0,0],"rationale":"mock default"}'
   fi
+
   # Validate required fields exist + status enum.
   local status
   status=$(printf '%s' "$out" | jq -r '.status // ""' 2>/dev/null)
@@ -173,6 +218,154 @@ coord_task_processor_spawn_claude() {
     return 1
   fi
   printf '%s\n' "$out"
+  return 0
+}
+
+# _coord_tp_real_claude_spawn <task_record_json>
+#   Phase 7 / T7.03 real-claude branch. Build prompt from task
+#   record, invoke `claude -p` with tool restrictions + recursion
+#   guard env vars, capture JSON output. Cost-guard interlock
+#   slot (T7.05) is checked before invocation.
+#
+#   Stdout: task-patch JSON on success.
+#   Returns: 0 success / 1 spawn refused / cost-guard rate-limit /
+#            empty output / is_error true.
+_coord_tp_real_claude_spawn() {
+  local task_record_json="${1:-}"
+
+  # Cost-guard interlock (T7.05; no-op until lib/cost_guards.sh
+  # ships).
+  if command -v coord_cost_guards_check >/dev/null 2>&1; then
+    if ! coord_cost_guards_check task_processor 2>/dev/null; then
+      coord_log_event kind=TASK_PROCESSOR_SPAWN_REFUSED \
+        reason=rate_limited 2>/dev/null || true
+      return 1
+    fi
+  fi
+
+  # claude binary check (mirror Mediator/Validator pattern).
+  if ! command -v claude >/dev/null 2>&1; then
+    coord_log_event kind=TASK_PROCESSOR_SPAWN_REFUSED \
+      reason=claude_binary_missing 2>/dev/null || true
+    return 1
+  fi
+
+  # Recursion guard: refuse if already inside a Task Processor
+  # spawn. Mirrors Phase 4 Validator depth-1 guard.
+  if [ -n "${CLAUDE_CODE_TASK_PROCESSOR:-}" ] \
+     && [ "${CLAUDE_CODE_TASK_PROCESSOR}" != "0" ]; then
+    coord_log_event kind=TASK_PROCESSOR_SPAWN_REFUSED \
+      reason=recursion_guard \
+      caller_env="$CLAUDE_CODE_TASK_PROCESSOR" 2>/dev/null || true
+    return 1
+  fi
+
+  # Assemble the prompt. Task record JSON contains file +
+  # instruction + anchor + complexity + opener; the spawned
+  # claude inspects the file (Read) + applies the task per
+  # instruction + emits the JSON contract.
+  local file_path instruction anchor_search anchor_window complexity
+  file_path=$(printf '%s' "$task_record_json" | jq -r '.file // ""' 2>/dev/null)
+  instruction=$(printf '%s' "$task_record_json" | jq -r '.instruction // ""' 2>/dev/null)
+  anchor_search=$(printf '%s' "$task_record_json" | jq -r '.anchor.search // ""' 2>/dev/null)
+  anchor_window=$(printf '%s' "$task_record_json" | jq -r '.anchor.window_lines // ""' 2>/dev/null)
+  complexity=$(printf '%s' "$task_record_json" | jq -r '.complexity // "SIMPLE"' 2>/dev/null)
+
+  local prompt
+  prompt=$(cat <<EOF
+# Section 1: Identity
+
+You are a Task Processor agent in a Claude Code coordination
+system. Your role is to apply a delegated task to a file the
+parent session was unable to edit due to lock contention. You
+are NOT a general-purpose agent; you act on this specific task
+and emit a structured outcome.
+
+# Section 2: Constraints
+
+- Allowed tools: Bash, Read.
+- Disallowed tools: Write, Edit, NotebookEdit, Task.
+- You DO NOT modify any files. You produce a unified diff in
+  the JSON output. The post-tool-use hook applies the diff.
+- Output format: a SINGLE JSON object on stdout with these
+  fields, in this exact shape:
+  {
+    "status": "COMPLETED" | "CONFLICT" | "SKIPPED",
+    "diff": "<unified diff text; empty string if SKIPPED>",
+    "affected_lines": [<start_int>, <end_int>],
+    "rationale": "<1-3 sentence explanation>"
+  }
+
+# Section 3: Task
+
+- File: $file_path
+- Instruction: $instruction
+- Anchor (PRE-EDIT exact-match string): $anchor_search
+- Window: lines $anchor_window
+- Complexity: $complexity
+
+Read the file at the path above. Locate the anchor. Apply the
+instruction within the window. Produce the unified diff. If the
+anchor cannot be found OR the instruction conflicts with the
+current file state, emit status=CONFLICT with rationale. If the
+task cannot be applied for any reason, emit status=SKIPPED.
+Otherwise emit status=COMPLETED.
+EOF
+)
+
+  local raw_output spawn_rc
+  raw_output=$(
+    env CLAUDE_COORD=0 CLAUDE_CODE_TASK_PROCESSOR=1 \
+        COORD_DIR="$COORD_DIR" \
+        claude -p "$prompt" \
+          --output-format json \
+          --model "$COORD_TASK_PROCESSOR_MODEL" \
+          --max-budget-usd "$COORD_TASK_PROCESSOR_BUDGET_USD" \
+          --allowedTools "Bash" "Read" \
+          --disallowedTools "Write" "Edit" "NotebookEdit" "Task" \
+          2>/dev/null
+  )
+  spawn_rc=$?
+
+  if [ -z "$raw_output" ]; then
+    coord_log_event kind=TASK_PROCESSOR_SPAWN_FAILED \
+      reason=empty_output spawn_rc="$spawn_rc" 2>/dev/null || true
+    return 1
+  fi
+
+  local is_error result_text
+  is_error=$(printf '%s' "$raw_output" | jq -r '.is_error // false' 2>/dev/null) \
+    || is_error=true
+  result_text=$(printf '%s' "$raw_output" | jq -r '.result // ""' 2>/dev/null)
+
+  if [ "$is_error" = "true" ]; then
+    coord_log_event kind=TASK_PROCESSOR_SPAWN_FAILED \
+      reason=is_error_true spawn_rc="$spawn_rc" 2>/dev/null || true
+    return 1
+  fi
+
+  # The spawned claude may return the JSON contract object inline
+  # in .result, OR wrap it in markdown fencing. Try direct JSON
+  # parse first; if it fails, attempt to extract from a fenced
+  # block.
+  local task_patch_json
+  if printf '%s' "$result_text" | jq -e '.status' >/dev/null 2>&1; then
+    task_patch_json="$result_text"
+  else
+    # Strip common markdown fencing.
+    task_patch_json=$(printf '%s' "$result_text" \
+      | sed -n '/^```/,/^```/p' \
+      | sed -e '/^```/d')
+    if ! printf '%s' "$task_patch_json" | jq -e '.status' >/dev/null 2>&1; then
+      coord_log_event kind=TASK_PROCESSOR_SPAWN_FAILED \
+        reason=json_parse_failed 2>/dev/null || true
+      return 1
+    fi
+  fi
+
+  coord_log_event kind=TASK_PROCESSOR_SPAWN_COMPLETED \
+    spawn_rc="$spawn_rc" 2>/dev/null || true
+  printf '%s' "$task_patch_json"
   return 0
 }
 
