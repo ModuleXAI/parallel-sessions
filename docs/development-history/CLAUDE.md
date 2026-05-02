@@ -790,6 +790,10 @@ At SessionStart, if `CLAUDE_COORD=1` was set in the environment that launched yo
 
 If this banner is absent, you are not in a coordinated session and none of the rules below apply.
 
+### B.0a Install-time permission policy (operator note)
+
+The installer (`src/install.sh`) by default touches ONLY the `.hooks` subtree of `.claude/settings.local.json`; user-authored `.permissions` (allow/deny lists, modes) is preserved verbatim. An operator may opt in to `bash src/install.sh --bypass-permissions` (forwardable through `npx gearcode init --bypass-permissions`), which additionally sets `.permissions.defaultMode = "bypassPermissions"` — auto-approving every Claude Code tool-permission prompt in this repo. The flag is **OPT-IN ONLY**, idempotent (re-asserts on re-run with the flag; never silently demotes a previously-set mode when the flag is omitted), and ignored under `--uninstall` (operator reverts manually). Coord hook contract is independent of permission mode: hooks fire under `default`, `acceptEdits`, `plan`, and `bypassPermissions` identically. Whether the operator chose bypass affects what the human user sees (fewer prompts), not what the coord layer enforces — the 2-location deny invariant (lock-held + lockdown gate) is still authoritative.
+
 ### B.1 Before reading any file
 
 **Rule:** Read the file directly; the `PreToolUse(Read)` hook handles the coordination work (hash recording, notification delivery). You do not need to consult `sessions.json` yourself.

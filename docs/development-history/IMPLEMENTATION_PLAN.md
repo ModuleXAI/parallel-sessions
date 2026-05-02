@@ -822,7 +822,7 @@ This pattern applies uniformly across the architecture: enforcement lives in the
 > **Component:** `install.sh` (root of repo after install, temporarily)
 > **Purpose:** One-shot installer.
 > **Type:** CLI tool.
-> **Inputs:** none; interactive or non-interactive via `--yes`.
+> **Inputs:** none; interactive or non-interactive via `--yes`. Optional flags: `--repair`, `--uninstall`, `--bypass-permissions`.
 > **Outputs:**
 >   1. Locate repo root via `git rev-parse --show-toplevel`.
 >   2. Check for `bash >= 3.2`, `jq`, `shasum -a 256`, `flock`, `ps`, `git`. Refuse + list missing.
@@ -830,11 +830,11 @@ This pattern applies uniformly across the architecture: enforcement lives in the
 >   4. Create `.coord/`, `.coord/sessions/`, `.coord/validation/`, `.coord/mediator/`, `.coord/mediator/verdict/`.
 >   5. Write hook scripts from this project into `.coord/hooks/`.
 >   6. Write initial `sessions.json` (empty template), `config.json` (defaults), `schema_version`.
->   7. Append hook entries to `.claude/settings.local.json` (create if missing).
+>   7. Append hook entries to `.claude/settings.local.json` (create if missing). The hook-registration jq pipeline only mutates the `.hooks` subtree by default; user-authored `.permissions`, env, and other top-level keys are preserved verbatim. **Opt-in `--bypass-permissions` flag**: when passed, the same pipeline additionally sets `.permissions.defaultMode = "bypassPermissions"` (DANGEROUS — disables every Claude Code tool-permission prompt in this repo). Off by default. Idempotent on re-run: with the flag, re-asserts the bypass mode; without the flag, leaves any existing `defaultMode` value alone (never silently demotes the user's chosen mode). `--bypass-permissions` is ignored under `--uninstall` (uninstall does not modify permissions; users revert manually).
 >   8. Append `.coord/` and `.claude/settings.local.json` to `.gitignore` (create if missing).
 >   9. Smoke test: spawn a throwaway session that runs the hooks on a no-op.
->   10. Print next steps: "Set CLAUDE_COORD=1 in the shell that launches Claude Code. Verify with `coord status`."
-> **Test criteria:** Runs cleanly on fresh macOS + Linux systems; refuses on NFS test mount; idempotent (re-run does not corrupt existing install).
+>   10. Print next steps: "Set CLAUDE_COORD=1 in the shell that launches Claude Code. Verify with `coord status`." Additionally, when `--bypass-permissions` was passed, surface a banner reminding the operator that defaultMode is now `"bypassPermissions"` and how to revert.
+> **Test criteria:** Runs cleanly on fresh macOS + Linux systems; refuses on NFS test mount; idempotent (re-run does not corrupt existing install). `--bypass-permissions` opt-in path: setting present after install, user-authored `.permissions` keys (allow/deny lists, etc.) preserved alongside the new `defaultMode`, and re-running install WITHOUT the flag does not strip the previously-set `defaultMode`.
 
 > **Component:** `IMPLEMENTATION_LOG.md` (project root)
 > **Purpose:** Append-only construction progress record; primary source of "where are we" state.

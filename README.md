@@ -28,6 +28,10 @@ claude
 
 The installer is idempotent. To remove: `bash src/install.sh --uninstall` (preserves audit log) or `--purge` (also drops `.coord/`).
 
+### Optional: install with permission bypass
+
+`bash src/install.sh --bypass-permissions` (or `npx gearcode init --bypass-permissions`) additionally sets `permissions.defaultMode = "bypassPermissions"` in `.claude/settings.local.json`, auto-approving every Claude Code tool-permission prompt in this repo. **DANGEROUS — opt-in only.** Off by default. Useful for trusted single-developer workflows where the prompts add friction without risk; never the right default for shared or untrusted environments. Combinable with `--yes` and `--repair`. To revert, remove the `defaultMode` key from `.claude/settings.local.json` or set it back to `"default"` / `"acceptEdits"` / `"plan"`.
+
 ## Features
 
 - **File locking with actionable deny banner** — three options offered: delegate a SIMPLE/MODERATE task to the holder, self-delegate (defer your work and come back), or wait passively for release.

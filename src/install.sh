@@ -2,10 +2,16 @@
 # install.sh — one-shot coord installer per plan §4.
 #
 # Usage:
-#   ./install.sh              # interactive-ish; prompts on ambiguous fs types
-#   ./install.sh --yes        # non-interactive; accept defaults
-#   ./install.sh --repair     # overwrite hooks/libs/bin from src/, keep state
-#   ./install.sh --uninstall  # remove hook registrations (delegates to coord uninstall)
+#   ./install.sh                       # interactive-ish; prompts on ambiguous fs types
+#   ./install.sh --yes                 # non-interactive; accept defaults
+#   ./install.sh --repair              # overwrite hooks/libs/bin from src/, keep state
+#   ./install.sh --uninstall           # remove hook registrations (delegates to coord uninstall)
+#   ./install.sh --bypass-permissions  # OPT-IN: also set
+#                                      # .claude/settings.local.json
+#                                      # permissions.defaultMode = "bypassPermissions".
+#                                      # DANGEROUS: disables every Claude Code
+#                                      # tool-permission prompt in this repo. Off by
+#                                      # default. Combinable with --yes / --repair.
 #
 # Plan behaviors:
 #   1. Locate repo root via `git rev-parse --show-toplevel`.
@@ -26,15 +32,28 @@ set -euo pipefail
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 YES=0
 MODE=install
+BYPASS=0
 
 for arg in "$@"; do
   case "$arg" in
-    --yes|-y)       YES=1 ;;
-    --repair)       MODE=repair ;;
-    --uninstall)    MODE=uninstall ;;
+    --yes|-y)              YES=1 ;;
+    --repair)              MODE=repair ;;
+    --uninstall)           MODE=uninstall ;;
+    --bypass-permissions)  BYPASS=1 ;;
     --help|-h)
       cat <<'USAGE'
-usage: install.sh [--yes] [--repair] [--uninstall]
+usage: install.sh [--yes] [--repair] [--uninstall] [--bypass-permissions]
+
+  --yes, -y               non-interactive; accept defaults
+  --repair                overwrite hooks/libs/bin from src/, keep state
+  --uninstall             remove coord hook entries from settings.local.json
+                          (preserves .coord/ state and audit log)
+  --bypass-permissions    OPT-IN: also set
+                          .claude/settings.local.json
+                          permissions.defaultMode = "bypassPermissions".
+                          DANGEROUS — disables every Claude Code tool-permission
+                          prompt in this repo. Off by default. Combinable with
+                          --yes / --repair.
 USAGE
       exit 0 ;;
     *) printf 'install.sh: unknown argument: %s\n' "$arg" >&2; exit 2 ;;
@@ -44,6 +63,11 @@ done
 say()  { printf '%s\n'  "$*"; }
 warn() { printf 'install.sh: warning: %s\n' "$*" >&2; }
 die()  { printf 'install.sh: error: %s\n' "$*" >&2; exit 1; }
+
+if [ "$BYPASS" = 1 ] && [ "$MODE" = uninstall ]; then
+  warn "--bypass-permissions is ignored under --uninstall (uninstall does not modify permissions)"
+  BYPASS=0
+fi
 
 # --- Step 1: repo root ---
 if ! REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null); then
@@ -381,16 +405,29 @@ register_hooks() {
   #                             pre_tool_use_read.sh     (matcher Read)
   #                             pre_tool_use_write.sh    (matcher Write|Edit|NotebookEdit)
   #        PostToolUse        → post_tool_use_write.sh   (matcher Write|Edit|NotebookEdit)  ← Phase 2 T2.01
+  #   3. If --bypass-permissions was passed, also set
+  #      .permissions.defaultMode = "bypassPermissions". This is OPT-IN ONLY:
+  #      the default install never touches the .permissions object so user-
+  #      authored allow/deny lists and modes are preserved verbatim.
   #
   # Idempotent: re-running install/--repair strips the prior entries and
   # re-adds the current set, so changes to commands/timeouts roll forward.
-  printf '%s' "$current" | jq --arg hdir "$COORD_DIR/hooks" '
+  # --bypass-permissions on a re-run idempotently re-asserts the bypass
+  # mode; omitting the flag on a re-run leaves any existing defaultMode
+  # alone (we never silently demote a user's chosen mode).
+  printf '%s' "$current" | jq \
+      --arg hdir "$COORD_DIR/hooks" \
+      --arg bypass "$BYPASS" '
     .hooks //= {}
     | .hooks |= with_entries(
         .value |= ((. // []) | map(
           .hooks = ((.hooks // []) | map(select(((.command // "") | contains("/.coord/hooks/")) | not)))
         ) | map(select((.hooks // []) | length > 0)))
       )
+    | (if $bypass == "1" then
+         .permissions //= {}
+         | .permissions.defaultMode = "bypassPermissions"
+       else . end)
     | .hooks.SessionStart      = ((.hooks.SessionStart // [])
         + [{matcher:"*", hooks:[{type:"command", command:($hdir+"/session_start.sh"),     timeout:10}]}])
     | .hooks.SessionEnd        = ((.hooks.SessionEnd // [])
@@ -471,6 +508,9 @@ if [ "$MODE" = uninstall ]; then
 fi
 
 # --- install / repair flow ---
+if [ "$BYPASS" = 1 ]; then
+  warn "--bypass-permissions ENABLED — settings.local.json will set permissions.defaultMode=\"bypassPermissions\" (every Claude Code tool-permission prompt in this repo will be auto-approved)"
+fi
 say "[1/8] checking dependencies"
 check_deps
 say "[2/8] checking filesystem"
@@ -491,3 +531,10 @@ say "       export CLAUDE_COORD=1"
 say "     and then start claude as usual."
 say "  2. Verify with:  $COORD_DIR/bin/coord status"
 say "  3. Uninstall with: $SELF_DIR/install.sh --uninstall"
+if [ "$BYPASS" = 1 ]; then
+  say ""
+  say "  permissions.defaultMode is now \"bypassPermissions\" in:"
+  say "       $CLAUDE_SETTINGS"
+  say "  To revert: edit that file and remove the \"defaultMode\" key under \"permissions\","
+  say "  or replace its value with \"default\" / \"acceptEdits\" / \"plan\"."
+fi

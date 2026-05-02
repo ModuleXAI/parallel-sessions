@@ -16,10 +16,19 @@ function showHelp() {
 GearCode - Multi-session coordination for Claude Code
 
 Usage:
-  npx gearcode init       Install hooks into current project
-  npx gearcode status     Show coordination state
-  npx gearcode test       Run ship-gate fixtures
-  npx gearcode help       Show this help
+  npx gearcode init [flags]   Install hooks into current project
+  npx gearcode status         Show coordination state
+  npx gearcode test           Run ship-gate fixtures
+  npx gearcode help           Show this help
+
+init flags (forwarded to install.sh):
+  --yes, -y               non-interactive; accept defaults
+  --repair                overwrite hooks/libs/bin from src/, keep state
+  --uninstall             remove coord hook entries from settings.local.json
+  --bypass-permissions    OPT-IN: also set permissions.defaultMode =
+                          "bypassPermissions" in .claude/settings.local.json.
+                          DANGEROUS — disables every Claude Code tool-permission
+                          prompt in this repo. Off by default.
 
 Documentation: https://github.com/sezeryavuz/gearcode
 `);
@@ -60,7 +69,7 @@ Current directory: ${process.cwd()}
     }
 
     const installerPath = path.join(SRC_ROOT, 'install.sh');
-    runBash(installerPath, []);
+    runBash(installerPath, args);
     break;
   }
   case 'status': {
