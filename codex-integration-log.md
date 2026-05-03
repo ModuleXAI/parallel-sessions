@@ -1486,6 +1486,26 @@ Append-only progress log for the Codex CLI integration. Every PR's start, comple
 - Coverage: all 8 reviewer-enumerated cross-agent scenarios + 3 deeper
   variations exercised end-to-end (F.2). 7 invariant guards
   (F.3) lock the Codex-shape contract.
+- Per F-F3-01 — explicit enumeration so the historical record does
+  not depend on the F.2 entry alone for completeness:
+    #1 Lock contention claude→codex     →  smoke 7 + multifile 4
+    #2 Inverse contention codex→claude  →  smoke 8 + multifile 4
+    #3 Watchdog asymmetry (PID-gone for either agent type → pending
+       entry) → watchdog 4
+    #4 Mixed schema 1.1 rows in one sessions.json → smoke 4 + every test
+    #5 Mediator dispatch under D-1 → mediator 4 (clean failure mode for
+       claude-binary-missing: rc=1 + MEDIATOR_SPAWN_REFUSED)
+    #6 HEAD tracking cross-agent (per-session independence) →
+       head_tracking 4
+    #7 Notification fan-out cross-agent (codex release populates
+       claude's queue and vice versa) → notification 5
+    #8 F-D4-03 self-task reminder (mechanism confirmed; user impact
+       unknown — see F-D4-03 entry status downgrade) →
+       self_task_reminder 4
+  Deeper variations:
+    multi-file partial-block         →  multifile 4
+    FIFO across agents               →  fifo 3
+    agent-to-agent cycle             →  cycle 3
 - HIGHEST-RISK SCENARIO (#5 Mediator under D-1) RESOLVED CLEANLY:
   Codex-only operators without `claude` get
   rc=1 + MEDIATOR_SPAWN_REFUSED reason=claude_binary_missing,
