@@ -1102,6 +1102,95 @@ Append-only progress log for the Codex CLI integration. Every PR's start, comple
 
 ---
 
+- **PR E.2 STARTED** — top-level src/install.sh becomes adapter dispatcher.
+  - Pre-conditions verified: E.1 merged (68c68ac); 830 unit / 66 integration
+    green at HEAD (89e06a9).
+  - Branch: `feat/codex-integration`.
+  - Estimated diff per plan: ~150 LOC (rewrite of register_hooks dispatch).
+  - Plan calls for `src/install.sh heavily rewritten` and adapter installers
+    invoked via `src/adapters/<agent>/install.sh`. Refactor scope:
+    - Extract Claude-specific install logic out of src/install.sh into
+      a new src/adapters/claude-code/install.sh (mirrors the Codex
+      adapter's structure).
+    - Trim src/install.sh to: arg parsing, repo-root resolution, deps +
+      filesystem checks, SHARED .coord/ materialization (core libs +
+      bin + reference docs), .gitignore management, dispatch to enabled
+      adapter installers.
+  - F-E1-03 (reviewer observation from E.1): uninstall behavior on
+    .coord/hooks/codex/ — decision applied: minimal-change. Uninstall
+    strips registration entries (.claude/settings.local.json +
+    .codex/hooks.json) but leaves .coord/ intact (including the codex
+    hook scripts under .coord/hooks/codex/). Hook scripts have the
+    COORD_ENABLED guard so manual invocation exits silently. The
+    canonical full-removal escape hatch is `rm -rf .coord/` per the
+    uninstall completion banner.
+
+- **PR E.2 in-progress finding F-E2-01 — sandbox PATH must include /sbin and
+  /usr/sbin.**
+  - The dispatcher's filesystem check (detect_fs_type) uses `mount`,
+    which lives at /sbin/mount on macOS and /usr/sbin/mount on Linux.
+    Initial test sandbox PATH omitted those, producing
+    `mount: command not found` (status 127) only in dispatcher tests
+    that constrain PATH. Fix: include /sbin + /usr/sbin in TEST_BASE_PATH.
+  - Surface area: only the dispatcher integration tests; existing
+    install tests use system PATH which includes them by default.
+  - No production impact.
+
+- **PR E.2 COMPLETED** — 1 new adapter installer + 1 dispatcher rewrite +
+  1 dispatcher test file (11 integration tests).
+  - File added: `src/adapters/claude-code/install.sh` (~243 LOC,
+    chmod +x). Mirrors the codex adapter installer structure; takes
+    --yes / --repair / --uninstall / --bypass-permissions / --repo-root.
+  - File rewritten: `src/install.sh` (565 → 482 LOC; net –83). Becomes
+    the dispatcher: parses --with-codex / --with-claude-code /
+    --without-* / --enable-codex-feature alongside the existing
+    flags; auto-detects `codex` on PATH; materializes shared .coord/;
+    dispatches to adapter installers with shared flags.
+  - File added: `src/tests/integration/install_dispatcher.bats` (11
+    tests).
+  - Plan estimate was ~150 LOC for the dispatcher; landed at 482 LOC
+    because materialize_coord (the shared .coord/ infrastructure
+    setup) is the bulk and stays in the dispatcher. The pure dispatch
+    layer (arg parsing + adapter selection + dispatch) is ~100 LOC;
+    materialize_coord is ~250 LOC (essentially unchanged from the
+    pre-refactor inline version, just decoupled from claude-specific
+    copies).
+  - Tests added: 11 (integration). Plan said 3 dispatcher integration
+    bats files; the unified file with 11 tests covers the 3 plan
+    scenarios (claude_only, codex_only, both) plus error paths +
+    idempotency + uninstall.
+  - Default behavior (no flags) preserved exactly:
+    - Claude always installed (back-compat).
+    - Codex auto-installed if `codex` on PATH; silently skipped
+      otherwise.
+    - --with-codex with codex absent → clear error.
+  - Test surface state at E.2 boundary:
+    - bats unit:        PASS (830/830) — unchanged from E.1.
+    - bats integration: PASS (77/77) — was 66, +11 from
+                         install_dispatcher.
+    - ship-gates: not run (deferred to PR H.1).
+    - invariant: included in unit count.
+  - Merge commit: <to be filled after commit>.
+
+---
+
+**Phase E — CODEX INSTALLER + DISPATCHER — COMPLETE.**
+- Started: 2026-05-03 (E.1).
+- Completed: 2026-05-03 (E.2).
+- PRs merged: E.1, E.2 (2 PRs).
+- Test surface delta:
+  - unit:        816 → 830 (+14: codex_install.bats).
+  - integration: 66  → 77  (+11: install_dispatcher.bats).
+- All adapter installers in place:
+  - src/adapters/claude-code/install.sh (factored out from
+    src/install.sh in E.2).
+  - src/adapters/codex/install.sh (E.1).
+- Top-level src/install.sh is the adapter dispatcher.
+- Both adapters can install simultaneously into one .coord/.
+- Phase F (cross-agent integration tests) may now begin per plan.
+
+---
+
 **Phase D — CODEX HOOKS — COMPLETE.**
 - Started: 2026-05-03 (D.1).
 - Completed: 2026-05-03 (D.5).

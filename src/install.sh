@@ -1,59 +1,80 @@
 #!/usr/bin/env bash
-# install.sh — one-shot coord installer per plan §4.
+# install.sh — coord top-level adapter dispatcher (PR E.2 rewrite).
+#
+# Dispatches to per-adapter installers under src/adapters/<agent>/install.sh.
+# This script handles the SHARED concerns (deps, filesystem, .coord/
+# materialization, .gitignore) and then runs the requested adapter
+# installers, which handle their own hooks/libs/registration.
 #
 # Usage:
-#   ./install.sh                       # interactive-ish; prompts on ambiguous fs types
-#   ./install.sh --yes                 # non-interactive; accept defaults
-#   ./install.sh --repair              # overwrite hooks/libs/bin from src/, keep state
-#   ./install.sh --uninstall           # remove hook registrations (delegates to coord uninstall)
-#   ./install.sh --bypass-permissions  # OPT-IN: also set
-#                                      # .claude/settings.local.json
-#                                      # permissions.defaultMode = "bypassPermissions".
-#                                      # DANGEROUS: disables every Claude Code
-#                                      # tool-permission prompt in this repo. Off by
-#                                      # default. Combinable with --yes / --repair.
+#   ./install.sh                              # claude (back-compat) + auto-codex
+#   ./install.sh --yes                        # non-interactive
+#   ./install.sh --repair                     # overwrite hooks/libs, keep state
+#   ./install.sh --uninstall                  # strip hook entries, leave .coord/
+#   ./install.sh --bypass-permissions         # OPT-IN claude permissions bypass
 #
-# Plan behaviors:
-#   1. Locate repo root via `git rev-parse --show-toplevel`.
-#   2. Check deps: bash≥3.2, jq, shasum, flock, ps, git, perl (optional).
-#   3. Detect filesystem; refuse on NFS/FUSE/iCloud/Dropbox.
-#   4. Create .coord/ layout (§3.2).
-#   5. Copy src/hooks, src/lib, src/bin, src/agents into .coord/ equivalents.
-#   6. Write initial sessions.json, config.json, schema_version (Decision 2.9).
-#   7. Append hook entries to .claude/settings.local.json.
-#   8. Append .coord/ and .claude/settings.local.json to .gitignore.
-#   9. Smoke test: invoke session_start.sh against a canned stdin.
-#  10. Print next-steps banner.
+#   Adapter selection (default behavior preserves Claude back-compat):
+#   ./install.sh --with-codex                 # install codex too (errors if
+#                                              codex binary not on PATH)
+#   ./install.sh --without-codex              # skip codex even if on PATH
+#   ./install.sh --with-claude-code           # explicit claude (default)
+#   ./install.sh --without-claude-code        # skip claude (codex-only install)
+#   ./install.sh --with-claude-code --with-codex
+#                                              # both, errors if either CLI absent
+#
+# Default selection rules (no explicit --with-*/--without-* flags):
+#   - claude:  always enabled (back-compat — `bash src/install.sh` has
+#              always meant "install claude" since Phase 0).
+#   - codex:   auto-enabled when `codex` is on PATH; silently skipped
+#              otherwise (no error). Per reviewer guidance: explicit
+#              --with-codex with missing codex binary errors clearly;
+#              auto-detect with missing binary silently proceeds.
 #
 # Every action is idempotent; repeat runs do not corrupt an existing install.
 
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-YES=0
-MODE=install
-BYPASS=0
+
+MODE="install"
+YES="0"
+BYPASS="0"
+WITH_CLAUDE=""    # tri-state: ""=auto, "1"=force on, "0"=force off
+WITH_CODEX=""
+ENABLE_CODEX_FEATURE="0"
 
 for arg in "$@"; do
   case "$arg" in
-    --yes|-y)              YES=1 ;;
-    --repair)              MODE=repair ;;
-    --uninstall)           MODE=uninstall ;;
-    --bypass-permissions)  BYPASS=1 ;;
+    --yes|-y)                  YES="1" ;;
+    --repair)                  MODE="repair" ;;
+    --uninstall)               MODE="uninstall" ;;
+    --bypass-permissions)      BYPASS="1" ;;
+    --with-claude-code)        WITH_CLAUDE="1" ;;
+    --without-claude-code)     WITH_CLAUDE="0" ;;
+    --with-codex)              WITH_CODEX="1" ;;
+    --without-codex)           WITH_CODEX="0" ;;
+    --enable-codex-feature)    ENABLE_CODEX_FEATURE="1" ;;
     --help|-h)
       cat <<'USAGE'
 usage: install.sh [--yes] [--repair] [--uninstall] [--bypass-permissions]
+                  [--with-claude-code | --without-claude-code]
+                  [--with-codex       | --without-codex]
+                  [--enable-codex-feature]
 
-  --yes, -y               non-interactive; accept defaults
-  --repair                overwrite hooks/libs/bin from src/, keep state
-  --uninstall             remove coord hook entries from settings.local.json
-                          (preserves .coord/ state and audit log)
-  --bypass-permissions    OPT-IN: also set
-                          .claude/settings.local.json
-                          permissions.defaultMode = "bypassPermissions".
-                          DANGEROUS — disables every Claude Code tool-permission
-                          prompt in this repo. Off by default. Combinable with
-                          --yes / --repair.
+  Modes:
+    --yes, -y               non-interactive; accept defaults
+    --repair                overwrite hooks/libs/bin from src/, keep state
+    --uninstall             remove coord hook entries from each adapter's
+                            settings file (preserves .coord/ state)
+    --bypass-permissions    OPT-IN claude .permissions.defaultMode bypass
+
+  Adapter selection (default = claude always + codex if codex on PATH):
+    --with-claude-code      install Claude Code adapter (default ON)
+    --without-claude-code   skip Claude
+    --with-codex            install Codex adapter; errors if codex absent
+    --without-codex         skip Codex even if codex on PATH
+    --enable-codex-feature  flip [features] codex_hooks = true in
+                            .codex/config.toml (Codex installer only)
 USAGE
       exit 0 ;;
     *) printf 'install.sh: unknown argument: %s\n' "$arg" >&2; exit 2 ;;
@@ -64,20 +85,13 @@ say()  { printf '%s\n'  "$*"; }
 warn() { printf 'install.sh: warning: %s\n' "$*" >&2; }
 die()  { printf 'install.sh: error: %s\n' "$*" >&2; exit 1; }
 
-if [ "$BYPASS" = 1 ] && [ "$MODE" = uninstall ]; then
-  warn "--bypass-permissions is ignored under --uninstall (uninstall does not modify permissions)"
-  BYPASS=0
-fi
-
-# --- Step 1: install root (no longer requires a git repo per A.5) ---
-# Prefer the git repo top-level when present; fall back to $PWD otherwise.
-# Non-git installs print a banner so the user knows where .coord/ landed.
+# === step 1: install root resolution ===
 if REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null); then
   say "install root: $REPO_ROOT (git repo top-level)"
 else
   REPO_ROOT="$PWD"
   say "install root: $REPO_ROOT (no git repo detected)"
-  if [ "${YES:-0}" != 1 ]; then
+  if [ "$YES" != "1" ] && [ "$MODE" != "uninstall" ]; then
     say "Note: .coord/ state will live at '$REPO_ROOT/.coord'."
     say "      Re-run with --yes to skip this prompt next time."
     printf 'Continue? (y/n): '
@@ -87,18 +101,48 @@ else
 fi
 
 COORD_DIR="$REPO_ROOT/.coord"
-CLAUDE_SETTINGS="$REPO_ROOT/.claude/settings.local.json"
 
-# --- Step 2: deps ---
+# === step 2: resolve adapter selection ===
+# `claude` binary presence is informational ONLY for the dispatcher: Claude
+# install is the back-compat default, so it runs regardless. Verifying the
+# binary is on PATH is the user's responsibility (they may install claude
+# CLI later). The Codex side is stricter — explicit --with-codex requires
+# the binary to be present per reviewer guidance.
+
+claude_available="0"
+codex_available="0"
+command -v claude >/dev/null 2>&1 && claude_available="1"
+command -v codex  >/dev/null 2>&1 && codex_available="1"
+
+# Resolve final on/off per adapter.
+if [ -z "$WITH_CLAUDE" ]; then
+  WITH_CLAUDE="1"   # default ON for back-compat
+fi
+if [ -z "$WITH_CODEX" ]; then
+  if [ "$codex_available" = "1" ]; then
+    WITH_CODEX="1"
+    say "codex binary detected on PATH → enabling Codex adapter (use --without-codex to skip)"
+  else
+    WITH_CODEX="0"
+  fi
+else
+  if [ "$WITH_CODEX" = "1" ] && [ "$codex_available" = "0" ]; then
+    die "--with-codex passed explicitly but \`codex\` binary is not on PATH. Install Codex CLI from https://github.com/openai/codex (or drop --with-codex for back-compat behavior)."
+  fi
+fi
+
+if [ "$WITH_CLAUDE" = "0" ] && [ "$WITH_CODEX" = "0" ]; then
+  die "no adapters selected — both --without-claude-code and --without-codex (or codex absent). Nothing to install."
+fi
+
+# === step 3: deps ===
 check_bash_version() {
-  # Require 3.2+. bash --version prints like "GNU bash, version 3.2.57(1)-release ..."
   local line major minor
   line=$(bash --version | head -1)
   major=$(printf '%s' "$line" | sed -E 's/.*version ([0-9]+)\.([0-9]+).*/\1/')
   minor=$(printf '%s' "$line" | sed -E 's/.*version ([0-9]+)\.([0-9]+).*/\2/')
   if [ -z "$major" ] || [ -z "$minor" ]; then
-    warn "could not parse bash version: $line"
-    return 0  # soft-pass
+    warn "could not parse bash version: $line"; return 0
   fi
   if [ "$major" -lt 3 ] || { [ "$major" -eq 3 ] && [ "$minor" -lt 2 ]; }; then
     die "bash $major.$minor is too old; need 3.2+"
@@ -124,31 +168,21 @@ check_deps() {
   fi
 }
 
-# --- Step 3: filesystem refusal ---
-# Parse `mount` for the repo's path and refuse if the backing fs is of a
-# known-bad type (NFS / FUSE / iCloud / Dropbox / CIFS / SMB).
+# === step 4: filesystem refusal ===
 detect_fs_type() {
   local path="$1"
-  # df -P emits (header line, then) "Filesystem <blocks> <used> <avail> <cap> <mount>".
-  # Use the mount point to look up the fs type in `mount` output.
   local mp
   mp=$(df -P "$path" 2>/dev/null | awk 'NR==2 {print $NF}') || mp=""
   if [ -z "$mp" ]; then printf 'unknown\n'; return 0; fi
-  # mount output differs between macOS and Linux:
-  #   macOS:  /dev/X on /path (FS, opts)
-  #   Linux:  X on /path type FS (opts)
-  # Prefer "type FS" (Linux form); fall back to first paren-token (macOS).
   mount | awk -v mp="$mp" '
     {
       on_idx=0
       for (i=1;i<=NF;i++) if ($i == "on") { on_idx=i; break }
       if (!on_idx) next
       if ($(on_idx+1) != mp) next
-      # Linux form: "type FS" follows the mount path.
       for (i=on_idx+2; i<=NF; i++) {
         if ($i == "type") { print $(i+1); exit }
       }
-      # macOS form: first paren contains "FS, opts".
       pos = index($0, "(")
       if (pos > 0) {
         rest = substr($0, pos+1)
@@ -172,13 +206,11 @@ check_filesystem() {
       warn "could not determine filesystem type; assuming local POSIX"
       ;;
   esac
-  # Extra: refuse on iCloud and Dropbox mount points (heuristic by path).
   case "$REPO_ROOT" in
     *"/Mobile Documents/"*|*"/Dropbox/"*|*"/Google Drive/"*|*"/OneDrive/"*)
       die "repo path contains a cloud-sync prefix; flock semantics unreliable"
       ;;
   esac
-  # Smoke-check flock on a scratch file within the repo fs.
   local scratch
   scratch=$(mktemp "$REPO_ROOT/.coord-install-probe.XXXX" 2>/dev/null || printf '')
   if [ -z "$scratch" ]; then die "cannot create a scratch file in $REPO_ROOT"; fi
@@ -189,7 +221,8 @@ check_filesystem() {
   rm -f "$scratch"; trap - EXIT
 }
 
-# --- Steps 4-6: materialize .coord/ and copy source artefacts ---
+# === step 5: materialize SHARED .coord/ infrastructure ===
+# Adapter-specific lib/hook copies happen in each adapter's installer.
 materialize_coord() {
   mkdir -p "$COORD_DIR" \
            "$COORD_DIR/sessions" \
@@ -208,81 +241,47 @@ materialize_coord() {
            "$COORD_DIR/lib" \
            "$COORD_DIR/bin" \
            "$COORD_DIR/agents"
-  # Copy source artefacts.
+
   # Core libs: shared across all agent adapters.
-  cp -f "$SELF_DIR"/core/lib/*.sh    "$COORD_DIR/lib/"
-  # Adapter-specific libs (Claude Code): subagent_filter.sh etc. The runtime
-  # layout flattens core + adapter libs into .coord/lib/; hooks resolve a
-  # single dir at runtime via dual-fallback LIB_DIR resolution.
-  cp -f "$SELF_DIR"/adapters/claude-code/lib/*.sh "$COORD_DIR/lib/"
-  # Claude Code hooks (the ones registered in .claude/settings.local.json).
-  cp -f "$SELF_DIR"/adapters/claude-code/hooks/*.sh  "$COORD_DIR/hooks/"
-  if [ -d "$SELF_DIR/agents" ]; then
-    # Agents may not exist yet in Phase 0; copy only .md files if present.
-    if ls "$SELF_DIR/agents"/*.md >/dev/null 2>&1; then
-      cp -f "$SELF_DIR/agents"/*.md "$COORD_DIR/hooks/" 2>/dev/null || true
-    fi
-  fi
-  # bin: copy coord CLI (may be absent in very early Phase 0 commits).
+  cp -f "$SELF_DIR"/core/lib/*.sh "$COORD_DIR/lib/"
+
+  # coord CLI binary (shared).
   if [ -f "$SELF_DIR/core/bin/coord" ]; then
     cp -f "$SELF_DIR/core/bin/coord" "$COORD_DIR/bin/coord"
   fi
-  # T3.07: copy MEDIATOR_REFERENCE.md alongside lib/. Idempotent —
-  # if the user customized the installed copy, preserve it (compare
-  # via shasum); otherwise update.
-  if [ -f "$SELF_DIR/core/lib/MEDIATOR_REFERENCE.md" ]; then
-    local ref_dst="$COORD_DIR/mediator/MEDIATOR_REFERENCE.md"
-    if [ -f "$ref_dst" ]; then
-      local src_hash dst_hash
-      src_hash=$(shasum -a 256 "$SELF_DIR/core/lib/MEDIATOR_REFERENCE.md" 2>/dev/null | awk '{print $1}')
-      dst_hash=$(shasum -a 256 "$ref_dst" 2>/dev/null | awk '{print $1}')
-      if [ -n "$src_hash" ] && [ -n "$dst_hash" ] && [ "$src_hash" != "$dst_hash" ]; then
-        # Backup user-customized copy before overwriting on --repair;
-        # leave alone on plain re-install.
-        if [ "$MODE" = "repair" ]; then
-          cp -f "$ref_dst" "${ref_dst}.user-backup.$(date -u +%Y%m%dT%H%M%SZ)" 2>/dev/null || true
-          cp -f "$SELF_DIR/core/lib/MEDIATOR_REFERENCE.md" "$ref_dst"
-        fi
-      else
-        # Hashes match or one missing — safe to overwrite (idempotent).
-        cp -f "$SELF_DIR/core/lib/MEDIATOR_REFERENCE.md" "$ref_dst" 2>/dev/null || true
-      fi
-    else
-      cp -f "$SELF_DIR/core/lib/MEDIATOR_REFERENCE.md" "$ref_dst" 2>/dev/null || true
-    fi
-  fi
-  # T4.05: copy VALIDATOR_REFERENCE.md alongside the validator lib.
-  # Idempotent with same user-customization-preservation contract as
-  # MEDIATOR_REFERENCE.md above.
-  if [ -f "$SELF_DIR/core/lib/VALIDATOR_REFERENCE.md" ]; then
-    local vref_dst="$COORD_DIR/validator/VALIDATOR_REFERENCE.md"
-    if [ -f "$vref_dst" ]; then
-      local vsrc_hash vdst_hash
-      vsrc_hash=$(shasum -a 256 "$SELF_DIR/core/lib/VALIDATOR_REFERENCE.md" 2>/dev/null | awk '{print $1}')
-      vdst_hash=$(shasum -a 256 "$vref_dst" 2>/dev/null | awk '{print $1}')
-      if [ -n "$vsrc_hash" ] && [ -n "$vdst_hash" ] && [ "$vsrc_hash" != "$vdst_hash" ]; then
-        if [ "$MODE" = "repair" ]; then
-          cp -f "$vref_dst" "${vref_dst}.user-backup.$(date -u +%Y%m%dT%H%M%SZ)" 2>/dev/null || true
-          cp -f "$SELF_DIR/core/lib/VALIDATOR_REFERENCE.md" "$vref_dst"
-        fi
-      else
-        cp -f "$SELF_DIR/core/lib/VALIDATOR_REFERENCE.md" "$vref_dst" 2>/dev/null || true
-      fi
-    else
-      cp -f "$SELF_DIR/core/lib/VALIDATOR_REFERENCE.md" "$vref_dst" 2>/dev/null || true
-    fi
-  fi
 
-  chmod +x "$COORD_DIR/lib"/*.sh "$COORD_DIR/hooks"/*.sh
+  # Reference docs (shared; idempotent with user-customization preservation).
+  for ref_pair in "core/lib/MEDIATOR_REFERENCE.md:mediator/MEDIATOR_REFERENCE.md" \
+                  "core/lib/VALIDATOR_REFERENCE.md:validator/VALIDATOR_REFERENCE.md"; do
+    src_rel="${ref_pair%%:*}"
+    dst_rel="${ref_pair##*:}"
+    src_path="$SELF_DIR/$src_rel"
+    dst_path="$COORD_DIR/$dst_rel"
+    [ -f "$src_path" ] || continue
+    if [ -f "$dst_path" ]; then
+      local sh dh
+      sh=$(shasum -a 256 "$src_path" 2>/dev/null | awk '{print $1}')
+      dh=$(shasum -a 256 "$dst_path" 2>/dev/null | awk '{print $1}')
+      if [ -n "$sh" ] && [ -n "$dh" ] && [ "$sh" != "$dh" ]; then
+        if [ "$MODE" = "repair" ]; then
+          cp -f "$dst_path" "${dst_path}.user-backup.$(date -u +%Y%m%dT%H%M%SZ)" 2>/dev/null || true
+          cp -f "$src_path" "$dst_path"
+        fi
+      else
+        cp -f "$src_path" "$dst_path" 2>/dev/null || true
+      fi
+    else
+      cp -f "$src_path" "$dst_path" 2>/dev/null || true
+    fi
+  done
+
+  chmod +x "$COORD_DIR/lib"/*.sh
   [ -f "$COORD_DIR/bin/coord" ] && chmod +x "$COORD_DIR/bin/coord"
 
-  # schema_version (single-line; Decision 2.9).
-  # 1.1 (PR B.1): session rows carry `agent` field. Readers
-  # tolerate 1.0 files via `// "claude_code"` defaults.
+  # schema_version + config.json + sessions.json + lock sentinels.
   printf '1.1\n' >"$COORD_DIR/schema_version"
 
-  # config.json (plan §3.6 + PR-PHASE5-02 §D wait_backend).
-  if [ ! -s "$COORD_DIR/config.json" ] || [ "$MODE" = repair ]; then
+  if [ ! -s "$COORD_DIR/config.json" ] || [ "$MODE" = "repair" ]; then
     cat >"$COORD_DIR/config.json" <<'JSON'
 {
   "schema_version": "1.1",
@@ -303,12 +302,7 @@ materialize_coord() {
 JSON
   fi
 
-  # PR-PHASE5-02 §4: detect wake-event backend (fswatch / inotifywait /
-  # polling) and bake the resolved value into config.json. Auto-detection
-  # runs at install + --repair so an admin install on a fresh host gets
-  # the right backend without an extra step. Records WAIT_BACKEND_DETECTED
-  # for the audit trail (idempotent at repair: re-emits with current
-  # detection result).
+  # Detect wake-event backend (PR-PHASE5-02 §4).
   if [ -f "$COORD_DIR/lib/wait_backend.sh" ] && [ -f "$COORD_DIR/lib/log_event.sh" ]; then
     local _wb_backend _wb_platform _wb_tmp
     # shellcheck disable=SC1091
@@ -331,42 +325,28 @@ JSON
       mode="$MODE" 2>/dev/null || true
   fi
 
-  # sessions.json — initialize only if missing or repair.
-  if [ ! -s "$COORD_DIR/sessions.json" ] || [ "$MODE" = repair ]; then
+  if [ ! -s "$COORD_DIR/sessions.json" ] || [ "$MODE" = "repair" ]; then
     "$COORD_DIR/lib/atomic_write.sh" template >"$COORD_DIR/sessions.json"
   fi
 
-  # Lock sentinels.
   for f in sessions.lock events.lock history.lock; do
     : >"$COORD_DIR/$f"
   done
 
-  # Watchdog cache layout (T3.04 / PR-PHASE3-02 §E):
-  # recent_checks.jsonl is append-only; recent_checks.lock is the flock
-  # sentinel. Idempotent: only create if absent, never clobber existing
-  # cache entries on --repair.
   [ -f "$COORD_DIR/watchdog/recent_checks.jsonl" ] || \
     : >"$COORD_DIR/watchdog/recent_checks.jsonl"
   [ -f "$COORD_DIR/watchdog/recent_checks.lock" ] || \
     : >"$COORD_DIR/watchdog/recent_checks.lock"
 
-  # Mediator pending JSONL queue layout (T2.04 + T3.07 / PR-PHASE3-03):
-  # pending.jsonl is append-only; pending.lock is the flock sentinel;
-  # pending.consumed is the high-water-mark file (single integer line).
   [ -f "$COORD_DIR/mediator/pending.jsonl" ] || \
     : >"$COORD_DIR/mediator/pending.jsonl"
   [ -f "$COORD_DIR/mediator/pending.lock" ] || \
     : >"$COORD_DIR/mediator/pending.lock"
 
-  # Legacy pending.json migration (T3.07 / PR-PHASE3-03 / Decision 4):
-  # Pre-Phase-3 installs used a single-file pending.json for
-  # corrupt_state. Migrate any active entry forward into the unified
-  # pending.jsonl queue, then delete the legacy file. Idempotent: if
-  # pending.json is absent, no-op.
+  # Legacy pending.json migration (T3.07 / PR-PHASE3-03 / Decision 4).
   if [ -f "$COORD_DIR/mediator/pending.json" ]; then
     local legacy="$COORD_DIR/mediator/pending.json"
     if jq -e . "$legacy" >/dev/null 2>&1; then
-      # Valid JSON: shape into the new top-level + payload form.
       local migrated_line
       migrated_line=$(jq -c '
         {
@@ -382,184 +362,121 @@ JSON
       fi
       rm -f "$legacy" 2>/dev/null || true
     else
-      # Unparseable legacy file: archive forensically; do not migrate.
       mv "$legacy" "${legacy}.legacy.$(date -u +%Y%m%dT%H%M%SZ)" 2>/dev/null || rm -f "$legacy" 2>/dev/null
     fi
   fi
 
-  # sessions_history.json.
-  if [ ! -s "$COORD_DIR/sessions_history.json" ] || [ "$MODE" = repair ]; then
+  if [ ! -s "$COORD_DIR/sessions_history.json" ] || [ "$MODE" = "repair" ]; then
     jq -n '{schema_version:"1.1", events:[]}' >"$COORD_DIR/sessions_history.json"
   fi
 
-  # events.jsonl — just ensure exists.
   : >>"$COORD_DIR/events.jsonl"
 }
 
-# --- Step 7: hook registrations in .claude/settings.local.json ---
-register_hooks() {
-  mkdir -p "$REPO_ROOT/.claude"
-  local tmp current
-  tmp=$(mktemp)
-  if [ -s "$CLAUDE_SETTINGS" ]; then
-    current=$(cat "$CLAUDE_SETTINGS")
-    # Validate it parses; if not, fail loudly — we won't silently overwrite.
-    if ! printf '%s' "$current" | jq -e . >/dev/null 2>&1; then
-      die "$CLAUDE_SETTINGS is not valid JSON; refusing to overwrite. Fix or remove it and re-run."
-    fi
-  else
-    current='{}'
-  fi
-
-  # Strategy:
-  #   1. Remove any prior coord-owned entries (commands under .coord/hooks/)
-  #      from EVERY event's hook list. This preserves user-authored entries
-  #      sitting alongside ours.
-  #   2. Append our Phase-2 hook set:
-  #        SessionStart       → session_start.sh         (matcher *)
-  #        SessionEnd         → session_end.sh           (matcher *)
-  #        Stop               → stop.sh                  (matcher *)              ← Phase 2 T2.02
-  #        UserPromptSubmit   → user_prompt_submit.sh    (matcher *)
-  #        PreToolUse         → pre_tool_use_any.sh      (matcher *)
-  #                             pre_tool_use_read.sh     (matcher Read)
-  #                             pre_tool_use_write.sh    (matcher Write|Edit|NotebookEdit)
-  #        PostToolUse        → post_tool_use_write.sh   (matcher Write|Edit|NotebookEdit)  ← Phase 2 T2.01
-  #   3. If --bypass-permissions was passed, also set
-  #      .permissions.defaultMode = "bypassPermissions". This is OPT-IN ONLY:
-  #      the default install never touches the .permissions object so user-
-  #      authored allow/deny lists and modes are preserved verbatim.
-  #
-  # Idempotent: re-running install/--repair strips the prior entries and
-  # re-adds the current set, so changes to commands/timeouts roll forward.
-  # --bypass-permissions on a re-run idempotently re-asserts the bypass
-  # mode; omitting the flag on a re-run leaves any existing defaultMode
-  # alone (we never silently demote a user's chosen mode).
-  printf '%s' "$current" | jq \
-      --arg hdir "$COORD_DIR/hooks" \
-      --arg bypass "$BYPASS" '
-    .hooks //= {}
-    | .hooks |= with_entries(
-        .value |= ((. // []) | map(
-          .hooks = ((.hooks // []) | map(select(((.command // "") | contains("/.coord/hooks/")) | not)))
-        ) | map(select((.hooks // []) | length > 0)))
-      )
-    | (if $bypass == "1" then
-         .permissions //= {}
-         | .permissions.defaultMode = "bypassPermissions"
-       else . end)
-    | .hooks.SessionStart      = ((.hooks.SessionStart // [])
-        + [{matcher:"*", hooks:[{type:"command", command:($hdir+"/session_start.sh"),     timeout:10}]}])
-    | .hooks.SessionEnd        = ((.hooks.SessionEnd // [])
-        + [{matcher:"*", hooks:[{type:"command", command:($hdir+"/session_end.sh"),       timeout:10}]}])
-    | .hooks.Stop              = ((.hooks.Stop // [])
-        + [{matcher:"*", hooks:[{type:"command", command:($hdir+"/stop.sh"),              timeout:10}]}])
-    | .hooks.UserPromptSubmit  = ((.hooks.UserPromptSubmit // [])
-        + [{matcher:"*", hooks:[{type:"command", command:($hdir+"/user_prompt_submit.sh"),timeout:10}]}])
-    | .hooks.PreToolUse        = ((.hooks.PreToolUse // [])
-        + [{matcher:"*",                       hooks:[{type:"command", command:($hdir+"/pre_tool_use_any.sh"),   timeout:10}]},
-           {matcher:"Read",                    hooks:[{type:"command", command:($hdir+"/pre_tool_use_read.sh"),  timeout:10}]},
-           {matcher:"Write|Edit|NotebookEdit", hooks:[{type:"command", command:($hdir+"/pre_tool_use_write.sh"), timeout:10}]}])
-    | .hooks.PostToolUse       = ((.hooks.PostToolUse // [])
-        + [{matcher:"Write|Edit|NotebookEdit", hooks:[{type:"command", command:($hdir+"/post_tool_use_write.sh"),timeout:10}]}])
-  ' >"$tmp"
-  mv "$tmp" "$CLAUDE_SETTINGS"
-}
-
-# --- Step 8: .gitignore entries ---
+# === step 6: .gitignore management ===
 gitignore_entries() {
   local gi="$REPO_ROOT/.gitignore"
-  # Skip entirely when not a git repo AND no pre-existing .gitignore.
-  # Per A.5: non-git installs are a supported configuration.
   if [ ! -d "$REPO_ROOT/.git" ] && [ ! -f "$gi" ]; then
     say "skipping .gitignore (no git repo, no existing .gitignore)"
     return 0
   fi
   [ -f "$gi" ] || : >"$gi"
   local entry
-  for entry in '.coord/' '.claude/settings.local.json' 'IMPLEMENTATION_LOG.md' 'FINDINGS.md' 'phase-*-signoff.md' 'phase0-verification.md'; do
+  for entry in '.coord/' '.claude/settings.local.json' '.codex/hooks.json' \
+               'IMPLEMENTATION_LOG.md' 'FINDINGS.md' 'phase-*-signoff.md' \
+               'phase0-verification.md'; do
     if ! grep -qxF "$entry" "$gi" 2>/dev/null; then
       printf '%s\n' "$entry" >>"$gi"
     fi
   done
 }
 
-# --- Step 9: smoke test ---
-smoke_test() {
-  local sid="install-smoke-$RANDOM"
-  # Run session_start.sh with CLAUDE_COORD=1 against canned stdin.
-  local out
-  out=$(CLAUDE_COORD=1 CLAUDE_PROJECT_DIR="$REPO_ROOT" \
-         "$COORD_DIR/hooks/session_start.sh" <<EOF
-{"session_id":"$sid","cwd":"$REPO_ROOT","hook_event_name":"SessionStart","source":"startup"}
-EOF
-  )
-  # Validate banner output.
-  if ! printf '%s' "$out" | jq -e '.hookSpecificOutput.additionalContext | contains("Coord v1.0 active")' >/dev/null 2>&1; then
-    die "smoke test failed: session_start did not emit banner"
+# === step 7: dispatch to adapter installers ===
+dispatch_adapter() {
+  local adapter="$1"; shift
+  local script="$SELF_DIR/adapters/$adapter/install.sh"
+  if [ ! -x "$script" ]; then
+    die "adapter installer missing or not executable: $script"
   fi
-  # Active marker should exist
-  [ -e "$COORD_DIR/sessions/$sid.active" ] \
-    || die "smoke test failed: .active marker not created"
-  # Tear down the smoke session (session_end).
-  CLAUDE_COORD=1 "$COORD_DIR/hooks/session_end.sh" <<EOF >/dev/null 2>&1
-{"session_id":"$sid","hook_event_name":"SessionEnd","reason":"install-smoke"}
-EOF
-  [ ! -e "$COORD_DIR/sessions/$sid.active" ] \
-    || die "smoke test failed: .active marker not removed after SessionEnd"
-  say "smoke test passed"
+  "$script" "$@"
 }
 
-# --- uninstall mode (delegates to coord uninstall semantics) ---
-if [ "$MODE" = uninstall ]; then
-  say "uninstall: removing hook entries from $CLAUDE_SETTINGS (leaving .coord/ in place)"
-  if [ -s "$CLAUDE_SETTINGS" ]; then
-    tmp=$(mktemp)
-    # Strip any coord-owned entries (commands under .coord/hooks/) across
-    # ALL events; preserves user-authored entries alongside ours.
-    jq '
-      if has("hooks") then
-        .hooks |= with_entries(
-          .value |= ((. // []) | map(
-            .hooks = ((.hooks // []) | map(select(((.command // "") | contains("/.coord/hooks/")) | not)))
-          ) | map(select((.hooks // []) | length > 0)))
-        )
-      else . end
-    ' "$CLAUDE_SETTINGS" >"$tmp" && mv "$tmp" "$CLAUDE_SETTINGS"
-    say "hooks entries removed from settings.local.json"
+build_adapter_args() {
+  local args=()
+  [ "$YES" = "1" ]    && args+=("--yes")
+  [ "$BYPASS" = "1" ] && args+=("--bypass-permissions")
+  [ "$MODE" = "repair" ] && args+=("--repair")
+  args+=("--repo-root" "$REPO_ROOT")
+  printf '%s\n' "${args[@]}"
+}
+
+# === uninstall mode ===
+if [ "$MODE" = "uninstall" ]; then
+  say "uninstall: dispatching to adapter installers (leaving .coord/ in place)"
+  if [ "$WITH_CLAUDE" = "1" ]; then
+    "$SELF_DIR/adapters/claude-code/install.sh" --uninstall --repo-root "$REPO_ROOT" || true
   fi
-  say "uninstall complete; .coord/ directory, IMPLEMENTATION_LOG.md, FINDINGS.md left untouched"
+  if [ "$WITH_CODEX" = "1" ]; then
+    "$SELF_DIR/adapters/codex/install.sh" --uninstall --repo-root "$REPO_ROOT" || true
+  fi
+  say "uninstall complete; .coord/ directory and audit log left untouched"
   say "to fully remove: rm -rf .coord   (destructive)"
   exit 0
 fi
 
-# --- install / repair flow ---
-if [ "$BYPASS" = 1 ]; then
-  warn "--bypass-permissions ENABLED — settings.local.json will set permissions.defaultMode=\"bypassPermissions\" (every Claude Code tool-permission prompt in this repo will be auto-approved)"
+# === install / repair flow ===
+if [ "$BYPASS" = "1" ]; then
+  warn "--bypass-permissions ENABLED — Claude .claude/settings.local.json will set permissions.defaultMode=\"bypassPermissions\""
 fi
-say "[1/8] checking dependencies"
+
+say "[1/6] checking dependencies"
 check_deps
-say "[2/8] checking filesystem"
+say "[2/6] checking filesystem"
 check_filesystem
-say "[3/8] materializing .coord/"
+say "[3/6] materializing shared .coord/"
 materialize_coord
-say "[4/8] registering hooks in $CLAUDE_SETTINGS"
-register_hooks
-say "[5/8] updating .gitignore"
+say "[4/6] updating .gitignore"
 gitignore_entries
-say "[6/8] running smoke test"
-smoke_test
-say "[7/8] coord installation ready"
-say ""
-say "[8/8] next steps:"
-say "  1. Set CLAUDE_COORD=1 in the shell that launches Claude Code, e.g.:"
-say "       export CLAUDE_COORD=1"
-say "     and then start claude as usual."
-say "  2. Verify with:  $COORD_DIR/bin/coord status"
-say "  3. Uninstall with: $SELF_DIR/install.sh --uninstall"
-if [ "$BYPASS" = 1 ]; then
-  say ""
-  say "  permissions.defaultMode is now \"bypassPermissions\" in:"
-  say "       $CLAUDE_SETTINGS"
-  say "  To revert: edit that file and remove the \"defaultMode\" key under \"permissions\","
-  say "  or replace its value with \"default\" / \"acceptEdits\" / \"plan\"."
+
+say "[5/6] dispatching to adapter installers"
+ADAPTER_ARGS=()
+[ "$YES" = "1" ]      && ADAPTER_ARGS+=("--yes")
+[ "$BYPASS" = "1" ]   && ADAPTER_ARGS+=("--bypass-permissions")
+[ "$MODE" = "repair" ] && ADAPTER_ARGS+=("--repair")
+ADAPTER_ARGS+=("--repo-root" "$REPO_ROOT")
+
+if [ "$WITH_CLAUDE" = "1" ]; then
+  say "  → claude-code adapter"
+  "$SELF_DIR/adapters/claude-code/install.sh" "${ADAPTER_ARGS[@]}"
 fi
+if [ "$WITH_CODEX" = "1" ]; then
+  say "  → codex adapter"
+  CODEX_ARGS=("${ADAPTER_ARGS[@]}")
+  # --bypass-permissions is claude-only; strip from codex args.
+  CODEX_ARGS_FILTERED=()
+  for a in "${CODEX_ARGS[@]}"; do
+    [ "$a" = "--bypass-permissions" ] && continue
+    CODEX_ARGS_FILTERED+=("$a")
+  done
+  [ "$ENABLE_CODEX_FEATURE" = "1" ] && CODEX_ARGS_FILTERED+=("--enable-codex-feature")
+  "$SELF_DIR/adapters/codex/install.sh" "${CODEX_ARGS_FILTERED[@]}"
+fi
+
+say "[6/6] coord installation ready"
+say ""
+say "next steps:"
+if [ "$WITH_CLAUDE" = "1" ]; then
+  say "  Claude:"
+  say "    Set CLAUDE_COORD=1 and start claude as usual, OR run \`parallels-claude\`."
+fi
+if [ "$WITH_CODEX" = "1" ]; then
+  say "  Codex:"
+  say "    Run \`parallels-codex\` to start a coordinated Codex session."
+  if [ ! -f "$REPO_ROOT/.codex/config.toml" ] || \
+     ! grep -qE '^[[:space:]]*codex_hooks[[:space:]]*=[[:space:]]*true' "$REPO_ROOT/.codex/config.toml" 2>/dev/null; then
+    say "    NOTE: enable [features] codex_hooks = true in .codex/config.toml"
+    say "          (or re-run install.sh with --enable-codex-feature)"
+  fi
+fi
+say "  Verify:    $COORD_DIR/bin/coord status"
+say "  Uninstall: bash $SELF_DIR/install.sh --uninstall"
