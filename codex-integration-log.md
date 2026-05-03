@@ -752,6 +752,44 @@ Append-only progress log for the Codex CLI integration. Every PR's start, comple
     dispatch across 3 files). No D.4/D.5 code may be written before a
     unified design preview lands and reviewer approves.
 
+- **Unified D.4+D.5 design preview produced and APPROVED.**
+  - Five open questions (Q1–Q5) all approved by reviewer:
+    - Q1: validator pipeline NOT used for apply_patch drift (→ A-D4-01).
+    - Q2: 1 MB drift-skip threshold (symmetric with validator_prefilter
+      SKIPPED_LARGE).
+    - Q3: helpers stay inline in pre_tool_use_apply_patch.sh; refactor to
+      `apply_patch_locking.sh` only if the file exceeds 500 lines.
+    - Q4: race-loss banner reuses multi-file template; LOCK_DENIED event
+      `reason_kind=race_loss` is the audit/metric distinction.
+    - Q5: PostToolUse parser-failure fallback releases ALL session locks.
+  - Three findings to address during implementation:
+    - F-D4-01: consolidate the three filter versions in preview §3.1/§3.2/
+      §3.3 into a single validate-or-abort jq filter (combines self-held
+      cosmetic preservation with race-safety abort).
+    - F-D4-02: verify two assumptions before D.4 code lands —
+      (a) matcher `*` fires before tool-specific matchers in PreToolUse;
+      (b) PostToolUse fires with `tool_response.error` when the tool errors.
+      If either assumption is wrong, stop and flag per Plan Amendment
+      Policy.
+    - F-D5-01: edit_range=0/0 coarsening — every queued self-task on a
+      released file gets a notification. Add TODO comment in D.5 release
+      loop for future hunk-line refinement; not blocking.
+
+- **Plan amendment A-D4-01 (2026-05-03 plan v1.2) — drift detection is
+  structural pre_image-search, NOT validator-pipeline integration.**
+  - Plan section affected: §"PR D.4 — pre_tool_use_*.sh", "Drift detection
+    adaptation" paragraph + new "Deviations recorded for D.4" subsection.
+  - Reason: pre_image_hash and full-file disk hash are over different
+    content shapes; feeding mismatched-shape inputs to the validator
+    pipeline produces meaningless SAFE/MINOR/CRITICAL classifications.
+    Drift on apply_patch is STRUCTURAL (would-not-apply) not SEMANTIC
+    (stale-read). The C.2 design agreement ("hook compares against
+    on-disk anchor for drift detection") supersedes the plan v1.1 wording
+    that the unified preview surfaced as logically inconsistent.
+  - Source of amendment: unified D.4+D.5 design preview §4.2, approved
+    by reviewer.
+  - Plan v1.1 → v1.2.
+
 ---
 
 ## Pending entries (will be filled in as PRs progress)
