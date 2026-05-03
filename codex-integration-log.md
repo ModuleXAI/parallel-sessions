@@ -866,6 +866,92 @@ Append-only progress log for the Codex CLI integration. Every PR's start, comple
   output_parser.rs:51). Defer until Phase F integration tests show
   whether Codex sessions actually need the reminder.
 
+- **PR D.4 STARTED** — Codex `pre_tool_use_*.sh` (3-hook split).
+  - Pre-conditions verified: plan v1.3 committed (2a82c42); F-D4-02
+    verification complete with citations; 761 unit / 66 integration
+    green at HEAD (3e88e29).
+  - Branch: `feat/codex-integration`.
+  - Estimated diff per plan v1.3: ~740 LOC (any 220 + bash 70 +
+    apply_patch 400 + small helper inline budget).
+  - Hooks implemented:
+    - `pre_tool_use_bash.sh` — lockdown gate + PRE_BASH event log only.
+    - `pre_tool_use_any.sh` — bookkeeping-only (notification clear,
+      HEAD recheck, mediator-pending consume, self-task reminder
+      bookkeeping, watchdog probe, mediator verdict apply); NEVER
+      emits additionalContext per D-D4-02.
+    - `pre_tool_use_apply_patch.sh` — multi-file lock-acquire-all-or-
+      deny + structural drift gate per A-D4-01 + consolidated
+      validate-or-abort filter per F-D4-01.
+
+- **PR D.4 in-progress finding F-D4-06 — variable name collision.**
+  - During implementation: pre_tool_use_bash.sh's first draft used
+    `BASH_COMMAND` as a local variable name. Bash's built-in
+    `$BASH_COMMAND` holds the literal text of the currently-executing
+    command (used by DEBUG traps), so the assignment got the source
+    line text instead of the captured jq output. Renamed to
+    `RAW_COMMAND` / `CMD_SHORT`.
+  - Caught by the bats test "happy path → PRE_BASH event with
+    truncated command" which asserted on the actual logged value.
+  - Lesson: avoid `BASH_*` variable names as locals — bash reserves
+    `BASH_*` for builtins.
+
+- **PR D.4 in-progress finding F-D4-07 — jq filter pipe direction bug.**
+  - During implementation: the consolidated validate-or-abort filter
+    initially used `$paths_json | reduce .[] as $p (.; ...)` which
+    pipes the array INTO reduce, making the initial accumulator the
+    array, not the parent JSON object. jq error: "Cannot index array
+    with string 'locks'".
+  - Fix: rewrite as `reduce ($paths_json[]) as $p (.; ...)` which
+    iterates the array INSIDE reduce while preserving the parent
+    object as `.`.
+  - Caught by the bats test "multi-file patch acquires all locks
+    atomically".
+
+- **PR D.4 in-progress finding F-D4-08 — multi-line substring count.**
+  - During implementation: the drift gate's per-hunk pre_image search
+    initially used `grep -cF -- "$pre_image"` which is line-oriented;
+    a multi-line pre_image gets split into separate fixed strings.
+    Result: legitimate matches were counted as 0 (not found).
+  - Fix: bash-native pattern matching helper
+    `_coord_cx_count_substring` using `[[ "$rest" == *"$needle"* ]]`
+    in a loop with `${rest#*"$needle"}` to advance past each match.
+    Multi-line safe; bounded at 100 occurrences (defensive).
+  - Caught by the bats test "drift: pre_image found uniquely →
+    drift-clean, lock acquired".
+
+- **PR D.4 COMPLETED** — 3 hooks + 3 test files (45 unit tests).
+  - File added: `src/adapters/codex/hooks/pre_tool_use_bash.sh`
+    (94 LOC, chmod +x).
+  - File added: `src/adapters/codex/hooks/pre_tool_use_any.sh`
+    (291 LOC total: 80-line documentation header per reviewer's
+    "bake citations into plan AND code" guidance + 211-line body
+    within F-D4-05 target of 220 ± 10%; chmod +x).
+  - File added: `src/adapters/codex/hooks/pre_tool_use_apply_patch.sh`
+    (570 LOC after substring helpers; over ~400 estimate due to
+    inline helpers per Q3 default — `coord_cx_human_age`,
+    `_coord_cx_task_delegation_enabled`, deny-banner builders,
+    drift-check helpers, multi-line substring-count helpers per
+    F-D4-08 fix; chmod +x).
+  - File added: `src/tests/unit/codex_pre_tool_use_bash.bats`
+    (7 tests).
+  - File added: `src/tests/unit/codex_pre_tool_use_any.bats`
+    (10 tests, all assert F-D4-04 invariant: empty additionalContext
+    + bookkeeping side effect verified).
+  - File added: `src/tests/unit/codex_pre_tool_use_apply_patch.bats`
+    (28 tests across 7 categories: paths/sort, classification,
+    drift gate, lockdown, D-9 mutex, D-2 negative).
+  - Tests added: 45 (unit). Plan estimate: ~45.
+  - F-D4-05 line count audit: any.sh body 211 LOC within target
+    220 ± 10% (198-242). Header is 80 LOC of load-bearing
+    documentation (D-D4-02 constraints with output_parser.rs file:line
+    citations baked in per reviewer guidance). No dead banner code.
+  - Test surface state at D.4 boundary:
+    - bats unit:        PASS (806/806) — was 761, +45 from D.4 hooks.
+    - bats integration: PASS (66/66) — unchanged.
+    - ship-gates: not run (deferred to PR H.1).
+    - invariant: included in unit count.
+  - Merge commit: <to be filled after commit>.
+
 ---
 
 ## Pending entries (will be filled in as PRs progress)
