@@ -610,6 +610,64 @@ Append-only progress log for the Codex CLI integration. Every PR's start, comple
 
 ---
 
+## 2026-05-03 (continued)
+
+- **Reviewer note (retrospective, no action) — Phase C closure observation.**
+  - Test surface delta reconciled exactly: C.1 (+5) → C.2 (+24) → C.3 (+33 net,
+    superseding C.1's skeleton tests as expected) + C.4 (+5 integration).
+    732 unit / 66 integration matches.
+  - Observation: C.1 as a standalone PR carried structural value but no
+    independent test value — its 5 tests were superseded by C.3's 38. The
+    skeleton→complete pattern is fine and D-13 was honored at every boundary,
+    but for future reference, skeleton PRs that exist purely to be superseded
+    are candidates for merging into their completing PR unless there is a
+    structural reason to split (review surface, rollback granularity, etc.).
+  - Filed as guidance for future phases; not a finding. No remediation.
+
+- **Phase D gating — reviewer protocol (recorded so future PRs honor it).**
+  - D.1, D.2, D.3 proceed directly without design preview (mechanical mirrors
+    of Claude hooks via the Codex translator — low risk).
+  - STOP after D.3 merges. Post UNIFIED design preview covering D.4 + D.5
+    together (lock acquisition + drift detection + release/task-processor +
+    cross-cutting D-9/D-10 + the three pre_tool_use_*.sh dispatch).
+  - D.4 + D.5 ship as separate PRs after preview approval.
+  - If implementation reveals divergence from the approved design, stop and
+    flag per Plan Amendment Policy.
+
+- **PR D.1 STARTED** — Codex `session_start.sh` hook.
+  - Pre-conditions verified: Phase C complete (1cd74f0); 732 unit / 66
+    integration green at HEAD (b4fe0de).
+  - Estimated diff: ~250 lines (hook) + ~10 bats tests.
+  - Branch: `feat/codex-integration`.
+  - Mirror source: `src/adapters/claude-code/hooks/session_start.sh`.
+  - Translator helpers used: `coord_cx_extract_session_id`,
+    `coord_cx_extract_source`, `coord_cx_extract_cwd`,
+    `coord_cx_emit_additional_context`.
+  - Differences vs Claude mirror:
+    - Source enum: `{startup, resume, clear}` only (no `compact` per D-11).
+    - `agent: "codex"` written on registered rows (vs `"claude_code"`).
+    - No subagent filter (per D-2: Codex has no subagent concept; the
+      translator's `coord_cx_extract_subagent` is permanently rc=1).
+    - Codex spec marks `source` as required; we still default to `startup`
+      on missing/empty for fail-open robustness.
+
+- **PR D.1 COMPLETED** — 1 hook file + 1 test file (12 unit tests).
+  - File added: `src/adapters/codex/hooks/session_start.sh` (~270 lines,
+    chmod +x).
+  - File added: `src/tests/unit/codex_session_start.bats` (12 tests
+    covering the source matrix {startup, resume, clear}, the D-11
+    `compact`-as-unknown forward-tolerance branch, the D-2 no-subagent-
+    filter behavior, the COORD_ENABLED gate, and the lockdown deny gate).
+  - Tests added: 12 (unit).
+  - Test surface state at D.1 boundary:
+    - bats unit:        PASS (744/744) — was 732, +12 from codex_session_start.
+    - bats integration: PASS (66/66) — unchanged.
+    - ship-gates: not run (deferred to PR H.1).
+    - invariant: included in unit count.
+  - Merge commit: <to be filled after commit>.
+
+---
+
 ## Pending entries (will be filled in as PRs progress)
 
 The structure below is a template; remove it once real entries replace it.
