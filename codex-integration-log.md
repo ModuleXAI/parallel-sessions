@@ -436,7 +436,7 @@ Append-only progress log for the Codex CLI integration. Every PR's start, comple
     - bats integration: PASS (61/61).
     - ship-gates: not run (deferred to PR H.1).
     - invariant: included in unit count.
-  - Merge commit: <to be filled after commit>.
+  - Merge commit: 4ac6366.
 
 ---
 
