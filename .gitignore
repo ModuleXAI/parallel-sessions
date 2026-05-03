@@ -38,7 +38,10 @@ scripts/stress_realistic_out/
 
 # Internal-only material — not part of the public ship surface.
 archive/
-docs/
+# docs/development-history/ stays internal; the rest of docs/ is
+# public (e.g., docs/codex-quickstart.md from PR G.2). The blanket
+# `docs/` rule from before Phase G was over-broad.
+docs/development-history/
 future-work/
 *future-work/
 
@@ -88,3 +91,5 @@ Thumbs.db
 # Upstream Codex CLI checkout — kept locally as reference for the
 # codex-integration work; not part of the ship surface. ~470M.
 codex-ref-repo/
+.claude/settings.local.json
+.codex/hooks.json

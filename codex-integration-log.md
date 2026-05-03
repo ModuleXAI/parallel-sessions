@@ -1599,6 +1599,102 @@ Append-only progress log for the Codex CLI integration. Every PR's start, comple
 
 ---
 
+- **PR G.2 STARTED** — docs/codex-quickstart.md.
+  - Pre-conditions verified: G.1 merged (606cb74); 837 unit / 122
+    integration -r at HEAD (256f73c).
+  - Branch: `feat/codex-integration`.
+  - Plan estimate: ~100 LOC.
+  - Goal: codex-specific operator deep-walkthrough complementing the
+    README's high-level Quick start.
+
+- **PR G.2 in-progress finding F-G2-01 — `docs/` was gitignored.**
+  - Pre-Phase-G `.gitignore` had a blanket `docs/` rule (line 41,
+    annotated "Internal-only material — not part of the public ship
+    surface"). Plan §G.2 calls for `docs/codex-quickstart.md` as a
+    PUBLIC operator-facing doc. The blanket rule blocked the file
+    from being tracked.
+  - Fix: narrowed the rule to `docs/development-history/` (the actual
+    internal subdirectory; the only thing `docs/` previously held).
+    The rest of `docs/` is now tracked by default. Future internal
+    `docs/<subdir>/` should be added explicitly to .gitignore at the
+    time it's created.
+  - This is small enough to handle inline (no plan amendment); the
+    plan's intent (public operator doc in `docs/`) is unchanged.
+
+- **PR G.2 COMPLETED** — 1 doc file added + 1 .gitignore narrowing.
+  - File added: `docs/codex-quickstart.md` (~161 LOC, plan estimate
+    ~100 — overage is operator-essential troubleshooting content +
+    reference links).
+  - File edited: `.gitignore` (per F-G2-01 above) — `docs/` →
+    `docs/development-history/`.
+  - Sections:
+    - Prerequisites (incl. D-1 claude-binary requirement explained
+      with link to the README §D-1 section).
+    - Install (Option A codex-only / Option B mixed-mode + flag
+      details).
+    - Idempotency + repair / uninstall.
+    - Verify the install (concrete jq + ls commands with expected
+      outputs).
+    - Start a session (`parallels-codex` walk).
+    - "What you'll see (and what you won't)":
+      - "What appears as expected" — SessionStart banner,
+        UserPromptSubmit HEAD-drift banner, apply_patch lock conflict
+        deny, apply_patch drift deny.
+      - "What is intentionally quiet on Codex" — the four affected
+        banner classes from F-D4-02(c) / A-D4-02 with their
+        replacement paths and the audit-trail grep recipe.
+    - Mixed-mode notes (cross-agent contention / D-12 / Watchdog).
+    - Troubleshooting (5 common failure modes with concrete fixes):
+      - codex_hooks feature flag missing.
+      - drift-deny on a freshly-read file.
+      - MEDIATOR_SPAWN_REFUSED reason=claude_binary_missing.
+      - "I expected a banner but didn't see it."
+      - Multi-file apply_patch denied because of cross-agent lock.
+    - Reference (links to README, plan, research, log,
+      invariant guards, cross-agent scenarios).
+  - F-G1-01 (forward-looking from G.1 review): the "Self-task
+    reminders" entry in the "intentionally quiet" section currently
+    describes mechanism, NOT user impact, consistent with the
+    F-D4-03 entry's "BEHAVIOR CONFIRMED; USER IMPACT UNKNOWN" status.
+    Future drift between log and quickstart text would require a
+    synchronized update; logged as a Phase H housekeeping pass
+    candidate.
+  - Tests: NO new tests in G.2 (docs-only). Test surface unchanged.
+  - Test surface state at G.2 boundary:
+    - bats unit:                              PASS (837/837) — unchanged.
+    - bats integration (top-level):           PASS (77/77)   — unchanged.
+    - bats integration (cross_agent -r):      PASS (45/45)   — unchanged.
+    - bats integration (full -r):             PASS (122/122) — unchanged.
+    - ship-gates: not run (deferred to PR H.1).
+    - invariant: included in unit count.
+  - Merge commit: <to be filled after commit>.
+
+---
+
+**Phase G — DOCUMENTATION — COMPLETE.**
+- Started: 2026-05-03 (G.1).
+- Completed: 2026-05-03 (G.2).
+- PRs merged: G.1, G.2 (2 PRs).
+- Test surface delta: zero (docs-only phase).
+- Files updated/added:
+  - `README.md` (96 → 213 LOC, +117): headline updated, Supported
+    agents matrix, Cross-agent coordination, D-1 contract,
+    PreToolUse degradation acknowledgment.
+  - `CONTRIBUTING.md` (78 → 107 LOC, +29): core+adapters split,
+    A-D4-02/D-1/D-2/D-10/F-D4-06 invariants documented inline,
+    cross_agent test runner contract.
+  - `package.json`: description + keywords updated for multi-adapter.
+  - `docs/codex-quickstart.md` (NEW, 161 LOC): operator deep-dive
+    walkthrough + troubleshooting.
+- Operator concerns surfaced from source-only-discoverable to
+  doc-discoverable: D-1 contract (claude binary), mixed-mode flow,
+  PreToolUse banner degradation.
+- Phase H (final ship-gate) is the only phase remaining. Hard
+  prerequisite: F-F1-04 (ship-gate runner update for cross_agent)
+  must land in H.1 or H.2.
+
+---
+
 **Phase D — CODEX HOOKS — COMPLETE.**
 - Started: 2026-05-03 (D.1).
 - Completed: 2026-05-03 (D.5).
