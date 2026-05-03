@@ -1191,6 +1191,103 @@ Append-only progress log for the Codex CLI integration. Every PR's start, comple
 
 ---
 
+- **PR F.1 STARTED** — cross-agent test infrastructure.
+  - Pre-conditions verified: E.2 merged (e3bb1bc); 830 unit / 77
+    integration green at HEAD (53f7c9d).
+  - Branch: `feat/codex-integration`.
+  - Plan layout: src/tests/integration/cross_agent/ (subdirectory per
+    plan §F.1).
+  - Helpers API designed to support all 8 cross-agent scenarios the
+    reviewer enumerated for Phase F (lock contention each direction,
+    watchdog asymmetry, mixed schema 1.1, Mediator dispatch under
+    D-1, HEAD tracking cross-agent, notification fan-out, F-D4-03
+    self-task reminder confirmation).
+
+- **PR F.1 in-progress finding F-F1-01 — install must run from XAGENT_TMP.**
+  - Initial helpers.bash ran `bash src/install.sh ...` from the bats
+    cwd (parallel-sessions repo root) instead of from XAGENT_TMP. The
+    dispatcher's `git rev-parse --show-toplevel` then resolved to the
+    real repo, mutating ITS .coord/ instead of the test's. Symptom:
+    XAGENT_TMP/.coord did not exist; tests failed at the events.jsonl
+    redirect.
+  - Fix: wrap install in `( cd "$XAGENT_TMP" && bash install.sh ... )`
+    so the subshell cwd biases the dispatcher's repo-root resolution
+    correctly.
+
+- **PR F.1 in-progress finding F-F1-02 — sessions.json reset after install.**
+  - The dispatcher invokes both adapter installers; each runs a smoke
+    test that creates + tears down a synthetic session. Claude smoke
+    SessionEnd's its session (state=IDLE_CLOSED — row stays); Codex
+    smoke deletes its row outright. Result: after install, sessions.json
+    has 1 stale row (the Claude smoke residue) which throws off
+    xagent_session_count assertions.
+  - Fix: helpers.bash resets sessions.json + sessions/ markers after
+    install so tests start from a clean slate. Smoke residue events in
+    events.jsonl are also cleared. Acceptable because xagent's purpose
+    is fresh-session scenarios; no test needs to observe install-time
+    state.
+
+- **PR F.1 in-progress finding F-F1-03 — holder identifier truncation.**
+  - Claude's deny banner truncates the lock holder's session_id to 8
+    chars (`HOLDER_SHORT="${LOCK_HOLDER:0:8}"`). Initial smoke test 8
+    asserted `grep -q "x-codex-h"` against the deny reason for a holder
+    named "x-codex-holder" — the truncation produces "x-codex-" (8
+    chars), missing the "h". Fix: assertion changed to grep for
+    "x-codex-" (matches the truncation). Future scenarios will use
+    8-char-unique session names to avoid the issue.
+
+- **PR F.1 in-progress finding F-F1-04 — bats subdir tests need explicit
+  invocation.**
+  - `bats src/tests/integration` does NOT recurse into subdirectories
+    by default. Cross-agent tests under
+    `src/tests/integration/cross_agent/` need either `bats -r
+    src/tests/integration` or explicit `bats
+    src/tests/integration/cross_agent`. The plan layout puts F.1+F.2
+    under cross_agent/; the trade-off is acceptable per plan, but
+    test runners (package.json `test` script, ship-gate,
+    linux_probe.sh) should be updated when Phase F closes to use `-r`
+    or include the subdir explicitly. Logged for Phase H ship-gate
+    finalization.
+
+- **PR F.1 COMPLETED** — 1 helpers file + 1 smoke bats (14 tests).
+  - File added: `src/tests/integration/cross_agent/helpers.bash` (~280
+    LOC). Public API for fake-Claude / fake-Codex sessions:
+    xagent_setup, xagent_teardown, xagent_session_start /
+    _stop / _kill, xagent_pretooluse_write, xagent_posttooluse_write,
+    xagent_lock_holder, xagent_lock_count, xagent_session_count,
+    xagent_session_agent, xagent_session_state, xagent_event_count,
+    xagent_event_count_for, xagent_last_was_deny, xagent_last_deny_reason.
+    Fake-* sessions drive the REAL adapter hooks with controlled stdin
+    — no fake binary stubs except `codex` and `claude` for the
+    dispatcher's auto-detect.
+  - File added: `src/tests/integration/cross_agent/helpers_smoke.bats`
+    (14 tests covering: setup correctness, claude+codex session_start
+    register correctly per agent, schema 1.1 mixed rows coexist,
+    pre-write acquires for both adapters, claude→codex contention
+    deny, codex→claude contention deny, post-write release for both,
+    stop release for both, event_count helpers, kill drops marker
+    only).
+  - The smoke test ALREADY exercises 4 of the 8 reviewer-enumerated
+    Phase F scenarios (lock contention each direction, mixed schema
+    1.1 rows, kill-leaves-locks-for-watchdog). F.2 will add the
+    remaining 4 plus deeper scenario coverage.
+  - Plan estimate: ~200 LOC. Realized: ~280 LOC for helpers + ~200 LOC
+    for the smoke bats = 480 LOC total. Helpers are slightly larger
+    because the API surface covers all 8 reviewer scenarios; smoke
+    bats validates the full surface up front so F.2 can skip
+    re-validating helper primitives.
+  - Tests added: 14 (integration, in cross_agent/ subdir).
+  - Test surface state at F.1 boundary:
+    - bats unit:                            PASS (830/830) — unchanged.
+    - bats integration (top-level):         PASS (77/77)   — unchanged.
+    - bats integration (cross_agent subdir): PASS (14/14)   — NEW.
+    - bats integration (full, with -r):     PASS (91/91).
+    - ship-gates: not run (deferred to PR H.1).
+    - invariant: included in unit count.
+  - Merge commit: <to be filled after commit>.
+
+---
+
 **Phase D — CODEX HOOKS — COMPLETE.**
 - Started: 2026-05-03 (D.1).
 - Completed: 2026-05-03 (D.5).
