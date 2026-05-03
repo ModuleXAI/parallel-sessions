@@ -666,6 +666,50 @@ Append-only progress log for the Codex CLI integration. Every PR's start, comple
     - invariant: included in unit count.
   - Merge commit: 512ba32.
 
+- **PR D.1 reviewer observation (logged retrospectively, not a finding).**
+  - D.1 defaults a missing/empty `source` field to `startup` despite the
+    Codex spec marking `source` as required. Deliberate divergence for
+    fail-open robustness + symmetry with Claude's session_start behavior
+    (Claude treats `source` as optional with `// "startup"`). Future readers
+    should not mistake the default for an oversight.
+
+- **PR D.2 STARTED** — Codex `stop.sh` hook.
+  - Pre-conditions verified: D.1 merged (512ba32); 744 unit / 66 integration
+    green at HEAD (5070d29).
+  - Estimated diff: ~200 lines (hook) + ~10 bats tests.
+  - Branch: `feat/codex-integration`.
+  - Mirror source: `src/adapters/claude-code/hooks/stop.sh`.
+  - Translator helpers used: `coord_cx_extract_session_id`.
+  - Differences vs Claude mirror:
+    - Drops `subagent_filter.sh` source + `coord_subagent_filter` call per D-2
+      (Codex has no subagent concept).
+    - Per D-10: this hook is the ONLY graceful-release point. The watchdog
+      handles dead-session cleanup (IDLE_CLOSED, marker removal,
+      read_snapshot cleanup) since Codex never delivers a graceful
+      SessionEnd. Stop fires per-turn (mirror of Claude); no SessionEnd
+      semantics fold into this hook.
+    - Self-task block-once-then-allow semantic carries unchanged (Codex
+      Stop input has `stop_hook_active` per Codex events/stop.rs:30).
+    - Lockdown deny envelope identical (Codex respects the same
+      permissionDecision JSON shape as Claude).
+
+- **PR D.2 COMPLETED** — 1 hook file + 1 test file (10 unit tests).
+  - File added: `src/adapters/codex/hooks/stop.sh` (~200 lines, chmod +x).
+  - File added: `src/tests/unit/codex_stop.bats` (10 tests covering: gate
+    negative, D-2 no-subagent-filter behavior, non-participant no-op,
+    no-locks idempotent silent path, single-lock release with
+    last_activity_at refresh, multi-lock release with peer-lock
+    preservation, self-task block-once first-Stop, self-task second-Stop
+    archive + concurrent lock release, lockdown gate, ship-gate
+    permissionDecision negative invariant).
+  - Tests added: 10 (unit).
+  - Test surface state at D.2 boundary:
+    - bats unit:        PASS (754/754) — was 744, +10 from codex_stop.
+    - bats integration: PASS (66/66) — unchanged.
+    - ship-gates: not run (deferred to PR H.1).
+    - invariant: included in unit count.
+  - Merge commit: <to be filled after commit>.
+
 ---
 
 ## Pending entries (will be filled in as PRs progress)
