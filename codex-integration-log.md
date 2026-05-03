@@ -1815,7 +1815,7 @@ Append-only progress log for the Codex CLI integration. Every PR's start, comple
     - ship-gate fixtures total:               PASS   24/24    (22 + 2)
     - Claude invariant:                       PASS   19/19    (within unit count)
     - Codex invariant:                        PASS    7/7     (within unit count)
-  - Merge commit: <to be filled after commit>.
+  - Merge commit: 57a1125.
 
 ---
 
