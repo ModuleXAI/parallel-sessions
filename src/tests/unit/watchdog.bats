@@ -45,7 +45,24 @@ setup() {
 
 teardown() {
   unset CLAUDE_COORD COORD_DIR SESSION_ID
-  rm -rf "$TMP"
+  # Drain any backgrounded watchdog probes before rm to avoid the
+  # well-documented teardown race where `rm -rf "$TMP"` fires while
+  # a probe still holds files in $TMP/.coord/watchdog/checking/
+  # (per Phase A baseline + repeated occurrences across the codex-
+  # integration session). Best-effort: wait up to 2s for the
+  # `checking` dir to drain; then rm. If the drain doesn't finish
+  # we still rm, but with retries.
+  local checking="$TMP/.coord/watchdog/checking"
+  if [ -d "$checking" ]; then
+    local i=0
+    while [ "$i" -lt 20 ] && [ -n "$(ls -A "$checking" 2>/dev/null)" ]; do
+      sleep 0.1
+      i=$((i + 1))
+    done
+  fi
+  rm -rf "$TMP" 2>/dev/null \
+    || { sleep 0.5; rm -rf "$TMP" 2>/dev/null; } \
+    || true
 }
 
 # Helpers -----------------------------------------------------------------

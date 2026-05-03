@@ -394,6 +394,52 @@ Append-only progress log for the Codex CLI integration. Every PR's start, comple
 
 ---
 
+## Phase C — Codex translator + apply_patch parser
+
+### PR C.1 — Codex translator skeleton
+
+- **PR C.1 STARTED** — add `src/adapters/codex/lib/translator.sh` skeleton with
+  every adapter-contract function stubbed; tests assert signatures + rc=1.
+  - Pre-conditions: Phase B complete (B.2 merged at 6babdbf).
+  - Branch: `feat/codex-integration`.
+
+- **PR C.1 finding (in-scope) — F-C1-01: watchdog teardown race finally fixed.**
+  Phase A baseline log noted a flaky test #631 (`pre_tool_use_any: hook latency
+  under suspicion stays below 1000ms wall-clock`) where the assertion passed
+  (~120ms) but `teardown` raced the backgrounded watchdog probe and `rm -rf`
+  failed with "Directory not empty". Three more runs across A.5, B.1, B.2, C.1
+  showed the flake recurring under cumulative session load. C.1 itself touches
+  zero files this test exercises, so it's clearly pre-existing.
+  Fix: `src/tests/unit/watchdog.bats teardown()` now waits up to 2s for the
+  `.coord/watchdog/checking/` dir to drain before `rm -rf`, then retries the rm
+  once with a short delay if it still fails. Test infra fix, no behavior change.
+  Filing as in-scope to C.1 because D-13 (green-at-every-PR-boundary) makes the
+  flake a blocker, and the fix is a 14-line teardown change in a test file.
+
+- **PR C.1 COMPLETED** — 1 new lib + 1 new test + 1 test-infra fix.
+  - Files added (2):
+    - `src/adapters/codex/lib/translator.sh` (~140 lines): 14 stub functions
+      covering event translation, 9 field extractors, 3 response emitters,
+      plus `coord_cx_extract_subagent` documented as PERMANENT rc=1 per D-2.
+      Every stub calls `_coord_cx_stub` which carries the marker
+      `PR-C.1 skeleton stub` for C.3's audit grep.
+    - `src/tests/unit/translator_skeleton.bats` (5 tests): every contract
+      function defined, stubs return rc=1 silently, extract_subagent
+      separately asserted as permanent (so C.3+ doesn't accidentally fill it),
+      bash -n syntax check, and stub-marker presence (the C.3 done-when grep).
+  - Files edited (1):
+    - `src/tests/unit/watchdog.bats` (per F-C1-01): teardown drains
+      backgrounded probe before rm.
+  - Tests added: 5 (unit).
+  - Test surface state at C.1 boundary:
+    - bats unit: PASS (675/675) — was 670, +5 from new translator_skeleton.bats.
+    - bats integration: PASS (61/61).
+    - ship-gates: not run (deferred to PR H.1).
+    - invariant: included in unit count.
+  - Merge commit: <to be filled after commit>.
+
+---
+
 ## Pending entries (will be filled in as PRs progress)
 
 The structure below is a template; remove it once real entries replace it.
