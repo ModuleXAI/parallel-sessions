@@ -213,7 +213,7 @@ _seed_verdict() {
   vfile_q=$(_seed_verdict "peer-disagree" "auto_apply" "lockdown")
   # Synthesize a MEDIATOR_PEER_DISAGREED event.
   bash -c '
-    . "'"$SRC_ROOT/lib/log_event.sh"'"
+    . "'"$SRC_ROOT/core/lib/log_event.sh"'"
     coord_log_event kind=MEDIATOR_PEER_DISAGREED \
       primary_verdict_path="'"$vfile_p"'" \
       peer_verdict_path="'"$vfile_q"'" \

@@ -3,7 +3,7 @@
 
 load "../helpers/common"
 
-F="$SRC_ROOT/lib/head_tracking.sh"
+F="$SRC_ROOT/core/lib/head_tracking.sh"
 
 setup() {
   TMP="$(mktemp -d -t coord-headtrack-XXXX)"

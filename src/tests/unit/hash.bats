@@ -6,7 +6,7 @@
 
 load "../helpers/common"
 
-HASH="$SRC_ROOT/lib/hash.sh"
+HASH="$SRC_ROOT/core/lib/hash.sh"
 
 setup() {
   TMP="$(mktemp -d -t coord-hash-XXXX)"

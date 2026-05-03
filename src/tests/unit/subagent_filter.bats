@@ -4,7 +4,7 @@
 
 load "../helpers/common"
 
-F="$SRC_ROOT/lib/subagent_filter.sh"
+F="$SRC_ROOT/core/lib/subagent_filter.sh"
 
 setup() {
   TMP="$(mktemp -d -t coord-subfilter-XXXX)"
@@ -23,7 +23,7 @@ teardown() {
 _call() {
   # _call "<hook_name>" "<input_json>"
   bash -c "
-    . '$SRC_ROOT/lib/log_event.sh'
+    . '$SRC_ROOT/core/lib/log_event.sh'
     . '$F'
     coord_subagent_filter \"\$1\" \"\$2\"
   " _ "$1" "$2"
@@ -104,7 +104,7 @@ _call() {
 @test "subagent_filter: no COORD_DIR → still returns 0 (subagent) but skips log" {
   run bash -c "
     unset COORD_DIR SESSION_ID
-    . '$SRC_ROOT/lib/log_event.sh'
+    . '$SRC_ROOT/core/lib/log_event.sh'
     . '$F'
     coord_subagent_filter PreToolUse '{\"session_id\":\"sid\",\"agent_type\":\"general-purpose\",\"tool_name\":\"Read\"}'
   "

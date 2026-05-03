@@ -14,10 +14,10 @@
 
 load "../helpers/common"
 
-WD="$SRC_ROOT/lib/watchdog.sh"
-WC="$SRC_ROOT/lib/watchdog_cache.sh"
-MP="$SRC_ROOT/lib/mediator_pending.sh"
-LE="$SRC_ROOT/lib/log_event.sh"
+WD="$SRC_ROOT/core/lib/watchdog.sh"
+WC="$SRC_ROOT/core/lib/watchdog_cache.sh"
+MP="$SRC_ROOT/core/lib/mediator_pending.sh"
+LE="$SRC_ROOT/core/lib/log_event.sh"
 HANY="$SRC_ROOT/hooks/pre_tool_use_any.sh"
 
 setup() {

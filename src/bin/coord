@@ -20,11 +20,14 @@ set -euo pipefail
 COORD_BIN="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 COORD_DIR="${COORD_DIR:-$(cd "$COORD_BIN/.." && pwd)}"
 # LIB_DIR resolves relative to the bin script's location, not COORD_DIR.
-# This lets the CLI work both installed (`.coord/bin/coord` → `.coord/lib/`)
-# and from the source tree under tests (`src/bin/coord` → `src/lib/`),
-# even when COORD_DIR is overridden to a per-test `.coord/` workspace
-# whose `lib/` directory is empty.
-LIB_DIR="$(cd "$COORD_BIN/../lib" && pwd)"
+# Dual-fallback covers both layouts (post-A.1 refactor):
+#   source tree under tests:  src/bin/coord -> src/core/lib/  (try first)
+#   installed by install.sh:  .coord/bin/coord -> .coord/lib/  (flat fallback)
+# Either way, the `cd` succeeds in exactly one of the two locations.
+# This also lets COORD_DIR be overridden to a per-test `.coord/` workspace
+# whose `lib/` directory may be empty.
+LIB_DIR="$(cd "$COORD_BIN/../core/lib" 2>/dev/null && pwd)" \
+  || LIB_DIR="$(cd "$COORD_BIN/../lib" && pwd)"
 export COORD_DIR
 
 # Utilities -----------------------------------------------------------------

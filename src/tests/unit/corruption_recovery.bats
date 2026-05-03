@@ -44,8 +44,8 @@ teardown() {
 # through the corruption-detection-in-atomic_edit path.
 _emit_corrupt_state_entry() {
   bash -c '
-    . "'"$SRC_ROOT/lib/log_event.sh"'"
-    . "'"$SRC_ROOT/lib/mediator_pending.sh"'"
+    . "'"$SRC_ROOT/core/lib/log_event.sh"'"
+    . "'"$SRC_ROOT/core/lib/mediator_pending.sh"'"
     coord_mediator_emit_pending corrupt_state \
       source=test \
       file="'"$COORD/sessions.json"'" \
@@ -74,7 +74,7 @@ _emit_corrupt_state_entry() {
   _emit_corrupt_state_entry
   # Re-write a clean sessions.json so atomic_edit doesn't trigger another
   # corruption.
-  bash -c ". '$SRC_ROOT/lib/atomic_write.sh' && coord_state_empty_template" >"$COORD_DIR/sessions.json"
+  bash -c ". '$SRC_ROOT/core/lib/atomic_write.sh' && coord_state_empty_template" >"$COORD_DIR/sessions.json"
   # Register the session so the participant gate passes.
   touch "$COORD_DIR/sessions/${SID}.active"
   jq --arg sid "$SID" '
@@ -95,7 +95,7 @@ _emit_corrupt_state_entry() {
 
 @test "corruption: banner is NOT repeated on a second hook firing" {
   _emit_corrupt_state_entry
-  bash -c ". '$SRC_ROOT/lib/atomic_write.sh' && coord_state_empty_template" >"$COORD_DIR/sessions.json"
+  bash -c ". '$SRC_ROOT/core/lib/atomic_write.sh' && coord_state_empty_template" >"$COORD_DIR/sessions.json"
   touch "$COORD_DIR/sessions/${SID}.active"
   jq --arg sid "$SID" '
     .sessions[$sid] = {state:"ACTIVE",pid:1,pid_lstart:"x",registered_at:"y",last_activity_at:"z",git_head:"",prompt_id:null,script_version:"1.0"}
@@ -144,7 +144,7 @@ _emit_corrupt_state_entry() {
   # No corrupt_state entries above HWM → helper returns 1.
   run bash -c "
     export COORD_DIR='$COORD_DIR'
-    . '$SRC_ROOT/lib/atomic_write.sh'
+    . '$SRC_ROOT/core/lib/atomic_write.sh'
     coord_consume_corrupt_state_flag
   "
   [ "$status" -eq 1 ]
@@ -155,13 +155,13 @@ _emit_corrupt_state_entry() {
   # Phase 2 + 3 share pending.jsonl across multiple kinds. The
   # corrupt_state consumer must IGNORE non-matching kinds.
   bash -c '
-    . "'"$SRC_ROOT/lib/log_event.sh"'"
-    . "'"$SRC_ROOT/lib/mediator_pending.sh"'"
+    . "'"$SRC_ROOT/core/lib/log_event.sh"'"
+    . "'"$SRC_ROOT/core/lib/mediator_pending.sh"'"
     coord_mediator_emit_pending flock_timeout source=test file=foo
   '
   run bash -c "
     export COORD_DIR='$COORD_DIR'
-    . '$SRC_ROOT/lib/atomic_write.sh'
+    . '$SRC_ROOT/core/lib/atomic_write.sh'
     coord_consume_corrupt_state_flag
   "
   [ "$status" -eq 1 ]
@@ -176,15 +176,15 @@ _emit_corrupt_state_entry() {
   # must return 0 (banner emitted) when AT LEAST ONE corrupt_state is
   # present above HWM.
   bash -c '
-    . "'"$SRC_ROOT/lib/log_event.sh"'"
-    . "'"$SRC_ROOT/lib/mediator_pending.sh"'"
+    . "'"$SRC_ROOT/core/lib/log_event.sh"'"
+    . "'"$SRC_ROOT/core/lib/mediator_pending.sh"'"
     coord_mediator_emit_pending flock_timeout source=test file=foo
     coord_mediator_emit_pending corrupt_state source=test file=bar
     coord_mediator_emit_pending flock_timeout source=test file=baz
   '
   run bash -c "
     export COORD_DIR='$COORD_DIR'
-    . '$SRC_ROOT/lib/atomic_write.sh'
+    . '$SRC_ROOT/core/lib/atomic_write.sh'
     coord_consume_corrupt_state_flag
   "
   [ "$status" -eq 0 ]

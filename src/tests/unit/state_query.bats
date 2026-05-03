@@ -3,8 +3,8 @@
 
 load "../helpers/common"
 
-Q="$SRC_ROOT/lib/state_query.sh"
-A="$SRC_ROOT/lib/atomic_write.sh"
+Q="$SRC_ROOT/core/lib/state_query.sh"
+A="$SRC_ROOT/core/lib/atomic_write.sh"
 
 setup() {
   TMP="$(mktemp -d -t coord-state-query-XXXX)"

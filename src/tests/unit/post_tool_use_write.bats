@@ -137,11 +137,11 @@ _acquire_lock() {
   # Enqueue OTHER into wait_queues[$TARGET] via the public API.
   mkdir -p "$COORD_DIR/wakers" "$COORD_DIR/wait_queues"
   # shellcheck disable=SC1091
-  . "$SRC_ROOT/lib/atomic_write.sh"
+  . "$SRC_ROOT/core/lib/atomic_write.sh"
   # shellcheck disable=SC1091
-  . "$SRC_ROOT/lib/log_event.sh"
+  . "$SRC_ROOT/core/lib/log_event.sh"
   # shellcheck disable=SC1091
-  . "$SRC_ROOT/lib/wait_queue.sh"
+  . "$SRC_ROOT/core/lib/wait_queue.sh"
   COORD_DIR="$COORD_DIR" coord_wait_queue_enqueue "$OTHER" "$TARGET" >/dev/null
 
   CLAUDE_COORD=1 run bash -c "echo '$POST_TARGET' | '$H'"

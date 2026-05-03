@@ -20,13 +20,13 @@ setup() {
   mk_empty_sessions "$COORD_DIR"
   : >"$COORD_DIR/events.jsonl"
   # shellcheck disable=SC1091
-  . "$SRC_ROOT/lib/atomic_write.sh"
+  . "$SRC_ROOT/core/lib/atomic_write.sh"
   # shellcheck disable=SC1091
-  . "$SRC_ROOT/lib/log_event.sh"
+  . "$SRC_ROOT/core/lib/log_event.sh"
   # shellcheck disable=SC1091
-  . "$SRC_ROOT/lib/wait_queue.sh"
+  . "$SRC_ROOT/core/lib/wait_queue.sh"
   # shellcheck disable=SC1091
-  . "$SRC_ROOT/lib/cycle_detection.sh"
+  . "$SRC_ROOT/core/lib/cycle_detection.sh"
 }
 teardown() {
   rm -rf "$TMP"

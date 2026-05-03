@@ -14,7 +14,7 @@
 
 load "../helpers/common"
 
-LCK="$SRC_ROOT/lib/lockdown.sh"
+LCK="$SRC_ROOT/core/lib/lockdown.sh"
 
 setup() {
   TMP="$(mktemp -d -t coord-lockdown-XXXX)"
@@ -79,7 +79,7 @@ _activate_lockdown() {
 
 @test "lockdown_activate: writes valid JSON with all required fields" {
   ( # subshell so coord_log_event is sourced once
-    . "$SRC_ROOT/lib/log_event.sh"
+    . "$SRC_ROOT/core/lib/log_event.sh"
     . "$LCK"
     coord_lockdown_activate "Mediator resolving stale lock" "mediator_verdict"
   )
@@ -96,7 +96,7 @@ _activate_lockdown() {
 
 @test "lockdown_activate: emits LOCKDOWN_ACTIVATED event with payload" {
   (
-    . "$SRC_ROOT/lib/log_event.sh"
+    . "$SRC_ROOT/core/lib/log_event.sh"
     . "$LCK"
     coord_lockdown_activate "Critical bypass: corrupt schema detected" "critical_bypass"
   )
@@ -115,7 +115,7 @@ _activate_lockdown() {
 @test "lockdown_clear: archives lockdown.json + emits LOCKDOWN_CLEARED with archived_to" {
   _activate_lockdown "test reason" "mediator_verdict"
   (
-    . "$SRC_ROOT/lib/log_event.sh"
+    . "$SRC_ROOT/core/lib/log_event.sh"
     . "$LCK"
     coord_lockdown_clear
   )
@@ -142,7 +142,7 @@ _activate_lockdown() {
 
 @test "lockdown_emit_deny: emits permissionDecision deny JSON with reason text" {
   _activate_lockdown "Mediator is resolving stale lock on /foo.ts" "mediator_verdict"
-  run bash -c '. "'"$SRC_ROOT/lib/log_event.sh"'"; . "'"$LCK"'"; coord_lockdown_emit_deny "PreToolUse"'
+  run bash -c '. "'"$SRC_ROOT/core/lib/log_event.sh"'"; . "'"$LCK"'"; coord_lockdown_emit_deny "PreToolUse"'
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null
   echo "$output" | jq -e '.hookSpecificOutput.hookEventName == "PreToolUse"' >/dev/null
@@ -154,14 +154,14 @@ _activate_lockdown() {
 
 @test "lockdown_emit_deny: reason text includes [reason_source=...] audit tag" {
   _activate_lockdown "corrupt schema detected" "critical_bypass"
-  run bash -c '. "'"$SRC_ROOT/lib/log_event.sh"'"; . "'"$LCK"'"; coord_lockdown_emit_deny "PreToolUse"'
+  run bash -c '. "'"$SRC_ROOT/core/lib/log_event.sh"'"; . "'"$LCK"'"; coord_lockdown_emit_deny "PreToolUse"'
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.hookSpecificOutput.permissionDecisionReason | contains("[reason_source=critical_bypass]")' >/dev/null
 }
 
 @test "lockdown_emit_deny: emits HOOK_DENIED_BY_LOCKDOWN event with hook + reason_source" {
   _activate_lockdown "test reason" "mediator_verdict"
-  bash -c '. "'"$SRC_ROOT/lib/log_event.sh"'"; . "'"$LCK"'"; coord_lockdown_emit_deny "PreToolUse" >/dev/null'
+  bash -c '. "'"$SRC_ROOT/core/lib/log_event.sh"'"; . "'"$LCK"'"; coord_lockdown_emit_deny "PreToolUse" >/dev/null'
   sleep 0.2
   run jq -rs '[.[] | select(.kind == "HOOK_DENIED_BY_LOCKDOWN")] | length' "$COORD_DIR/events.jsonl"
   [ "$output" -ge 1 ]
@@ -315,7 +315,7 @@ _pre_read_input() {
   # mv-rename is atomic so the final file is one of the two valid
   # writes, never a torn write. Both calls log LOCKDOWN_ACTIVATED.
   (
-    . "$SRC_ROOT/lib/log_event.sh"
+    . "$SRC_ROOT/core/lib/log_event.sh"
     . "$LCK"
     coord_lockdown_activate "reason A" "mediator_verdict" &
     coord_lockdown_activate "reason B" "critical_bypass" &

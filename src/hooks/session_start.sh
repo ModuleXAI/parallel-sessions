@@ -31,7 +31,8 @@ set -euo pipefail
 
 # --- resolve dependencies (support both dev layout src/ and install layout .coord/) ---
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LIB_DIR="$(cd "$HOOK_DIR/../lib" && pwd)"
+LIB_DIR="$(cd "$HOOK_DIR/../core/lib" 2>/dev/null && pwd)" \
+  || LIB_DIR="$(cd "$HOOK_DIR/../lib" && pwd)"
 # shellcheck disable=SC1091
 . "$LIB_DIR/atomic_write.sh"
 # shellcheck disable=SC1091

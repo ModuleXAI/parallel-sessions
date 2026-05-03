@@ -141,8 +141,8 @@ teardown() {
   # not trip set -u or set -e even on invalid env-var input.
   run env COORD_TEST_MODE='not-a-valid-mode' bash -c '
     set -euo pipefail
-    source "'"$SRC_ROOT"'/lib/log_event.sh"
-    source "'"$SRC_ROOT"'/lib/spawn_helper.sh"
+    source "'"$SRC_ROOT"'/core/lib/log_event.sh"
+    source "'"$SRC_ROOT"'/core/lib/spawn_helper.sh"
     coord_spawn_helper_resolve_mode
     printf "\n"
     if coord_spawn_helper_should_use_real_claude mediator; then
@@ -170,8 +170,8 @@ teardown() {
     export SESSION_ID="'"$SESSION_ID"'"
     export COORD_MEDIATOR_MAX_INVOCATIONS_PER_HOUR=1
     export COORD_MEDIATOR_MIN_SECONDS_BETWEEN_INVOCATIONS=0
-    source "'"$SRC_ROOT"'/lib/log_event.sh"
-    source "'"$SRC_ROOT"'/lib/cost_guards.sh"
+    source "'"$SRC_ROOT"'/core/lib/log_event.sh"
+    source "'"$SRC_ROOT"'/core/lib/cost_guards.sh"
     coord_cost_guards_check mediator || exit 0  # first allow
     if coord_cost_guards_check mediator; then
       printf "second-allowed\n"
@@ -194,8 +194,8 @@ teardown() {
 @test "realistic-tag stub: spawn_helper resolves to realistic when env set" {
   [ "${COORD_TEST_MODE:-}" = "realistic" ] || skip "realistic-tagged; opt in via COORD_TEST_MODE=realistic"
   run bash -c '
-    source "'"$SRC_ROOT"'/lib/log_event.sh"
-    source "'"$SRC_ROOT"'/lib/spawn_helper.sh"
+    source "'"$SRC_ROOT"'/core/lib/log_event.sh"
+    source "'"$SRC_ROOT"'/core/lib/spawn_helper.sh"
     coord_spawn_helper_resolve_mode
     printf "\n"
   '
@@ -207,8 +207,8 @@ teardown() {
 @test "realistic-tag stub: all 3 sites route to real claude under realistic" {
   [ "${COORD_TEST_MODE:-}" = "realistic" ] || skip "realistic-tagged; opt in via COORD_TEST_MODE=realistic"
   run bash -c '
-    source "'"$SRC_ROOT"'/lib/log_event.sh"
-    source "'"$SRC_ROOT"'/lib/spawn_helper.sh"
+    source "'"$SRC_ROOT"'/core/lib/log_event.sh"
+    source "'"$SRC_ROOT"'/core/lib/spawn_helper.sh"
     for site in mediator validator task_processor; do
       if coord_spawn_helper_should_use_real_claude "$site"; then
         printf "%s=real\n" "$site"

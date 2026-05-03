@@ -122,11 +122,11 @@ _run_hook() {
   # in parent context. Subagent flow short-circuits before the
   # reminder block, so no reminder banner appears.
   # shellcheck disable=SC1091
-  . "$SRC_ROOT/lib/atomic_write.sh"
+  . "$SRC_ROOT/core/lib/atomic_write.sh"
   # shellcheck disable=SC1091
-  . "$SRC_ROOT/lib/log_event.sh"
+  . "$SRC_ROOT/core/lib/log_event.sh"
   # shellcheck disable=SC1091
-  . "$SRC_ROOT/lib/self_tasks.sh"
+  . "$SRC_ROOT/core/lib/self_tasks.sh"
   coord_self_task_open "$SID" "$TMP/foo.ts" "edit" >/dev/null
   INPUT=$(jq -nc --arg s "$SID" --arg cwd "$TMP" '{
     session_id:$s, cwd:$cwd, hook_event_name:"PreToolUse",

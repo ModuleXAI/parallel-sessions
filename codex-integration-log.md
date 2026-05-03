@@ -37,6 +37,65 @@ Append-only progress log for the Codex CLI integration. Every PR's start, comple
   - ship-gates: not run (gitignored maintainer fixtures; will run as part of PR H.1 ship-gate).
   - invariant: included in unit count (phase7_invariant.bats lives under src/tests/unit/).
 
+- **Branch `feat/codex-integration` opened from `research/codex-integration` @ 0bb8913.** Phase A implementation lands here.
+
+- **PR A.1 STARTED** — relocate libs from `src/lib/` to `src/core/lib/`.
+  - Pre-conditions verified: A.0 merged (5169106), test surface green (645+48), branch open.
+  - Plan amendments locked before writing code: see plan v1.1 §"Deviations recorded for A.1" (D-A1-01, D-A1-02, D-A1-03).
+  - Branch: `feat/codex-integration`.
+
+- **PR A.1 DEVIATED — D-A1-01: `subagent_filter.sh` moves with the rest, not "stays put".**
+  - Plan section affected: A.1 (file inventory, NOT moved list).
+  - Reason: Tests run hooks from `$SRC_ROOT/hooks/`, and hooks resolve a single `LIB_DIR`. Splitting libs across `src/lib/` (subagent_filter only) and `src/core/lib/` (everything else) would force every hook to source via two paths. Cleaner to move it twice in git history (A.1: lib → core/lib; A.2: core/lib → adapters/claude-code). `git log --follow` survives the double rename.
+  - Plan amendment: plan v1.1 §A.1 D-A1-01.
+  - Resumed at: 2026-05-02.
+
+- **PR A.1 DEVIATED — D-A1-02: `bin/coord` and hooks use dual-fallback LIB_DIR.**
+  - Plan section affected: A.1 implementation step 4 (was "change `../lib` to `../core/lib`").
+  - Reason: `src/bin/coord` is copied verbatim to `.coord/bin/coord` at install time. Installer keeps libs flat at `.coord/lib/` (not `.coord/core/lib/`). A hard-coded `../core/lib` would break the installed CLI. Dual fallback (`../core/lib` first, fall back to `../lib`) resolves correctly in both source-tree and installed layouts.
+  - Plan amendment: plan v1.1 §A.1 D-A1-02.
+  - Resumed at: 2026-05-02.
+
+- **PR A.1 DEVIATED — D-A1-03: Test surface scope was underestimated by ~6×.**
+  - Plan section affected: A.1 risk + estimated diff.
+  - Reason: Plan v1.0 used `grep -rn 'src/lib/' src/tests/` (literal substring). Real tests use `$SRC_ROOT/lib/X.sh` (variable interpolation), which the grep misses. Actual count: 185 occurrences across 43 .bats files + helpers. Mechanical sed; no architectural change. Risk M → M-H, diff ~30 → ~250 lines.
+  - Plan amendment: plan v1.1 §A.1 D-A1-03.
+  - Resumed at: 2026-05-02.
+
+- **PR A.1 IN-PROGRESS — implementation pass 1 caught 5 invariant failures.**
+  - First post-move test run: unit 640/645 (5 failures), all in `phase7_invariant.bats`.
+  - Root cause: a 4th SRC_ROOT-pattern that my mass-substitution regex did not cover —
+    `LIB_DIR="$SRC_ROOT/lib"` (variable assignment, no trailing slash) at
+    `phase7_invariant.bats:50`. Tests #4, #15, #16, #18, #19 all consumed that LIB_DIR.
+    Single-line edit fixed all 5.
+  - Then a 5th pattern surfaced via grep: `"$SRC_ROOT"'/lib/...` (heredoc quote-escaping
+    inside `bash -c '...'` blocks) in `cost_guards_modes.bats` (17 subs) and
+    `spawn_helper_modes.bats` (8 subs). 25 substitutions across those 2 files.
+  - Lesson: blanket grep for "/lib/" turned up 4 distinct syntactic forms
+    (`$SRC_ROOT/lib/X.sh`, `$SRC_ROOT/lib"`, `"$SRC_ROOT"'/lib/`, `/work/src/lib/`).
+    Each needed its own substitution rule. No single sed pass would have caught all
+    without iteration. (No new deviation entry — within scope of D-A1-03.)
+
+- **PR A.1 COMPLETED** — 28 file moves + 31 file edits.
+  - Final diff: 59 files changed, 288 insertions(+), 236 deletions(-).
+  - File moves (28):
+    - 26 .sh files: `src/lib/*.sh` → `src/core/lib/*.sh` (incl. `subagent_filter.sh` per D-A1-01).
+    - 2 .md files: `src/lib/{MEDIATOR,VALIDATOR}_REFERENCE.md` → `src/core/lib/`.
+  - File edits (31):
+    - `src/install.sh`: 11 path updates (1 cp glob + 10 ref doc paths).
+    - `src/bin/coord`: dual-fallback LIB_DIR + comment refresh (per D-A1-02).
+    - `src/hooks/*.sh` × 8: dual-fallback LIB_DIR.
+    - `src/core/lib/{MEDIATOR,VALIDATOR}_REFERENCE.md` × 2: cosmetic doc path updates.
+    - `src/tests/manual/linux_probe.sh`: 1 path.
+    - `src/tests/{unit,integration}/*.bats` × 42: 189 substitutions across 4 syntactic forms.
+  - Tests added: 0 (refactor PR; no behavior change).
+  - Test surface state at A.1 boundary:
+    - bats unit: PASS (645/645).
+    - bats integration: PASS (48/48).
+    - ship-gates: not run (gitignored maintainer fixtures; deferred to PR H.1).
+    - invariant: included in unit count.
+  - Merge commit: <to be filled after commit>.
+
 ---
 
 ## Pending entries (will be filled in as PRs progress)

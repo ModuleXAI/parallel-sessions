@@ -20,7 +20,7 @@
 
 load "../helpers/common"
 
-LIB="$SRC_ROOT/lib/read_snapshots.sh"
+LIB="$SRC_ROOT/core/lib/read_snapshots.sh"
 
 setup() {
   TMP="$(mktemp -d -t coord-rsnap-XXXX)"
@@ -30,7 +30,7 @@ setup() {
   export SESSION_ID="rsnap-test-sid"
   # Source the library + log_event so events fire correctly during tests.
   # shellcheck disable=SC1090
-  . "$SRC_ROOT/lib/log_event.sh"
+  . "$SRC_ROOT/core/lib/log_event.sh"
   # shellcheck disable=SC1090
   . "$LIB"
   SID="rsnap-sid-0001"

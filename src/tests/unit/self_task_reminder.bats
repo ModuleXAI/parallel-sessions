@@ -18,11 +18,11 @@ setup() {
   export COORD_DIR="$COORD"
   : >"$COORD_DIR/events.jsonl"
   # shellcheck disable=SC1091
-  . "$SRC_ROOT/lib/atomic_write.sh"
+  . "$SRC_ROOT/core/lib/atomic_write.sh"
   # shellcheck disable=SC1091
-  . "$SRC_ROOT/lib/log_event.sh"
+  . "$SRC_ROOT/core/lib/log_event.sh"
   # shellcheck disable=SC1091
-  . "$SRC_ROOT/lib/self_tasks.sh"
+  . "$SRC_ROOT/core/lib/self_tasks.sh"
 
   SID="sid-rem-A"
   PEER="sid-rem-B"

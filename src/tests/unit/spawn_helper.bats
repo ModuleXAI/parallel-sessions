@@ -13,8 +13,8 @@
 
 load "../helpers/common"
 
-HELPER="$SRC_ROOT/lib/spawn_helper.sh"
-LOG_EVENT="$SRC_ROOT/lib/log_event.sh"
+HELPER="$SRC_ROOT/core/lib/spawn_helper.sh"
+LOG_EVENT="$SRC_ROOT/core/lib/log_event.sh"
 
 setup() {
   TMP="$(mktemp -d -t coord-spawn-helper-XXXX)"

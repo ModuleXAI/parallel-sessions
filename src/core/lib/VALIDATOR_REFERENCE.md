@@ -6,7 +6,7 @@ the System Constraints section names this file as the deep
 reference. Read sections on demand via `Read` (NOT prophylactically).
 
 **Layout:** `.coord/validator/VALIDATOR_REFERENCE.md` (installed by
-`install.sh`; copied from `src/lib/VALIDATOR_REFERENCE.md`).
+`install.sh`; copied from `src/core/lib/VALIDATOR_REFERENCE.md`).
 
 **Philosophy:** the Validator's prompt is short by design — five
 core rules. This file provides the full technical detail: schemas,

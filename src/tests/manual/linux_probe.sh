@@ -183,7 +183,7 @@ touch "$LXW/.coord/sessions.lock" "$LXW/.coord/events.lock" "$LXW/.coord/session
 # event-driven path (inotifywait on Linux); record both detection and
 # resolved values for the audit trail.
 printf '{"schema_version":"1.0","wait_backend":"auto"}' >"$LXW/.coord/config.json"
-echo "wait_backend detect: $(. /work/src/lib/wait_backend.sh; coord_wait_backend_detect)"
+echo "wait_backend detect: $(. /work/src/core/lib/wait_backend.sh; coord_wait_backend_detect)"
 LXF=$LXW/foo.ts; printf 'foo\n' >"$LXF"
 jq --arg f "$LXF" '.locks[$f] = {session:"holder", acquired_at:"2026-01-01T00:00:00Z", last_refresh_at:"t", tasks:[]}' "$LXW/.coord/sessions.json" > "$LXW/.coord/sessions.json.new"
 mv "$LXW/.coord/sessions.json.new" "$LXW/.coord/sessions.json"

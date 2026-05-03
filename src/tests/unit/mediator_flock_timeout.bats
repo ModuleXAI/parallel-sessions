@@ -12,8 +12,8 @@
 
 load "../helpers/common"
 
-A="$SRC_ROOT/lib/atomic_write.sh"
-M="$SRC_ROOT/lib/mediator_pending.sh"
+A="$SRC_ROOT/core/lib/atomic_write.sh"
+M="$SRC_ROOT/core/lib/mediator_pending.sh"
 H_ANY="$SRC_ROOT/hooks/pre_tool_use_any.sh"
 H_START="$SRC_ROOT/hooks/session_start.sh"
 

@@ -20,13 +20,13 @@ setup() {
   printf '{"schema_version":"1.0","wait_backend":"auto"}' >"$COORD_DIR/config.json"
   : >"$COORD_DIR/events.jsonl"
   # shellcheck disable=SC1091
-  . "$SRC_ROOT/lib/atomic_write.sh"
+  . "$SRC_ROOT/core/lib/atomic_write.sh"
   # shellcheck disable=SC1091
-  . "$SRC_ROOT/lib/log_event.sh"
+  . "$SRC_ROOT/core/lib/log_event.sh"
   # shellcheck disable=SC1091
-  . "$SRC_ROOT/lib/wait_queue.sh"
+  . "$SRC_ROOT/core/lib/wait_queue.sh"
   # shellcheck disable=SC1091
-  . "$SRC_ROOT/lib/wait_backend.sh"
+  . "$SRC_ROOT/core/lib/wait_backend.sh"
 }
 teardown() {
   rm -rf "$TMP"

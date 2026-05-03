@@ -198,7 +198,7 @@ materialize_coord() {
            "$COORD_DIR/bin" \
            "$COORD_DIR/agents"
   # Copy source artefacts.
-  cp -f "$SELF_DIR"/lib/*.sh    "$COORD_DIR/lib/"
+  cp -f "$SELF_DIR"/core/lib/*.sh    "$COORD_DIR/lib/"
   cp -f "$SELF_DIR"/hooks/*.sh  "$COORD_DIR/hooks/"
   if [ -d "$SELF_DIR/agents" ]; then
     # Agents may not exist yet in Phase 0; copy only .md files if present.
@@ -213,46 +213,46 @@ materialize_coord() {
   # T3.07: copy MEDIATOR_REFERENCE.md alongside lib/. Idempotent —
   # if the user customized the installed copy, preserve it (compare
   # via shasum); otherwise update.
-  if [ -f "$SELF_DIR/lib/MEDIATOR_REFERENCE.md" ]; then
+  if [ -f "$SELF_DIR/core/lib/MEDIATOR_REFERENCE.md" ]; then
     local ref_dst="$COORD_DIR/mediator/MEDIATOR_REFERENCE.md"
     if [ -f "$ref_dst" ]; then
       local src_hash dst_hash
-      src_hash=$(shasum -a 256 "$SELF_DIR/lib/MEDIATOR_REFERENCE.md" 2>/dev/null | awk '{print $1}')
+      src_hash=$(shasum -a 256 "$SELF_DIR/core/lib/MEDIATOR_REFERENCE.md" 2>/dev/null | awk '{print $1}')
       dst_hash=$(shasum -a 256 "$ref_dst" 2>/dev/null | awk '{print $1}')
       if [ -n "$src_hash" ] && [ -n "$dst_hash" ] && [ "$src_hash" != "$dst_hash" ]; then
         # Backup user-customized copy before overwriting on --repair;
         # leave alone on plain re-install.
         if [ "$MODE" = "repair" ]; then
           cp -f "$ref_dst" "${ref_dst}.user-backup.$(date -u +%Y%m%dT%H%M%SZ)" 2>/dev/null || true
-          cp -f "$SELF_DIR/lib/MEDIATOR_REFERENCE.md" "$ref_dst"
+          cp -f "$SELF_DIR/core/lib/MEDIATOR_REFERENCE.md" "$ref_dst"
         fi
       else
         # Hashes match or one missing — safe to overwrite (idempotent).
-        cp -f "$SELF_DIR/lib/MEDIATOR_REFERENCE.md" "$ref_dst" 2>/dev/null || true
+        cp -f "$SELF_DIR/core/lib/MEDIATOR_REFERENCE.md" "$ref_dst" 2>/dev/null || true
       fi
     else
-      cp -f "$SELF_DIR/lib/MEDIATOR_REFERENCE.md" "$ref_dst" 2>/dev/null || true
+      cp -f "$SELF_DIR/core/lib/MEDIATOR_REFERENCE.md" "$ref_dst" 2>/dev/null || true
     fi
   fi
   # T4.05: copy VALIDATOR_REFERENCE.md alongside the validator lib.
   # Idempotent with same user-customization-preservation contract as
   # MEDIATOR_REFERENCE.md above.
-  if [ -f "$SELF_DIR/lib/VALIDATOR_REFERENCE.md" ]; then
+  if [ -f "$SELF_DIR/core/lib/VALIDATOR_REFERENCE.md" ]; then
     local vref_dst="$COORD_DIR/validator/VALIDATOR_REFERENCE.md"
     if [ -f "$vref_dst" ]; then
       local vsrc_hash vdst_hash
-      vsrc_hash=$(shasum -a 256 "$SELF_DIR/lib/VALIDATOR_REFERENCE.md" 2>/dev/null | awk '{print $1}')
+      vsrc_hash=$(shasum -a 256 "$SELF_DIR/core/lib/VALIDATOR_REFERENCE.md" 2>/dev/null | awk '{print $1}')
       vdst_hash=$(shasum -a 256 "$vref_dst" 2>/dev/null | awk '{print $1}')
       if [ -n "$vsrc_hash" ] && [ -n "$vdst_hash" ] && [ "$vsrc_hash" != "$vdst_hash" ]; then
         if [ "$MODE" = "repair" ]; then
           cp -f "$vref_dst" "${vref_dst}.user-backup.$(date -u +%Y%m%dT%H%M%SZ)" 2>/dev/null || true
-          cp -f "$SELF_DIR/lib/VALIDATOR_REFERENCE.md" "$vref_dst"
+          cp -f "$SELF_DIR/core/lib/VALIDATOR_REFERENCE.md" "$vref_dst"
         fi
       else
-        cp -f "$SELF_DIR/lib/VALIDATOR_REFERENCE.md" "$vref_dst" 2>/dev/null || true
+        cp -f "$SELF_DIR/core/lib/VALIDATOR_REFERENCE.md" "$vref_dst" 2>/dev/null || true
       fi
     else
-      cp -f "$SELF_DIR/lib/VALIDATOR_REFERENCE.md" "$vref_dst" 2>/dev/null || true
+      cp -f "$SELF_DIR/core/lib/VALIDATOR_REFERENCE.md" "$vref_dst" 2>/dev/null || true
     fi
   fi
 

@@ -13,7 +13,7 @@
 load "../helpers/common"
 
 HANY="$SRC_ROOT/hooks/pre_tool_use_any.sh"
-LE="$SRC_ROOT/lib/log_event.sh"
+LE="$SRC_ROOT/core/lib/log_event.sh"
 
 setup() {
   TMP="$(mktemp -d -t coord-peer-XXXX)"

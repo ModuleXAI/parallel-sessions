@@ -16,10 +16,10 @@
 
 load "../helpers/common"
 
-CC="$SRC_ROOT/lib/critical_check.sh"
-LK="$SRC_ROOT/lib/lockdown.sh"
-LE="$SRC_ROOT/lib/log_event.sh"
-MS="$SRC_ROOT/lib/mediator_spawn.sh"
+CC="$SRC_ROOT/core/lib/critical_check.sh"
+LK="$SRC_ROOT/core/lib/lockdown.sh"
+LE="$SRC_ROOT/core/lib/log_event.sh"
+MS="$SRC_ROOT/core/lib/mediator_spawn.sh"
 
 setup() {
   TMP="$(mktemp -d -t coord-cb-XXXX)"
@@ -109,8 +109,8 @@ _call() {
     . '$LE'
     . '$LK'
     . '$CC'
-    . '$SRC_ROOT/lib/mediator_pending.sh'
-    . '$SRC_ROOT/lib/atomic_write.sh'
+    . '$SRC_ROOT/core/lib/mediator_pending.sh'
+    . '$SRC_ROOT/core/lib/atomic_write.sh'
     . '$MS'
     coord_mediator_spawn synthetic-pending-id 1
   "
@@ -129,10 +129,10 @@ _call() {
     bash -c "
       export COORD_DIR='$COORD_DIR'
       . '$LE'
-      . '$SRC_ROOT/lib/mediator_pending.sh'
+      . '$SRC_ROOT/core/lib/mediator_pending.sh'
       . '$LK'
       . '$CC'
-      . '$SRC_ROOT/lib/atomic_write.sh'
+      . '$SRC_ROOT/core/lib/atomic_write.sh'
       printf 'not json {{{' >'$COORD_DIR/sessions.json'  # re-corrupt before each call
       coord_atomic_edit '$COORD_DIR/sessions.json' '.dummy = 1'
     " >/dev/null 2>&1 || true

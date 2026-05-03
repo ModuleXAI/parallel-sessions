@@ -3,7 +3,7 @@
 
 load "../helpers/common"
 
-P="$SRC_ROOT/lib/participant.sh"
+P="$SRC_ROOT/core/lib/participant.sh"
 
 setup() {
   TMP="$(mktemp -d -t coord-participant-XXXX)"

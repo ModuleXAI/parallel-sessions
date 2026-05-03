@@ -15,7 +15,7 @@
 
 load "../helpers/common"
 
-WC="$SRC_ROOT/lib/watchdog_cache.sh"
+WC="$SRC_ROOT/core/lib/watchdog_cache.sh"
 
 setup() {
   TMP="$(mktemp -d -t coord-watchdog-XXXX)"
@@ -97,7 +97,7 @@ _seed_entry() {
 # --- cache_record ---------------------------------------------------------
 
 @test "cache_record: appends a valid JSONL entry with all required fields" {
-  bash -c '. "'"$SRC_ROOT/lib/log_event.sh"'"; . "'"$WC"'"; coord_watchdog_cache_record "target-A" "alive" "ps still has pid" 60'
+  bash -c '. "'"$SRC_ROOT/core/lib/log_event.sh"'"; . "'"$WC"'"; coord_watchdog_cache_record "target-A" "alive" "ps still has pid" 60'
   # Exactly one line in the cache.
   run wc -l <"$COORD/watchdog/recent_checks.jsonl"
   [ "$output" -eq 1 ]
@@ -113,7 +113,7 @@ _seed_entry() {
 
 @test "cache_record: 5 concurrent appends produce 5 valid JSONL lines (no torn writes)" {
   bash -c '
-    . "'"$SRC_ROOT/lib/log_event.sh"'"
+    . "'"$SRC_ROOT/core/lib/log_event.sh"'"
     . "'"$WC"'"
     for i in 1 2 3 4 5; do
       coord_watchdog_cache_record "target-$i" "alive" "concurrent-$i" 60 &

@@ -205,38 +205,54 @@ bin/
   - `src/lib/coord_mediate.sh` → `src/core/lib/coord_mediate.sh`
   - `src/lib/MEDIATOR_REFERENCE.md` → `src/core/lib/MEDIATOR_REFERENCE.md`
   - `src/lib/VALIDATOR_REFERENCE.md` → `src/core/lib/VALIDATOR_REFERENCE.md`
-- **NOT moved (Claude-specific, will move in A.2):**
-  - `src/lib/subagent_filter.sh` (stays put for now)
+- **AMENDED 2026-05-02 (plan v1.1):** Files moved now include `subagent_filter.sh`. See deviation D-A1-01 below.
+- **NOT moved:** (none — see D-A1-01)
 - **Files updated (consumer paths):**
   - `src/install.sh`:
     - Line 201: `cp -f "$SELF_DIR"/lib/*.sh "$COORD_DIR/lib/"` — change source to `"$SELF_DIR"/core/lib/*.sh`.
     - Lines 217-256: `MEDIATOR_REFERENCE.md` and `VALIDATOR_REFERENCE.md` source paths.
-    - Note: do NOT change destination — `.coord/lib/` stays the runtime location, only the source path in the repo changes.
-  - `src/hooks/session_start.sh:33-34` and every other hook: the `LIB_DIR="$(cd "$HOOK_DIR/../lib" && pwd)"` resolution still works because we are NOT moving hooks in this PR — only libs. The hook directory in the repo still points to the old `src/lib/`. **Wait — we ARE moving libs, so hooks need updating.** Update `LIB_DIR` to point to `../core/lib` for now (will become `../../core/lib` in A.2 when hooks themselves move).
+    - Note: do NOT change destination — `.coord/lib/` stays the flat runtime location; only the source path in the repo changes.
+  - `src/hooks/*.sh`: LIB_DIR uses **dual-fallback resolution** (try `../core/lib` first; fall back to `../lib`). Source-tree tests find `../core/lib/`; installed `.coord/hooks/` finds `../lib/` (flat). See D-A1-02.
+  - `src/bin/coord:27`: same dual-fallback resolution. Source: `src/bin/../core/lib/` exists. Installed: `.coord/bin/../lib/` exists. See D-A1-02.
+  - `src/tests/**/*.bats` + `src/tests/manual/linux_probe.sh` + `src/tests/concurrent_smoke.sh` + fixture timeline scripts: any literal `$SRC_ROOT/lib/` or `/work/src/lib/` → `$SRC_ROOT/core/lib/` / `/work/src/core/lib/`. `$COORD_DIR/lib/` references are RUNTIME (installed location) and do NOT change.
 - **Implementation steps:**
-  1. `git mv src/lib src/core/lib` (preserves history).
-  2. Update `src/install.sh:201` from `"$SELF_DIR"/lib/*.sh` to `"$SELF_DIR"/core/lib/*.sh`.
-  3. Update each `src/hooks/*.sh`'s `LIB_DIR=` line from `../lib` to `../core/lib`.
-  4. Update `src/bin/coord:27` `LIB_DIR="$(cd "$COORD_BIN/../lib" && pwd)"` → `"$COORD_BIN/../core/lib"`.
-  5. Update each existing `src/tests/unit/*.bats`'s `SRC_ROOT="$(cd "$BATS_TEST_DIRNAME/../../.." && pwd)"` if it references `src/lib/` directly — verify with `grep -rn 'src/lib/' src/tests/`.
-  6. Run `bash -n` syntax check on every moved file.
-  7. Run full test suite; expect ZERO failures.
+  1. Move every file in `src/lib/` to `src/core/lib/` via `git mv` (per-file, so directory deletion is clean).
+  2. Update `src/install.sh:201` source glob to `"$SELF_DIR"/core/lib/*.sh`. Update MEDIATOR/VALIDATOR_REFERENCE.md source paths (lines 216-255 area).
+  3. Update each `src/hooks/*.sh` LIB_DIR to dual-fallback resolution.
+  4. Update `src/bin/coord:27` LIB_DIR to dual-fallback resolution; update comment at line 24.
+  5. Update tests: sed `$SRC_ROOT/lib/` → `$SRC_ROOT/core/lib/` across all *.bats and helper scripts.
+  6. Update `src/tests/manual/linux_probe.sh:186` `/work/src/lib/wait_backend.sh` → `/work/src/core/lib/wait_backend.sh`.
+  7. Run `bash -n` syntax check on every moved file + every consumer touched.
+  8. Run full test suite; expect ZERO failures.
 - **Tests:** No new tests. Existing 645 unit + 48 integration must all still pass with new paths.
 - **Verification commands:**
   ```bash
   bats src/tests/unit
   bats src/tests/integration
-  bash src/tests/manual/phase3_ship_gate.sh
-  bash src/tests/manual/phase4_ship_gate.sh
-  bash src/tests/manual/phase5_ship_gate.sh
-  bash src/tests/manual/phase6_ship_gate.sh
-  bash src/tests/manual/phase7_ship_gate.sh
   ```
-- **Acceptance criteria:** All commands above exit 0. `git grep -l 'src/lib/'` returns only doc/comment files; no executable references.
+  (Ship-gates are gitignored maintainer fixtures; deferred to PR H.1.)
+- **Acceptance criteria:** Both bats commands exit 0. `git grep -nE '\$SRC_ROOT/lib/|/work/src/lib/' src/tests/` returns nothing. `git grep -n 'src/lib/' src/` returns only the comment in `src/bin/coord` (now updated to read `src/core/lib/`) — i.e., zero executable refs to old path.
 - **Rollback:** `git revert <commit-of-A.1>` restores `src/lib/`.
-- **Risk:** Medium. 24 file moves + ~30 path updates across hooks/install/bin/tests.
+- **Risk:** Medium-High (revised). ~28 file moves + ~200 path updates across hooks/install/bin/tests.
 - **Dependencies:** A.0.
-- **Estimated diff:** ~30 lines of path-updates (the actual move is shown as renames).
+- **Estimated diff:** ~250 lines of path-updates (revised from ~30; see D-A1-03).
+
+#### Deviations recorded for A.1
+
+**D-A1-01 (2026-05-02): `subagent_filter.sh` moves with the rest, not "stays put".**
+*Rule changed:* From "subagent_filter.sh stays in src/lib/ until A.2" to "subagent_filter.sh moves to src/core/lib/ in A.1; A.2 moves it again to its final adapter location."
+*Why:* Plan v1.0 left `subagent_filter.sh` in `src/lib/` to "stay put for now", but tests execute hooks directly from `$SRC_ROOT/hooks/`, and at runtime the hook resolves `LIB_DIR=$HOOK_DIR/../lib`. With the rest of libs at `src/core/lib/`, the hook would need TWO LIB_DIRs (one for subagent_filter.sh, one for everything else) — adding hacky environment-detection logic to every hook. Moving the file twice in git history (lib → core/lib in A.1, core/lib → adapters/claude-code in A.2) is preserved by `git log --follow` and is far cleaner than dual-LIB_DIR logic.
+*Impact:* `src/lib/` directory is fully deleted in A.1. `src/tests/unit/subagent_filter.bats:7` updates to reference `$SRC_ROOT/core/lib/subagent_filter.sh`.
+
+**D-A1-02 (2026-05-02): `bin/coord` and hooks use dual-fallback LIB_DIR resolution, not a single relative path.**
+*Rule changed:* From "set LIB_DIR to `../core/lib`" to "try `../core/lib` first, fall back to `../lib`".
+*Why:* `src/bin/coord` is `cp`'d to `.coord/bin/coord` at install time (install.sh:211). The installer flattens libs into `.coord/lib/` (NOT `.coord/core/lib/`). If we hard-code `../core/lib`, the installed CLI breaks because `.coord/bin/../core/lib/` does not exist. Dual fallback resolves correctly in both layouts: source tree (src/bin → src/core/lib exists), installed (.coord/bin → .coord/lib exists). Same logic applies to hooks (`src/hooks/` test execution vs `.coord/hooks/` installed).
+*Impact:* Each hook + bin/coord changes one LIB_DIR= line.
+
+**D-A1-03 (2026-05-02): Test surface scope underestimated by ~6×.**
+*Rule changed:* From "~30 lines of path-updates" to "~250 lines across ~43 test files".
+*Why:* Plan v1.0 prescribed `grep -rn 'src/lib/' src/tests/` to find updates, which catches only the literal `src/lib/` substring. Real tests use `$SRC_ROOT/lib/X.sh` (variable interpolation), which that grep misses. Actual count: 185 occurrences across 43 .bats files plus a few helpers. Mechanical sed; no architectural change.
+*Impact:* Risk and diff-size estimates revised upward (Medium → Medium-High; 30 → 250 lines).
 
 ### PR A.2 — Move `src/hooks/*.sh` → `src/adapters/claude-code/hooks/`; move `subagent_filter.sh`
 - **Goal:** Relocate 8 Claude hook scripts under `adapters/claude-code/`; move the Claude-specific `subagent_filter.sh` lib alongside them; update install.sh and tests.
