@@ -42,6 +42,23 @@ docs/
 future-work/
 *future-work/
 
+# Phase ship-gate fixtures + drivers — internal regression-test
+# infrastructure. Each scenario is tied to a specific phase
+# done-when criterion and uses internal task/PR codes, so the
+# layout does not match standard public OSS test conventions.
+# Kept locally for maintainer regression runs; not part of the
+# public ship surface.
+src/tests/fixtures/phase3_ship_gate/
+src/tests/fixtures/phase4_ship_gate/
+src/tests/fixtures/phase5_ship_gate/
+src/tests/fixtures/phase6_ship_gate/
+src/tests/fixtures/phase7_ship_gate/
+src/tests/manual/phase3_ship_gate.sh
+src/tests/manual/phase4_ship_gate.sh
+src/tests/manual/phase5_ship_gate.sh
+src/tests/manual/phase6_ship_gate.sh
+src/tests/manual/phase7_ship_gate.sh
+
 # Secrets / environment files — must NEVER be committed.
 .env
 .env.local
