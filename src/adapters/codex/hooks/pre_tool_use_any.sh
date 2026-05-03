@@ -46,8 +46,13 @@ set -euo pipefail
 
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CORE_LIB_DIR="$(cd "$HOOK_DIR/../../../core/lib" 2>/dev/null && pwd)" \
+  || CORE_LIB_DIR="$(cd "$HOOK_DIR/../../lib" 2>/dev/null && pwd)" \
   || CORE_LIB_DIR="$(cd "$HOOK_DIR/../lib" && pwd)"
-ADAPTER_LIB_DIR="$(cd "$HOOK_DIR/../lib" && pwd)"
+# ADAPTER libs: source layout has them at HOOK_DIR/../lib
+# (src/adapters/codex/lib/); installed layout has them at
+# HOOK_DIR/../../lib/codex/ (.coord/lib/codex/).
+ADAPTER_LIB_DIR="$(cd "$HOOK_DIR/../lib" 2>/dev/null && pwd)" \
+  || ADAPTER_LIB_DIR="$(cd "$HOOK_DIR/../../lib/codex" && pwd)"
 
 # shellcheck disable=SC1091
 . "$CORE_LIB_DIR/atomic_write.sh"

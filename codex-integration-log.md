@@ -1024,6 +1024,84 @@ Append-only progress log for the Codex CLI integration. Every PR's start, comple
 
 ---
 
+- **PR E.1 STARTED** — Codex adapter installer.
+  - Pre-conditions verified: D.5 merged (3c324b5); 816 unit / 66 integration
+    green at HEAD (d47e197).
+  - Branch: `feat/codex-integration`.
+  - Estimated diff per plan: ~300 LOC + ~10 bats.
+  - Layout decision: install copies hooks to `.coord/hooks/codex/` and
+    adapter libs to `.coord/lib/codex/` (subdirs under the existing
+    shared `.coord/`). Core libs at `.coord/lib/` (shared with Claude).
+    Naming avoids collisions: codex's `translator.sh` and
+    `apply_patch_parser.sh` would collide with future adapters at the
+    flat lib path, so namespacing under `lib/codex/` is the safer
+    structure.
+  - LIB_DIR resolution updated in all 7 codex hooks: triple-fallback
+    for CORE (`../../../core/lib` → `../../lib` → `../lib`) and
+    double-fallback for ADAPTER (`../lib` → `../../lib/codex`).
+    Source-tree behavior unchanged (existing 84 codex hook tests stay
+    green); installed-codex layout now resolves correctly.
+
+- **PR E.1 in-progress finding F-E1-01 — bats env smoke test.**
+  - The install's `smoke_test()` initially failed under bats because
+    `coord_resolve_root` walks up from `$PWD` (or `CLAUDE_PROJECT_DIR`
+    or `BASH_SOURCE[1]`'s dir) — under bats `$PWD` is the repo root,
+    not the test `$TMP`. The hook's BASH_SOURCE[1] walk-up should
+    have found `$TMP/.coord` but apparently didn't in the bats
+    subshell.
+  - Fix: smoke_test now exports `COORD_DIR="$COORD_DIR"` explicitly
+    when invoking the hook. At install time we KNOW where `.coord/` is;
+    relying on resolution is unnecessary. Production codex hook
+    invocations work via `parallels-codex` (which sets COORD_DIR=...
+    or relies on the user's cwd being inside the repo).
+  - Test 13 (installed-hook lib resolution) similarly needs explicit
+    COORD_DIR=$TMP/.coord because bats's PWD ≠ TMP. Documented in the
+    test as a test-environment accommodation, not a production gap.
+
+- **PR E.1 in-progress finding F-E1-02 — jq filter `// false` defeats select.**
+  - Test 14's initial assertion used
+    `map(select(test(...)) // false) | length` which inflates the
+    count: `select` drops elements that fail the predicate; `// false`
+    replaces those drops with literal `false`, making length count
+    everything. Plain `map(select(test(...))) | length` is correct.
+  - Fix applied with explanatory comment in the test so future authors
+    don't repeat the same `// false` antipattern.
+
+- **PR E.1 COMPLETED** — 1 install script + 1 test file (14 unit tests) +
+  7 hook LIB_DIR resolution updates.
+  - File added: `src/adapters/codex/install.sh` (~325 LOC, chmod +x).
+  - File added: `src/tests/unit/codex_install.bats` (14 tests).
+  - Files edited: 7 codex hooks under
+    `src/adapters/codex/hooks/` — LIB_DIR triple-fallback for CORE +
+    double-fallback for ADAPTER (supports installed `.coord/hooks/codex/`
+    layout while preserving source-tree behavior).
+  - Tests added: 14 (unit). Plan estimate: ~10.
+  - Test surface state at E.1 boundary:
+    - bats unit:        PASS (830/830) — was 816, +14 from E.1.
+    - bats integration: PASS (66/66) — unchanged.
+    - ship-gates: not run (deferred to PR H.1).
+    - invariant: included in unit count.
+  - Merge commit: <to be filled after commit>.
+
+  Test categories:
+    - Pre-flight (1): aborts when .coord/ absent with helpful message.
+    - Materialization (2): hooks at .coord/hooks/codex/, libs at
+      .coord/lib/codex/.
+    - .codex/hooks.json shape (2): 5 events with correct matchers,
+      no SessionEnd (D-10), commands point to .coord/hooks/codex/.
+    - Idempotency (2): re-run is sha-stable, user-authored entries
+      preserved alongside coord ones.
+    - Feature flag (4): warn-only by default, --enable-codex-feature
+      creates config.toml absent, appends to existing without
+      [features], idempotent on already-enabled.
+    - Smoke test (1): session_start emits banner + creates marker.
+    - Installed-layout LIB_DIR resolution (1): hook finds CORE and
+      ADAPTER libs at .coord/lib/ + .coord/lib/codex/.
+    - Uninstall (1): strips coord-owned entries, preserves user
+      entries.
+
+---
+
 **Phase D — CODEX HOOKS — COMPLETE.**
 - Started: 2026-05-03 (D.1).
 - Completed: 2026-05-03 (D.5).
