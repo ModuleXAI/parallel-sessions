@@ -17,7 +17,11 @@
     "LICENSE"
   ],
   "scripts": {
-    "test": "bash src/tests/manual/phase7_ship_gate.sh"
+    "test": "bats src/tests/unit && bats -r src/tests/integration",
+    "test:unit": "bats src/tests/unit",
+    "test:integration": "bats -r src/tests/integration",
+    "test:cross-agent": "bats -r src/tests/integration/cross_agent",
+    "test:ship-gate": "bash src/tests/manual/phase7_ship_gate.sh"
   },
   "keywords": [
     "claude-code",

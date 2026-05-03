@@ -99,6 +99,15 @@ banner 'bats unit suite'
 bats /work/src/tests/unit
 echo "bats exit=$?"
 
+# Integration suite: bats does NOT recurse by default, so `-r` is
+# required to include src/tests/integration/cross_agent/ (Phase F's
+# 45 cross-agent scenarios). Without `-r`, only the 77 top-level
+# integration tests run and the 45 cross-agent tests are silently
+# excluded — F-F1-04 lesson.
+banner 'bats integration suite (recursive — includes cross_agent)'
+bats -r /work/src/tests/integration
+echo "bats integration exit=$?"
+
 banner 'two_session_warn manual smoke (Phase 1 done-when + Phase 2 02_lock_deny)'
 bash /work/src/tests/manual/two_session_warn.sh
 echo "two_session_warn exit=$?"

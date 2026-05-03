@@ -81,6 +81,7 @@ In-line reference docs near the code: `src/core/lib/MEDIATOR_REFERENCE.md` and `
 - **D-2: No subagent filter on Codex hooks.** Codex has no subagent concept. `subagent_filter.sh` is a Claude-adapter lib; sourcing it from a Codex hook would be dead code (or worse). The codex invariant guard #3 forbids it.
 - **D-10: No SessionEnd registration for Codex.** Codex does not deliver `SessionEnd`; lock release is via `Stop` + Watchdog. The codex installer's `.codex/hooks.json` writer must NOT include `SessionEnd`.
 - **Watch the common traps.** Pipefail capture inside `set -e` blocks, GNU-first stat invocation (`stat -c` before BSD `stat -f`), `claude -p` spawn discipline (always backgrounded + disowned), bats integration patterns (fixture cleanup, sub-shell PATH propagation), and AVOID `BASH_*` as local variable names (`BASH_COMMAND` is a built-in that holds the currently-executing command's text — using it as a local will populate with the source line, not the value you assigned).
+- **`docs/` is partially gitignored.** Public-facing docs (e.g., `docs/codex-quickstart.md`) are tracked by default; internal-only material lives under `docs/development-history/` (gitignored). When adding a new internal `docs/<subdir>/`, add it explicitly to `.gitignore` at creation time — the per-subdir ignore is intentional after the F-G2-01 narrowing in PR G.2 (the previous blanket `docs/` rule was over-broad and would have hidden public quickstart docs).
 
 ## Pull request process
 

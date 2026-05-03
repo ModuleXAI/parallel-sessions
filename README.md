@@ -139,7 +139,7 @@ What this means in practice for Codex sessions: certain in-turn signals that Cla
 
 - **Stale-read drift warnings**: replaced by the structural drift gate which DENIES the `apply_patch`, so the actionable signal is preserved as a deny rather than a warning.
 - **Mediator-verdict messages** (`message_to_caller`): not surfaced on `PreToolUse`. Verdict actions (lockdown, evict, etc.) still apply; the explanatory text is recorded in the verdict file at `.coord/mediator/verdict/<ts>.json` and viewable via `coord status` or direct file read.
-- **Self-task reminders**: not surfaced on `PreToolUse` for Codex. The reminders are recorded as `SELF_TASK_REMINDER` events for audit; whether to add deferred delivery via `UserPromptSubmit` is a future-PR consideration.
+- **Self-task reminders**: not surfaced on `PreToolUse` for Codex (the mechanism is intentionally quiet per A-D4-02). The reminders are recorded as `SELF_TASK_REMINDER` events for audit; `coord status` lists pending self-tasks. Whether the missing in-turn banner causes a real user-visible impact is an open behavior question — F.2's tests confirm the mechanism behaves as documented but did not measure user-impact directly. See `codex-integration-log.md` entry F-D4-03 for status (currently: "BEHAVIOR CONFIRMED; USER IMPACT UNKNOWN").
 - **HEAD-drift banner**: surfaced via `UserPromptSubmit` instead, on the next prompt.
 
 If you are a Codex operator wondering why a banner you'd expect on `PreToolUse` isn't appearing, this is the design — not a bug. The audit trail in `.coord/events.jsonl` is authoritative.
@@ -153,7 +153,7 @@ If you are a Codex operator wondering why a banner you'd expect on `PreToolUse` 
 - **Multi-waiter FIFO queue with event-driven wake-up** — `fswatch` (macOS) / `inotifywait` (Linux) / 250 ms polling fallback. Sub-100 ms wake-up latency in the event-driven path.
 - **Lock-dependency cycle detection** — bipartite session/file DFS triggered when a wait queue grows; Mediator resolves by evicting the lowest-priority session.
 - **Cross-session task delegation** — a session blocked on a locked file can hand off the edit (`coord task-open`) with anchor + complexity + chain-depth + cycle-detection guards.
-- **Self-delegation lifecycle** — `coord self-delegate` records deferred work; reminders fire on every `PreToolUse` (Claude) or `UserPromptSubmit` (Codex, partial) after the file unlocks; `Stop` blocks once if self-tasks are unresolved.
+- **Self-delegation lifecycle** — `coord self-delegate` records deferred work; reminders fire on every `PreToolUse` (Claude) and are recorded to `SELF_TASK_REMINDER` audit events on every `PreToolUse` (Codex, no in-turn banner per A-D4-02 — see `coord status` to surface pending self-tasks); `Stop` blocks once if self-tasks are unresolved.
 - **Three-mode operator switch** — `COORD_TEST_MODE=mock|semi|realistic` routes the 3 spawn sites between mock fakes and real `claude -p` for staged validation.
 - **Cost-guard rate-limit enforcement** — sliding-window counters guard the Mediator + Validator + Task-Processor spawn sites against runaway invocations.
 

@@ -98,7 +98,7 @@ Per A-D4-02 / D-D4-02 (output_parser.rs:16-20 + :337-348) Codex's PreToolUse par
 
 - Stale-read drift warnings → replaced by structural deny on `apply_patch` (you don't need a soft warning; the deny IS the signal).
 - Mediator verdict messages → recorded in `.coord/mediator/verdict/<ts>.json` and viewable via `coord status`. The verdict actions (lockdown / evict / surgical_fix) still apply automatically.
-- Self-task reminders → recorded as `SELF_TASK_REMINDER` events; not surfaced as in-turn banner. Issue `coord status` to see pending self-tasks for your session.
+- Self-task reminders → recorded as `SELF_TASK_REMINDER` events; not surfaced as an in-turn banner (mechanism behaves as documented per F-D4-03 / A-D4-02; whether the missing banner causes user-visible impact is an open behavior question — see `codex-integration-log.md` F-D4-03 for status). Issue `coord status` to see pending self-tasks for your session.
 - HEAD-drift on `PreToolUse` → rerouted to `UserPromptSubmit` (next prompt). You see it on the next turn rather than mid-tool-call.
 
 The audit trail (`.coord/events.jsonl`) is authoritative. If something unexpected happens, grep there:

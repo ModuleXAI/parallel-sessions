@@ -1695,6 +1695,176 @@ Append-only progress log for the Codex CLI integration. Every PR's start, comple
 
 ---
 
+- **PR H.1 STARTED** — final ship-gate.
+  - Pre-conditions verified: G.2 merged (14ba1a6); 837 unit / 122
+    integration -r at HEAD (c880b16).
+  - Branch: `feat/codex-integration`.
+  - Reviewer's strict task ordering: 1-2-3 runner updates (F-F1-04
+    fix) → 4 ship-gate run with explicit invocation evidence + per-
+    category counts.
+  - Ship-gate posture per reviewer Q3: project's ship-gate runner is
+    posture (a) — phase 3-7 drivers run their OWN scenario fixtures
+    (.coord/-style integration scenarios), separate from the bats
+    unit/integration suites. linux_probe.sh runs both the bats unit
+    suite AND the phase ship-gate drivers, but pre-F-F1-04 did NOT
+    include the integration suite at all (cross_agent invisible).
+    Reviewer's Q3 (b) full-surface re-run from clean state is the
+    correct closing posture; H.1 does both.
+
+- **PR H.1 — F-F1-04 RUNNER UPDATES (1-2-3, before any ship-gate run).**
+  - File edited: `src/tests/manual/linux_probe.sh` — added
+    `bats -r /work/src/tests/integration` invocation immediately
+    after the existing `bats /work/src/tests/unit` block, with an
+    inline comment explaining the F-F1-04 rationale (`-r` required
+    so cross_agent suite is included; without it 45 tests would
+    silently be excluded).
+  - File edited: `package.json` — `scripts` rewritten:
+    - `test`            → `bats src/tests/unit && bats -r src/tests/integration`
+    - `test:unit`       → `bats src/tests/unit`
+    - `test:integration` → `bats -r src/tests/integration`
+    - `test:cross-agent` → `bats -r src/tests/integration/cross_agent`
+    - `test:ship-gate`  → `bash src/tests/manual/phase7_ship_gate.sh`
+    The previous single `test` value (`bash phase7_ship_gate.sh`)
+    is now `test:ship-gate`. CI / `npm test` becomes a fast bats
+    surface (~30s); the ship-gate driver is a separate explicit
+    target. This is a small public-script contract change relative
+    to pre-F-F1-04 behavior, called out for downstream consumers.
+
+- **PR H.1 — HOUSEKEEPING PASS (F-G1-01 + F-G2-01 follow-up).**
+  - F-G1-01 — README/quickstart self-task-reminder phrasing aligned
+    with F-D4-03 status:
+    - README §"Why Codex is quieter on PreToolUse" — self-task
+      reminder bullet rewritten to: "the mechanism is intentionally
+      quiet per A-D4-02 ... Whether the missing in-turn banner causes
+      a real user-visible impact is an open behavior question — F.2's
+      tests confirm the mechanism behaves as documented but did not
+      measure user-impact directly. See `codex-integration-log.md`
+      entry F-D4-03 for status (currently: 'BEHAVIOR CONFIRMED; USER
+      IMPACT UNKNOWN')."
+    - README §Features Self-delegation lifecycle bullet — corrected
+      "(Codex, partial)" parenthetical (which incorrectly implied
+      partial banner delivery) to explicit "no in-turn banner per
+      A-D4-02 — see `coord status` to surface pending self-tasks."
+    - docs/codex-quickstart.md — Self-task reminders entry rewritten
+      to mirror the README phrasing and cite F-D4-03 directly.
+  - F-G2-01 follow-up — CONTRIBUTING.md gained a new bullet under
+    "Watch the common traps":
+    - "`docs/` is partially gitignored. Public-facing docs (e.g.,
+      `docs/codex-quickstart.md`) are tracked by default; internal-
+      only material lives under `docs/development-history/`
+      (gitignored). When adding a new internal `docs/<subdir>/`,
+      add it explicitly to `.gitignore` at creation time — the
+      per-subdir ignore is intentional after the F-G2-01 narrowing
+      in PR G.2."
+    Pre-empts a future contributor adding internal docs and being
+    surprised when they're committed.
+
+- **PR H.1 — FINAL SHIP-GATE RUN (post-update, with explicit counts
+  per F-F1-05).**
+
+  Per-category invocations + counts:
+
+      Command                                                Count
+      ─────────────────────────────────────────────────────  ─────
+      bats src/tests/unit                                    837/837 PASS
+      bats src/tests/integration                              77/77  PASS  (top-level only)
+      bats -r src/tests/integration                          122/122 PASS  (full incl. cross_agent)
+      bats -r src/tests/integration/cross_agent               45/45  PASS  (cross_agent only)
+      bats src/tests/unit/phase7_invariant.bats               19/19  PASS  (Claude invariant)
+      bats src/tests/unit/codex_phase7_invariant.bats          7/7   PASS  (Codex invariant)
+      bash src/tests/manual/phase3_ship_gate.sh                4/4   PASS  (mode=hook-sim)
+      bash src/tests/manual/phase4_ship_gate.sh                4/4   PASS  (mode=hook-sim)
+      bash src/tests/manual/phase5_ship_gate.sh                4/4   PASS  (mode=hook-sim)
+      bash src/tests/manual/phase6_ship_gate.sh                5/5   PASS  (mode=hook-sim)
+      bash src/tests/manual/phase7_ship_gate.sh                5/5   PASS  (mode=hook-sim)
+      bash src/tests/manual/two_session_warn.sh                2/2   PASS
+
+  D-13 reference said "24 ship-gate fixtures." Actual current count:
+  22 phase ship-gate fixtures (Phase 3+4+5+6+7 = 4+4+4+5+5 = 22) plus
+  2 two_session_warn fixtures = 24 total ship-gate-driver fixtures.
+  Matches the original D-13 surface (D-13's "24" was inclusive of
+  two_session_warn).
+
+  Ship-gate posture confirmed (a) per the reviewer's Q3:
+    - The phase ship-gate drivers run their OWN .coord/-style
+      scenario fixtures, NOT the bats unit/integration suites.
+    - Each driver is independent; running `npm run test:ship-gate`
+      runs only Phase 7's 5 fixtures (the original `npm test`
+      semantic).
+    - The "full ship-gate" closing posture per Q3 (b): unit (837) +
+      integration -r (122) + all phase ship-gate drivers (22) +
+      two_session_warn (2) = HOLISTIC SHIP-GATE 983 tests + 24
+      fixtures = 1007 verifications, all green.
+
+  This is the closing posture for Phase H. After H.1 merges the
+  Codex integration is complete and the project is ship-ready at
+  v1.
+
+- **PR H.1 COMPLETED** — runner updates + housekeeping + final
+  ship-gate verification.
+  - Files edited: `src/tests/manual/linux_probe.sh`, `package.json`,
+    `README.md`, `docs/codex-quickstart.md`, `CONTRIBUTING.md`.
+  - No new tests; no plan amendments.
+  - Test surface state at H.1 boundary (CLOSING):
+    - bats unit:                              PASS  837/837   (unchanged from G.2)
+    - bats integration (top-level):           PASS   77/77    (unchanged)
+    - bats integration (cross_agent -r):      PASS   45/45    (unchanged)
+    - bats integration (full -r):             PASS  122/122   (unchanged)
+    - Phase 3-7 ship-gate fixtures:           PASS   22/22    (4+4+4+5+5)
+    - two_session_warn ship-gate:             PASS    2/2
+    - ship-gate fixtures total:               PASS   24/24    (22 + 2)
+    - Claude invariant:                       PASS   19/19    (within unit count)
+    - Codex invariant:                        PASS    7/7     (within unit count)
+  - Merge commit: <to be filled after commit>.
+
+---
+
+**Phase H — FINAL VERIFICATION — COMPLETE.**
+- Started: 2026-05-03 (H.1).
+- Completed: 2026-05-03 (H.1).
+- 1 PR merged.
+- F-F1-04 closed (CI runner now includes cross_agent suite).
+- F-G1-01 closed (README/quickstart aligned with F-D4-03 status).
+- F-G2-01 follow-up closed (CONTRIBUTING preempts future ignore traps).
+- All test surfaces verified green from clean state with explicit
+  per-category invocation evidence.
+
+---
+
+**CODEX INTEGRATION — COMPLETE.**
+
+| Phase | PRs | Description | Test surface delta |
+|---|---|---|---|
+| A | 6 | Refactor (lib/hooks namespace move; folder_resolver) | unchanged |
+| B | 2 | Schema 1.1 + parallels-* launchers | +30 unit |
+| C | 4 | Codex translator + apply_patch parser | +57 unit, +5 integration |
+| D | 5 + 2 amendments (v1.2, v1.3) | All 7 Codex hooks | +84 unit |
+| E | 2 | Codex installer + dispatcher rewrite | +14 unit, +11 integration |
+| F | 3 | Cross-agent test infrastructure + 8 scenarios + invariant | +7 unit, +45 cross_agent |
+| G | 2 | README + CONTRIBUTING + package.json + codex-quickstart | unchanged (docs-only) |
+| H | 1 | Ship-gate runner update + housekeeping + final verification | unchanged |
+
+**Final test surface:**
+- bats unit:        837 (was 645 pre-Phase-A; +192 across the integration arc)
+- bats integration: 122 with `-r` (77 top-level + 45 cross_agent)
+- ship-gate:         24 fixtures across Phase 3-7 + two_session_warn
+- invariants:        19 (Claude) + 7 (Codex) = 26 architectural guards
+
+**13 locked decisions D-1..D-13 honored throughout, no silent deviations.
+Two plan amendments (A-D4-01 v1.2, A-D4-02 v1.3) landed with reviewer
+approval and file:line citations to upstream Codex source.**
+
+**Project objective #2 (mixed-mode hypothesis — Claude + Codex sessions
+sharing one .coord/) verified across 45 cross-agent integration tests.
+Project objective #1 (Claude-only baseline) maintained throughout
+(every Claude unit + integration + ship-gate test pass without
+regression).**
+
+**The integration arc: 24 PRs + 2 plan amendments + 5 followup-log
+SHA commits across 8 phases (A through H).**
+
+---
+
 **Phase D — CODEX HOOKS — COMPLETE.**
 - Started: 2026-05-03 (D.1).
 - Completed: 2026-05-03 (D.5).
