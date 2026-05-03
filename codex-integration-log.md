@@ -952,6 +952,105 @@ Append-only progress log for the Codex CLI integration. Every PR's start, comple
     - invariant: included in unit count.
   - Merge commit: c4eb268.
 
+- **PR D.4 reviewer post-mortem (logged retrospectively).**
+  - F-D4-09: pre_tool_use_apply_patch.sh at 570 LOC exceeds the 500-line
+    factoring threshold from Q3's reviewer ruling. Decision deferred to
+    during D.5 implementation per the three-criteria audit:
+    (a) Does D.5 reuse helpers from apply_patch.sh? — NO. None of
+        the deny banners, drift helpers, coord_cx_human_age, or
+        substring helpers are referenced in D.5.
+    (b) Did reading apply_patch.sh feel heavier than inline locality?
+        — NO. The file is single-purpose (multi-file coordination
+        logic); helpers are co-located with use sites; the structure
+        Phase A → Phase B → Phase C is a clean reading path.
+    (c) Did tests require awkward cross-file reaches? — NO. Each hook's
+        bats file is self-contained; no cross-hook test setup needed.
+    All three criteria NO → accept 570 LOC. No factoring to
+    `apply_patch_locking.sh` in this phase. If D.6+ ever shares the
+    deny-banner logic OR the drift gate has to fold in a future
+    refinement (e.g., F-D5-01 hunk-line parsing), revisit then.
+  - F-D4-10 acknowledged: comment added near `_coord_cx_count_substring`
+    in apply_patch.sh explaining why bash-native scanning is correct
+    (not a "simplification" candidate to grep -cF). Future contributors
+    have the rationale at the call site. Lands as part of the D.5 commit.
+  - Reviewer note logged retrospectively: F-D4-08 traces to the C.2
+    design preview's literal `grep -cF -- "$pre_image"` specification.
+    The primitive was wrong even though the contract was right. No
+    corrective action — fix already applied; lesson logged.
+
+- **PR D.5 STARTED** — Codex `post_tool_use_apply_patch.sh`.
+  - Pre-conditions verified: D.4 merged (c4eb268); 806 unit / 66
+    integration green at HEAD (881ccd4).
+  - Branch: `feat/codex-integration`.
+  - Estimated diff per preview: ~150 LOC + ~10 bats.
+  - Mirror source: `src/adapters/claude-code/hooks/post_tool_use_write.sh`,
+    adapted for multi-file iteration.
+  - Per F-D4-02(b): success-path-only contract — no
+    tool_response.error inspection. Tool error → no PostToolUse → Stop
+    handles release per D-10.
+  - F-D5-01 honored: edit_range = 0/0 in coord_task_processor_run
+    invocation, with TODO comment at the call site explaining the
+    coarsening (Codex grammar's @@ lacks line numbers).
+  - Q5 fallback: parser-failure path releases all SID-owned locks.
+
+- **PR D.5 COMPLETED** — 1 hook + 1 test file (10 unit tests).
+  - File added: `src/adapters/codex/hooks/post_tool_use_apply_patch.sh`
+    (232 LOC: ~50-line header documenting D-D4-02 / D-10 / F-D4-02(b) /
+    F-D5-01 / Q5 fallback rationale; ~180-line body for the per-file
+    release loop). Above the 150 estimate; the overage is documentation
+    and the `set -- $PATHS_SORTED` IFS dance for the multi-file
+    iteration. No dead code.
+  - File added: `src/tests/unit/codex_post_tool_use_apply_patch.bats`
+    (10 tests covering: gate negative, D-2 agent_type still releases,
+    non-participant no-op, single-file release with last_activity
+    refresh, multi-file release with peer-lock preservation +
+    deterministic alphabetical event order, task_processor invocation
+    with F-D5-01 0/0 edit-range, defensive lock-held-by-other ERROR
+    path, Q5 parser-failure fallback releases all session locks,
+    lockdown active retains locks, ship-gate permissionDecision
+    negative invariant).
+  - Edit (D.4 follow-up per F-D4-10): added comment near
+    `_coord_cx_count_substring` in `pre_tool_use_apply_patch.sh`
+    explaining why grep -cF is wrong (line-oriented vs multi-line
+    pre_image semantics). Future-proofing against "simplification"
+    regressions.
+  - Tests added: 10 (unit). Plan estimate: ~10.
+  - Test surface state at D.5 boundary:
+    - bats unit:        PASS (816/816) — was 806, +10 from D.5.
+    - bats integration: PASS (66/66) — unchanged.
+    - ship-gates: not run (deferred to PR H.1).
+    - invariant: included in unit count.
+  - Merge commit: <to be filled after commit>.
+
+---
+
+**Phase D — CODEX HOOKS — COMPLETE.**
+- Started: 2026-05-03 (D.1).
+- Completed: 2026-05-03 (D.5).
+- PRs merged: D.1, D.2, D.3, D.4, D.5 (5 PRs) plus 2 plan amendment
+  commits (v1.2 / v1.3).
+- Test surface delta:
+  - unit:        732 → 816 (+84): D.1 (+12), D.2 (+10), D.3 (+7),
+                                  D.4 (+45), D.5 (+10).
+  - integration: 66  → 66 (unchanged — Phase D adds no integration
+                          scenarios; cross-agent integration tests
+                          land in Phase F).
+- Plan amendments: A-D4-01 (v1.2 — drift = structural pre_image-search),
+  A-D4-02 (v1.3 — PreToolUse banner-emission removed; finds (a)/(b)/(c)
+  documented with file:line citations).
+- In-scope findings: F-D4-01 (consolidated filter), F-D4-02 (verification
+  found 3 false claims — citations baked in), F-D4-03 (Phase F follow-up:
+  user_prompt_submit.sh self-task reminder routing), F-D4-04 (test
+  pattern: empty stdout + bookkeeping-not-regressed), F-D4-05 (any.sh
+  line-count audit pass), F-D4-06/07/08 (in-progress fixes caught at
+  test time: BASH_COMMAND collision, jq pipe direction, grep -cF
+  line-orientation), F-D4-09 (570-LOC factoring decision: NO),
+  F-D4-10 (substring-helper rationale comment), F-D5-01 (0/0
+  edit-range coarsening with TODO comment).
+- Phase E (Codex installer + dispatcher) may now begin per plan; no
+  further design preview required unless E.1/E.2 surfaces a contract
+  change.
+
 ---
 
 ## Pending entries (will be filled in as PRs progress)

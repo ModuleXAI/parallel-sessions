@@ -173,6 +173,12 @@ _coord_cx_file_under_drift_threshold() {
 # pattern matching is multi-line safe (unlike `grep -F` which is
 # line-oriented). The loop trims the matched prefix on each iteration
 # and re-tests; under the 1 MB drift cap this is bounded.
+#
+# F-D4-08 (DO NOT "simplify" back to grep -cF): grep -cF counts matching
+# LINES, not substring occurrences. A multi-line pre_image (common — hunks
+# frequently span 3-5 lines) would be split on newlines by grep -cF,
+# missing legitimate matches. Bash-native scanning is the correct primitive
+# for the structural drift gate.
 _coord_cx_count_substring() {
   local hay="$1" needle="$2"
   if [ -z "$needle" ]; then printf '0'; return; fi
