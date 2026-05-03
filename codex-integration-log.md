@@ -1288,6 +1288,116 @@ Append-only progress log for the Codex CLI integration. Every PR's start, comple
 
 ---
 
+- **PR F.2 STARTED** — cross-agent scenarios.
+  - Pre-conditions verified: F.1 merged (833ac7a); 830 unit / 77
+    integration top-level / 14 cross_agent green at HEAD (730e5aa).
+  - Branch: `feat/codex-integration`.
+  - Eight reviewer-enumerated scenarios + deeper variations to cover.
+  - F-F1-05 invocation contract: F.2 author MUST run with explicit
+    `bats -r src/tests/integration/cross_agent` and report the
+    realized test count.
+
+- **PR F.2 in-progress findings (caught and fixed during scenario writing)**
+
+  - **F-F2-01 — notify_waiters scans wait_queues, not LOCK_DENIED.**
+    The cross_agent_notification.bats tests initially asserted that
+    notifications were populated after a release with no explicit
+    `coord wait` enqueue. The notify_waiters helper actually scans
+    `.wait_queues[<path>]` (per the existing PR-PHASE5 contract); a
+    denied session that did NOT call `coord wait` does NOT auto-enqueue
+    itself. Tests must seed the queue via the lib API. Fix: added
+    `xagent_wait_enqueue` helper that wraps `coord_wait_queue_enqueue`.
+
+  - **F-F2-02 — Mediator pending entries are keyed by observer in `.session`,
+    target in `.payload.target`.**
+    `coord_mediator_emit_pending` derives `.session` from the OBSERVING
+    process's $SESSION_ID env (defaults to "unknown"). The
+    target-of-investigation lands in `.payload.target`. Tests filtering
+    by `.session == target_sid` find zero matches; the correct filter
+    is `.payload.target == target_sid`. Fixed in cross_agent_watchdog.bats.
+
+  - **F-F2-03 — wait_queue entry field is `session_id`, not `session`.**
+    The wait_queue records each waiter with key `session_id`. Tests
+    inspecting queue order via `.session` see null and silently
+    truncate. Fixed in cross_agent_fifo.bats.
+
+- **PR F.2 SCENARIO COVERAGE: all 8 reviewer scenarios + 2 deeper, no
+  contract gaps surfaced.**
+
+  Reviewer scenario map (all 8 confirmed end-to-end):
+    #1 Lock contention claude→codex     →  smoke 7 + lock_multifile 4
+    #2 Inverse contention codex→claude  →  smoke 8 + lock_multifile 4
+    #3 Watchdog asymmetry               →  watchdog 4 (PID-gone for both
+                                            agents → pending entry symmetric)
+    #4 Mixed schema 1.1                 →  smoke 4 + every test (every
+                                            scenario installs both
+                                            adapters; coexisting rows
+                                            never observed to interfere)
+    #5 Mediator under D-1              →  mediator 4 (claude available
+                                            → spawn attempts; missing
+                                            → SPAWN_REFUSED reason=
+                                            claude_binary_missing,
+                                            rc=1, no hang)
+    #6 HEAD tracking cross-agent        →  head_tracking 4 (per-session
+                                            independence verified)
+    #7 Notification fan-out cross-agent →  notification 5 (codex release
+                                            populates claude's queue
+                                            and vice versa; F-D4-03
+                                            deferral confirmed)
+    #8 F-D4-03 self-task reminder       →  self_task_reminder 4
+                                            (codex any hook logs event
+                                            but no banner; codex
+                                            user_prompt_submit also
+                                            silent — Phase F follow-up
+                                            justified)
+    Deeper:
+      multi-file partial-block         →  lock_multifile 4
+      FIFO across agents               →  fifo 3
+      agent-to-agent cycle             →  cycle 3 (cycle_detection picks
+                                            up bipartite cross-agent
+                                            graph; locks not leaked)
+
+  HIGHEST-RISK SCENARIO RESOLVED:
+    Scenario #5 (Mediator under D-1) confirmed CLEAN failure mode for
+    Codex-only operators lacking `claude` binary:
+      - rc=1 (clean failure, NOT a hang)
+      - MEDIATOR_SPAWN_REFUSED event with reason=claude_binary_missing
+        in events.jsonl (operator-readable audit trail)
+      - MEDIATOR_SPAWN_STARTED NOT logged (refused before that signal)
+    The reviewer's concern ("If the failure mode is silent or
+    confusing, that's a real product gap") is resolved: the failure
+    is NEITHER silent NOR confusing. D-1 contract is enforced cleanly;
+    no plan amendment needed.
+
+- **PR F.2 COMPLETED** — 8 scenario .bats files (31 tests).
+  - Files added under `src/tests/integration/cross_agent/`:
+    - cross_agent_lock_multifile.bats (4 tests)
+    - cross_agent_head_tracking.bats (4 tests)
+    - cross_agent_notification.bats (5 tests)
+    - cross_agent_self_task_reminder.bats (4 tests)
+    - cross_agent_watchdog.bats (4 tests)
+    - cross_agent_mediator.bats (4 tests)
+    - cross_agent_fifo.bats (3 tests)
+    - cross_agent_cycle.bats (3 tests)
+  - File edited: `helpers.bash` (housekeeping notes per F-F1-01/02/03;
+    `xagent_pretooluse_any`, `xagent_pretooluse_apply_patch_multifile`,
+    `xagent_wait_enqueue`, `xagent_notification_count`,
+    `xagent_session_state_set` helpers added).
+  - Tests added: 31 (cross_agent integration).
+  - F-F1-05 honored — explicit invocation:
+      `bats -r src/tests/integration/cross_agent` → 45 tests
+      (14 smoke from F.1 + 31 scenarios from F.2 = 45)
+  - Test surface state at F.2 boundary:
+    - bats unit:                              PASS (830/830) — unchanged.
+    - bats integration (top-level):           PASS (77/77)   — unchanged.
+    - bats integration (cross_agent recursive): PASS (45/45)  — was 14, +31.
+    - bats integration (full, `bats -r`):     PASS (122/122) — was 91.
+    - ship-gates: not run (deferred to PR H.1).
+    - invariant: included in unit count.
+  - Merge commit: <to be filled after commit>.
+
+---
+
 **Phase D — CODEX HOOKS — COMPLETE.**
 - Started: 2026-05-03 (D.1).
 - Completed: 2026-05-03 (D.5).

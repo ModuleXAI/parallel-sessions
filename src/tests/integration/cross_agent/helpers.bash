@@ -45,6 +45,31 @@
 # (no additionalContext). Claude PreToolUse hooks may emit either or
 # both. xagent_last_was_deny / xagent_last_deny_reason work for both
 # agent shapes by reading the permissionDecision field.
+#
+# CONVENTIONS (per F-F1-03):
+#   - Use 8-char-unique session-id prefixes when test logic checks the
+#     deny banner's holder identifier. Claude's deny banner truncates
+#     the holder to 8 chars (HOLDER_SHORT="${LOCK_HOLDER:0:8}"); names
+#     longer than 8 chars are truncated AT char 8, so "x-codex-holder"
+#     becomes "x-codex-" in the banner. Naming sessions like
+#     "ch-1234ab" / "cx-1234ab" keeps the truncation lossless.
+#
+# NON-BYPASSABLE INVARIANTS (per F-F1-01, F-F1-02):
+#   - xagent_setup MUST run the dispatcher inside a `cd "$XAGENT_TMP"`
+#     subshell. Without it, the dispatcher's `git rev-parse
+#     --show-toplevel` resolves to whatever cwd bats inherits — for
+#     bats invoked from the parallel-sessions repo, that means
+#     mutating the OUTER repo's .coord/. The subshell isolates cwd
+#     so test contamination cannot leak into the developer's working
+#     tree.
+#   - xagent_setup MUST reset sessions.json + sessions/*.active markers
+#     after install. Both adapter installers run smoke tests that
+#     leave residue (Claude SessionEnd → IDLE_CLOSED row stays;
+#     Codex smoke deletes its own row but the asymmetry would skew
+#     count assertions). Tests that rely on session_count or
+#     iterate sessions[] MUST NOT bypass xagent_setup ("fast path"
+#     optimizations that reuse a prior test's coord state would
+#     re-introduce the residue.)
 
 # === Setup / teardown =======================================================
 
@@ -217,6 +242,64 @@ xagent_pretooluse_write() {
   esac
 }
 
+# xagent_pretooluse_apply_patch_multifile <sid> <file_path> [<file_path> ...]
+# Codex-only: construct an apply_patch that touches N files in one
+# invocation; pipe through pre_tool_use_apply_patch.sh. Each path is
+# pre-seeded with `old\n` if absent so the drift gate passes. Output
+# captured into XAGENT_LAST_OUTPUT.
+xagent_pretooluse_apply_patch_multifile() {
+  local sid="$1"; shift
+  local patch=$'*** Begin Patch\n'
+  local p
+  for p in "$@"; do
+    [ -f "$p" ] || printf 'old\n' >"$p"
+    patch="${patch}*** Update File: ${p}"$'\n'
+    patch="${patch}@@"$'\n'
+    patch="${patch}-old"$'\n'
+    patch="${patch}+new"$'\n'
+  done
+  patch="${patch}*** End Patch"
+  local input
+  input=$(jq -nc --arg s "$sid" --arg cwd "$XAGENT_TMP" --arg p "$patch" '{
+    session_id:$s, cwd:$cwd, hook_event_name:"PreToolUse",
+    tool_name:"apply_patch",
+    tool_input:{input:$p},
+    tool_use_id:"tu-multi"
+  }')
+  _xagent_run_hook "COORD_ENABLED=1" "$COORD_DIR/hooks/codex/pre_tool_use_apply_patch.sh" "$input" || true
+}
+
+# xagent_pretooluse_any <agent> <sid> [<tool_name>]
+# Invokes the agent's pre_tool_use_any.sh (matcher *) — Claude's
+# pre_tool_use_any.sh handles HEAD recheck, notification consume,
+# self-task reminders, mediator verdict apply, watchdog probe firing.
+# Codex's variant does the same minus banner emission (D-D4-02).
+# Default tool_name is "Read" for Claude and "apply_patch" for Codex
+# (any tool name with a matching matcher works for the * dispatch path).
+xagent_pretooluse_any() {
+  local agent="$1" sid="$2" tool="${3:-}"
+  local input
+  case "$agent" in
+    claude_code)
+      [ -n "$tool" ] || tool="Read"
+      input=$(jq -nc --arg s "$sid" --arg cwd "$XAGENT_TMP" --arg t "$tool" '{
+        session_id:$s, cwd:$cwd, hook_event_name:"PreToolUse",
+        tool_name:$t, tool_input:{}, tool_use_id:"tu-any"
+      }')
+      _xagent_run_hook "CLAUDE_COORD=1" "$COORD_DIR/hooks/pre_tool_use_any.sh" "$input" || true
+      ;;
+    codex)
+      [ -n "$tool" ] || tool="some_tool"
+      input=$(jq -nc --arg s "$sid" --arg cwd "$XAGENT_TMP" --arg t "$tool" '{
+        session_id:$s, cwd:$cwd, hook_event_name:"PreToolUse",
+        tool_name:$t, tool_input:{}, tool_use_id:"tu-any"
+      }')
+      _xagent_run_hook "COORD_ENABLED=1" "$COORD_DIR/hooks/codex/pre_tool_use_any.sh" "$input" || true
+      ;;
+    *) return 2 ;;
+  esac
+}
+
 # xagent_posttooluse_write <agent> <sid> <file_path>
 # Mirror of pretooluse_write for the post-hook (lock release).
 xagent_posttooluse_write() {
@@ -292,6 +375,49 @@ xagent_event_count_for() {
   jq -rs --arg k "$kind" --arg s "$sid" \
     '[.[] | select(.kind == $k and .session == $s)] | length' \
     "$COORD_DIR/events.jsonl" 2>/dev/null || printf '0'
+}
+
+# xagent_notification_count <sid> <file_path>
+# Echoes the number of pending notifications queued for <sid> on <file_path>.
+xagent_notification_count() {
+  local sid="$1" path="$2"
+  jq -r --arg s "$sid" --arg f "$path" \
+    '(.notifications[$s][$f] // []) | length' "$COORD_DIR/sessions.json" 2>/dev/null \
+    || printf '0'
+}
+
+# xagent_wait_enqueue <sid> <file_path>
+# Enqueue <sid> as a waiter on <file_path> via the coord_wait_queue
+# library. Required before notify_lock_release_waiters can populate a
+# notification for the waiter — the underlying machinery scans
+# wait_queues, not LOCK_DENIED events directly. Pure-jq seeding would
+# bypass init invariants; using the library helper keeps the wait queue
+# consistent.
+xagent_wait_enqueue() {
+  local sid="$1" path="$2"
+  (
+    # shellcheck disable=SC1091
+    . "$SRC_ROOT/core/lib/atomic_write.sh"
+    # shellcheck disable=SC1091
+    . "$SRC_ROOT/core/lib/log_event.sh"
+    # shellcheck disable=SC1091
+    . "$SRC_ROOT/core/lib/wait_queue.sh"
+    mkdir -p "$COORD_DIR/wakers" "$COORD_DIR/wait_queues"
+    COORD_DIR="$COORD_DIR" coord_wait_queue_enqueue "$sid" "$path" >/dev/null
+  )
+}
+
+# xagent_session_state_set <sid> <state>
+# Direct-mutates a session row's state. Useful for synthesizing
+# watchdog-triggering states without waiting for real activity drift.
+xagent_session_state_set() {
+  local sid="$1" state="$2"
+  local tmp
+  tmp=$(mktemp)
+  jq --arg s "$sid" --arg v "$state" \
+    '.sessions[$s].state = $v' "$COORD_DIR/sessions.json" >"$tmp" \
+    && mv "$tmp" "$COORD_DIR/sessions.json" \
+    || rm -f "$tmp"
 }
 
 # === Output helpers (operate on XAGENT_LAST_OUTPUT) ========================
