@@ -36,9 +36,34 @@ STATE_OF_SYSTEM.md
 scripts/stress_semi_out/
 scripts/stress_realistic_out/
 
+# Internal-only material — not part of the public ship surface.
+archive/
+docs/
+future-work/
+*future-work/
+
+# Secrets / environment files — must NEVER be committed.
+.env
+.env.local
+.env.*.local
+.envrc
+
+# IDE / editor configs.
+.vscode/
+.idea/
+*.code-workspace
+
+# Logs, temp files, backups.
+*.log
+*.tmp
+*.bak
+*~
+
+# Node (defensive — no current JS deps, but future-proof).
+node_modules/
+
 # OS / editor cruft that has no place in VCS.
 .DS_Store
 Thumbs.db
 *.swp
 *.swo
-*future-work/

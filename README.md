@@ -50,8 +50,6 @@ The hooks register into `.claude/settings.local.json` at install time. On `Sessi
 
 When something the deterministic logic cannot handle arises — corrupt state, a stuck session, a lock-dependency cycle, a CRITICAL drift verdict — a Mediator pending entry is written to `.coord/mediator/pending.jsonl` and a `claude -p` subprocess is spawned to analyze and decide. The Mediator's verdict is one of three actions: advice, surgical_fix, or lockdown. This 3-action contract is fixed by design — new failure kinds added in the future must fit it without code changes.
 
-For deeper architecture, design rationale, decision records, and the ~25 hard-won lessons from construction (Bash 3.2 portability, `set -e + pipefail` traps, `jq` edge cases, fixture inheritance issues, etc.), see `docs/development-history/CLAUDE.md` (Part A construction discipline; Part B runtime contract; §A.13 lessons library).
-
 ## Test modes
 
 `COORD_TEST_MODE` selects which spawn sites use real `claude -p` versus mock fakes:
@@ -71,7 +69,6 @@ Output lands under `scripts/stress_<mode>_out/<ISO_ts>.log` (gitignored).
 
 ## Documentation
 
-- `docs/development-history/` — full 8-phase implementation arc, design decisions (`IMPLEMENTATION_PLAN.md`), revision ledger (`plan-revisions.md`), construction discipline + runtime contract (`CLAUDE.md`).
 - `LICENSE` — MIT.
 - `CONTRIBUTING.md` — setup, coding standards, PR process.
 
