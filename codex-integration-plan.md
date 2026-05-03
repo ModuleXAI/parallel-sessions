@@ -634,6 +634,13 @@ bin/
 - **Dependencies:** C.1.
 - **Estimated diff:** ~400 lines (parser) + ~200 lines (tests + fixtures).
 
+#### Deviations recorded for C.2
+
+**D-C2-01 (2026-05-03): Add 4 adversarial fixtures (category I) covering literal control-marker text in hunk bodies.**
+*Rule changed:* From "fixtures 001-022 from codex-ref-repo" to "14 verbatim from upstream + 10 hand-rolled including 4 adversarial under fixtures 105-108".
+*Why:* Without adversarial fixtures, the state machine's prefix-matching guarantee — that `*** ...` and `@@` are only recognized as control markers when at the start of a line in the right state — is documented but not tested. A model emitting `+@@ literal text` inside an Add File body would silently corrupt the parse. Approved by user verification on the C.2 design preview.
+*Impact:* +4 fixtures (105 `at-in-add-line`, 106 `stars-in-add-line`, 107 `crlf`, 108 `trailing-whitespace-end-patch`). All 4 PASS.
+
 ### PR C.3 — Translator complete (uses parser + adapter contract)
 - **Goal:** Fill in every translator function to its full contract.
 - **Pre-conditions:** C.2 merged.

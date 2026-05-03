@@ -1,0 +1,24 @@
+{
+  "rc": 0,
+  "paths": [
+    "old/name.txt",
+    "renamed/dir/name.txt"
+  ],
+  "operations": [
+    {
+      "op": "update",
+      "path": "old/name.txt",
+      "move_to": "renamed/dir/name.txt"
+    }
+  ],
+  "hunks_by_path": {
+    "old/name.txt": [
+      {
+        "header": "",
+        "pre_image": "old content",
+        "post_image": "new content",
+        "is_end_of_file": false
+      }
+    ]
+  }
+}

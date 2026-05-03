@@ -1,0 +1,23 @@
+{
+  "rc": 0,
+  "paths": [
+    "heredoc.txt"
+  ],
+  "operations": [
+    {
+      "op": "update",
+      "path": "heredoc.txt",
+      "move_to": null
+    }
+  ],
+  "hunks_by_path": {
+    "heredoc.txt": [
+      {
+        "header": "",
+        "pre_image": "old",
+        "post_image": "new",
+        "is_end_of_file": false
+      }
+    ]
+  }
+}

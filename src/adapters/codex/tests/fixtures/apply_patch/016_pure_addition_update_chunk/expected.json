@@ -1,0 +1,23 @@
+{
+  "rc": 0,
+  "paths": [
+    "input.txt"
+  ],
+  "operations": [
+    {
+      "op": "update",
+      "path": "input.txt",
+      "move_to": null
+    }
+  ],
+  "hunks_by_path": {
+    "input.txt": [
+      {
+        "header": "",
+        "pre_image": "",
+        "post_image": "added line 1\nadded line 2",
+        "is_end_of_file": false
+      }
+    ]
+  }
+}

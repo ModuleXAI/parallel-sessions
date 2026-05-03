@@ -1,0 +1,7 @@
+*** Begin Patch
+*** Update File: bad.txt
+@@
+-old
+?weird-prefix-line
++new
+*** End Patch

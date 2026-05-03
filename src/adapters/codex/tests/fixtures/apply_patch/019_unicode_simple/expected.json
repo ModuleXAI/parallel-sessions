@@ -1,0 +1,23 @@
+{
+  "rc": 0,
+  "paths": [
+    "foo.txt"
+  ],
+  "operations": [
+    {
+      "op": "update",
+      "path": "foo.txt",
+      "move_to": null
+    }
+  ],
+  "hunks_by_path": {
+    "foo.txt": [
+      {
+        "header": "",
+        "pre_image": "line1\nna\u00efve caf\u00e9",
+        "post_image": "line1\nna\u00efve caf\u00e9 \u2705",
+        "is_end_of_file": false
+      }
+    ]
+  }
+}

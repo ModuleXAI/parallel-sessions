@@ -1,0 +1,23 @@
+{
+  "rc": 0,
+  "paths": [
+    "tail.txt"
+  ],
+  "operations": [
+    {
+      "op": "update",
+      "path": "tail.txt",
+      "move_to": null
+    }
+  ],
+  "hunks_by_path": {
+    "tail.txt": [
+      {
+        "header": "",
+        "pre_image": "first\nsecond",
+        "post_image": "first\nsecond updated",
+        "is_end_of_file": true
+      }
+    ]
+  }
+}

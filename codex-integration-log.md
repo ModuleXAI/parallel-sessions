@@ -438,6 +438,77 @@ Append-only progress log for the Codex CLI integration. Every PR's start, comple
     - invariant: included in unit count.
   - Merge commit: 4ac6366.
 
+### PR C.2 — apply_patch_parser.sh + 24 fixtures
+
+- **PR C.2 STARTED** — implement Codex apply_patch grammar parser as a bash 3.2
+  state machine over a single line-by-line pass. Approved with the design
+  preview on 2026-05-03. Hard-stop-after-C.1 gate cleared by user.
+  - Pre-conditions: C.1 merged (4ac6366); design preview approved with three
+    findings: F-C2-01 (ID map), F-C2-02 (helper computes hash), F-C2-03 (rc=4
+    fixture).
+  - Branch: `feat/codex-integration`.
+
+- **PR C.2 plan amendment — D-C2-01:** add 4 adversarial fixtures (category I,
+  IDs 105-108). Approved by user on the design preview ("INCLUDE. They're
+  load-bearing for the 'model emits weird content' case"). Plan v1.2 §C.2
+  records the amendment.
+
+- **PR C.2 finding (in-scope) — F-C2-04: fixture count discrepancy.**
+  Design preview's stated total was "22 fixtures"; the breakdown table in the
+  same preview actually summed to 23. Adding F-C2-03 (rc=4) gave 24, not the
+  user-quoted 23. I went with the breakdown's 23 + F-C2-03 = 24. README at
+  the fixture dir documents the count and the discrepancy openly.
+
+- **PR C.2 implementation finding — F-C2-05: parser strips jq trailing
+  newline before hashing; helper must mirror that EXACTLY.**
+  First test run had 6 hash mismatches because parser uses
+  `pre=$(jq -r ...)` (which strips jq's trailing `\n` per bash $(…)
+  semantics) but the helper piped jq output directly into sha256 (preserving
+  the `\n`). Per F-C2-02 contract review the helper has to compute the same
+  hash the parser would. Fixed: helper now captures into a var via $(...)
+  too. Single-line documentation update in the helper explaining why.
+
+- **PR C.2 implementation finding — F-C2-06: bats `set -e` aborts on
+  non-zero rc before $? could be captured.** Initial _assert_negative used
+  `actual_rc=$?` on the line AFTER `_coord_cx_parse_ast` returned a deliberate
+  non-zero rc — bats aborted the test before $? was assigned. Fixed with
+  `... || actual_rc=$?` idiom on the same line as the parser call.
+
+- **PR C.2 COMPLETED** — 1 parser lib + 14 verbatim + 10 hand-rolled fixtures
+  + 24 expected.json + 1 generated bats helper.
+  - Files added (parser): `src/adapters/codex/lib/apply_patch_parser.sh`
+    (~290 lines): 1 internal `_coord_cx_parse_ast` (state machine, 7 states),
+    6 public functions (`paths`, `operations`, `hunks`, `pre_image`,
+    `pre_image_hash`, `edit_range`), 2 internal helpers (`_strip_heredoc`
+    for lenient mode, `_sha256_hex` cross-platform).
+  - Files added (24 fixtures, each 2 files patch.txt + expected.json):
+    - 14 verbatim from `codex-ref-repo/.../scenarios/`: 001, 002, 003, 004,
+      005, 008, 013, 016, 017, 018, 019, 020 (×2: `_delete_file_success` and
+      `_whitespace_padded_patch_marker_lines` — upstream collision preserved
+      so future regression checks correlate by directory name), 022.
+    - 10 hand-rolled (IDs 100+): 100 single_hunk_update, 101 context_only,
+      102 lenient_heredoc, 103 missing_end_patch, 104 malformed_hunk_content
+      (per F-C2-03), 105-108 adversarial (per D-C2-01), 109 multi_hunk_pre_image.
+  - Files added (test helper):
+    `src/tests/unit/apply_patch_parser.bats` (~170 lines, programmatically
+    generated): one @test per fixture; positive uses `_assert_positive`
+    (AST diff via `jq -S` + per-path sha256 hash from expected.pre_image
+    matched against parser-emitted hash per F-C2-02); negative uses
+    `_assert_negative` (rc + stderr substring).
+  - Files added (fixture dir README):
+    `src/adapters/codex/tests/fixtures/apply_patch/README.md` documenting the
+    ID map (000-099 = upstream-verbatim namespace; 100+ = synthesized),
+    category breakdown, and final count.
+  - Tests added: 24 (all unit).
+  - Test surface state at C.2 boundary:
+    - bats unit: PASS (699/699) — was 675, +24 from new apply_patch_parser.bats.
+    - bats integration: PASS (61/61).
+    - ship-gates: not run (deferred to PR H.1).
+    - invariant: included in unit count.
+  - Stub-marker grep on translator.sh: still 14 unfilled stubs. C.3 is the
+    PR that takes that count to 1 (just `_coord_cx_stub` itself).
+  - Merge commit: <to be filled after commit>.
+
 ---
 
 ## Pending entries (will be filled in as PRs progress)

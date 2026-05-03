@@ -1,0 +1,23 @@
+{
+  "rc": 0,
+  "paths": [
+    "bar.md"
+  ],
+  "operations": [
+    {
+      "op": "add",
+      "path": "bar.md",
+      "move_to": null
+    }
+  ],
+  "hunks_by_path": {
+    "bar.md": [
+      {
+        "header": "",
+        "pre_image": "",
+        "post_image": "This is a new file",
+        "is_end_of_file": false
+      }
+    ]
+  }
+}

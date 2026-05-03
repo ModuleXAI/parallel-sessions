@@ -1,0 +1,23 @@
+{
+  "rc": 0,
+  "paths": [
+    "docs.md"
+  ],
+  "operations": [
+    {
+      "op": "add",
+      "path": "docs.md",
+      "move_to": null
+    }
+  ],
+  "hunks_by_path": {
+    "docs.md": [
+      {
+        "header": "",
+        "pre_image": "",
+        "post_image": "# Patch format docs\nThe marker `*** Update File: foo` opens an update block.\nThe marker `*** End Patch` terminates the patch.",
+        "is_end_of_file": false
+      }
+    ]
+  }
+}

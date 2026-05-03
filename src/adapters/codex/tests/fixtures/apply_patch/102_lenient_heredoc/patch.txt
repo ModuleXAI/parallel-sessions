@@ -1,0 +1,8 @@
+<<'EOF'
+*** Begin Patch
+*** Update File: heredoc.txt
+@@
+-old
++new
+*** End Patch
+EOF
