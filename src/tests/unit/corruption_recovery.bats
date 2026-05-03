@@ -57,8 +57,10 @@ _emit_corrupt_state_entry() {
   local INP='{"session_id":"'"$SID"'","cwd":"'"$TMP"'","hook_event_name":"SessionStart","source":"startup"}'
   CLAUDE_COORD=1 run bash -c "echo '$INP' | '$HSS'"
   [ "$status" -eq 0 ]
-  # sessions.json now parses with the canonical schema.
-  run jq -e '.schema_version == "1.0"' "$COORD_DIR/sessions.json"
+  # sessions.json now parses with the canonical schema (1.1 post-B.1
+  # — corruption recovery uses coord_state_empty_template which writes
+  # current schema, regardless of the corrupt file's prior version).
+  run jq -e '.schema_version == "1.1"' "$COORD_DIR/sessions.json"
   [ "$status" -eq 0 ]
   # Corrupt original archived under sessions.json.corrupt.<ts>.json.
   run bash -c 'ls "'"$COORD_DIR"'/sessions.json.corrupt."*.json 2>/dev/null | wc -l | tr -d " "'

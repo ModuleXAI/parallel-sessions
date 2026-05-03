@@ -55,8 +55,13 @@ fi
 
 coord_state_empty_template() {
   # Emitted via jq to guarantee a canonical JSON object.
+  # Schema 1.1 (PR B.1): session rows now carry an `agent` field
+  # ("claude_code" / "codex" / future). Empty template has no
+  # session rows; bump records the writer's contract version.
+  # Readers tolerate 1.0 files: missing `agent` defaults to
+  # "claude_code" via `// "claude_code"` fallbacks.
   jq -n '{
-    schema_version: "1.0",
+    schema_version: "1.1",
     sessions: {},
     locks: {},
     wait_queues: {},

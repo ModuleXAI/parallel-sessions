@@ -61,7 +61,8 @@ cmd_status() {
 
   info "coord status  (schema_version=$schema)"
   info "  sessions:"
-  jq -r '.sessions | to_entries[] | "    \(.key|.[0:8])  state=\(.value.state)  pid=\(.value.pid)  last=\(.value.last_activity_at)"' "$(state_file)" 2>/dev/null
+  # Schema 1.1: agent column. Legacy 1.0 rows fall back to "claude_code".
+  jq -r '.sessions | to_entries[] | "    \(.key|.[0:8])  agent=\(.value.agent // "claude_code")  state=\(.value.state)  pid=\(.value.pid)  last=\(.value.last_activity_at)"' "$(state_file)" 2>/dev/null
   if [ "$locks" -gt 0 ]; then
     info "  locks:"
     jq -r '.locks | to_entries[] | "    \(.key)  by=\(.value.session|.[0:8])  since=\(.value.acquired_at)"' "$(state_file)"

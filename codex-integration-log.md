@@ -268,6 +268,64 @@ Append-only progress log for the Codex CLI integration. Every PR's start, comple
 
 ---
 
+## Phase B — Schema extension + launcher scripts
+
+### PR B.1 — Schema bump 1.0 → 1.1 + agent field
+
+- **PR B.1 STARTED** — bump sessions schema to 1.1; tag every session row with
+  `agent` so cross-agent state is distinguishable.
+  - Pre-conditions: Phase A complete (all of A.0..A.5 merged).
+  - Branch: `feat/codex-integration`.
+
+- **PR B.1 finding (in-scope) — F-B1-01:**
+  Plan called for adding `// "claude_code"` agent fallbacks to multiple readers
+  (`coord status`, `notify_waiters.sh`, `watchdog.sh`). Of those, only
+  `coord status` actually consumes `agent` post-B.1 (display column). The
+  notify_waiters and watchdog reader updates are speculative ("could include
+  agent in event payload") with no current consumer. Per CLAUDE.md "don't add
+  for hypothetical futures", they are deferred to whichever PR actually needs
+  the field. Single live reader change: `cmd_status` line 64 jq filter gets
+  `agent=\(.value.agent // "claude_code")` interpolation.
+
+- **PR B.1 finding (in-scope) — F-B1-02:**
+  Two test files asserted `schema_version == "1.0"` (`state_query.bats:22`,
+  `corruption_recovery.bats:61`). After bumping the empty template + corruption
+  recovery template, both must assert "1.1". Other test fixtures that hand-craft
+  `"schema_version":"1.0"` in JSON (helpers/common.bash, several .bats files)
+  stay at 1.0 ON PURPOSE — they exercise the legacy-tolerance path. Don't
+  change them.
+
+- **PR B.1 COMPLETED** — 7 file edits + 1 new test file.
+  - Files edited (writers — schema bump):
+    - `src/core/lib/atomic_write.sh`: `coord_state_empty_template` → 1.1.
+    - `src/core/lib/state_query.sh`: `coord_state_dump` fallback → 1.1.
+    - `src/core/lib/log_event.sh`: `CORE_SCHEMA_VERSION` default → 1.1.
+    - `src/install.sh`: 3 sites — `schema_version` file, `config.json`,
+      `sessions_history.json`.
+  - Files edited (writer adds agent field):
+    - `src/adapters/claude-code/hooks/session_start.sh`: 3 register filters
+      now include `agent: $agent`; `coord_atomic_edit` call gains
+      `--arg agent "claude_code"`.
+  - Files edited (reader displays agent):
+    - `src/core/bin/coord`: `cmd_status` session listing adds an `agent=`
+      column with `// "claude_code"` legacy fallback.
+  - Files edited (test assertion catch-up per F-B1-02):
+    - `src/tests/unit/state_query.bats`: assert "1.1".
+    - `src/tests/unit/corruption_recovery.bats`: assert "1.1".
+  - Files added: `src/tests/unit/schema_v1_1.bats` (6 tests covering empty
+    template version, agent on new rows, legacy-row fallback, status display,
+    install.sh writes 1.1, and forward-tolerance — atomic_edit preserves
+    unknown future fields on partial updates).
+  - Tests added: 6.
+  - Test surface state at B.1 boundary:
+    - bats unit: PASS (665/665) — was 659, +6 from new schema_v1_1.bats.
+    - bats integration: PASS (52/52).
+    - ship-gates: not run (deferred to PR H.1).
+    - invariant: included in unit count.
+  - Merge commit: <to be filled after commit>.
+
+---
+
 ## Pending entries (will be filled in as PRs progress)
 
 The structure below is a template; remove it once real entries replace it.

@@ -277,13 +277,15 @@ materialize_coord() {
   [ -f "$COORD_DIR/bin/coord" ] && chmod +x "$COORD_DIR/bin/coord"
 
   # schema_version (single-line; Decision 2.9).
-  printf '1.0\n' >"$COORD_DIR/schema_version"
+  # 1.1 (PR B.1): session rows carry `agent` field. Readers
+  # tolerate 1.0 files via `// "claude_code"` defaults.
+  printf '1.1\n' >"$COORD_DIR/schema_version"
 
   # config.json (plan §3.6 + PR-PHASE5-02 §D wait_backend).
   if [ ! -s "$COORD_DIR/config.json" ] || [ "$MODE" = repair ]; then
     cat >"$COORD_DIR/config.json" <<'JSON'
 {
-  "schema_version": "1.0",
+  "schema_version": "1.1",
   "task_delegation": true,
   "lock_ttl_seconds": 900,
   "watchdog_suspicion_seconds": 1200,
@@ -387,7 +389,7 @@ JSON
 
   # sessions_history.json.
   if [ ! -s "$COORD_DIR/sessions_history.json" ] || [ "$MODE" = repair ]; then
-    jq -n '{schema_version:"1.0", events:[]}' >"$COORD_DIR/sessions_history.json"
+    jq -n '{schema_version:"1.1", events:[]}' >"$COORD_DIR/sessions_history.json"
   fi
 
   # events.jsonl — just ensure exists.

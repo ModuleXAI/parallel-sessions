@@ -14,11 +14,11 @@
 # Environment:
 #   COORD_DIR   — base coord dir (usually "<repo>/.coord"). Required.
 #   SESSION_ID  — current session UUID. Required.
-#   CORE_SCHEMA_VERSION — defaults to "1.0".
+#   CORE_SCHEMA_VERSION — defaults to "1.1".
 
 set -euo pipefail
 
-: "${CORE_SCHEMA_VERSION:=1.0}"
+: "${CORE_SCHEMA_VERSION:=1.1}"
 
 # coord_now_iso8601 — RFC-3339 UTC timestamp with ms precision where available.
 # Uses perl (ships on macOS and Linux; see Decision 2.1 note in FINDINGS F-009).

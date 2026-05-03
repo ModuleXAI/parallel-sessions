@@ -18,8 +18,9 @@ teardown() { rm -rf "$TMP"; }
   rm -f "$COORD/sessions.json"
   run "$Q" dump
   [ "$status" -eq 0 ]
+  # Schema 1.1 (PR B.1): empty template now writes the new schema marker.
   run bash -c "'$Q' dump | jq -r .schema_version"
-  [ "$output" = "1.0" ]
+  [ "$output" = "1.1" ]
 }
 
 @test "state_query: lock-holder reports empty for unlocked file" {

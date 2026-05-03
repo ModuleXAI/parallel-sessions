@@ -156,7 +156,8 @@ case "$SOURCE" in
       last_activity_at: $now,
       git_head:         $head,
       prompt_id:        null,
-      script_version:   $sv
+      script_version:   $sv,
+      agent:            $agent
     }'
     EVENT_KIND="SESSION_REGISTER"
     ;;
@@ -171,7 +172,8 @@ case "$SOURCE" in
         last_activity_at: $now,
         git_head:         $head,
         prompt_id:        null,
-        script_version:   $sv
+        script_version:   $sv,
+        agent:            $agent
       }'
       EVENT_KIND="SESSION_REGISTER"
       RESUME_REASON="resume_without_prior_row"
@@ -220,20 +222,25 @@ case "$SOURCE" in
       last_activity_at: $now,
       git_head:         $head,
       prompt_id:        null,
-      script_version:   $sv
+      script_version:   $sv,
+      agent:            $agent
     }'
     EVENT_KIND="SESSION_REGISTER"
     SOURCE="startup"
     ;;
 esac
 
+# Schema 1.1 (PR B.1): every session row written by this hook is
+# tagged with agent="claude_code" so cross-agent state can be
+# distinguished. The Codex adapter (Phase D) writes agent="codex".
 if ! coord_atomic_edit "$STATE" "$FILTER" \
   --arg sid    "$SESSION_ID" \
   --arg pid    "$PID" \
   --arg lstart "$PID_LSTART" \
   --arg now    "$NOW" \
   --arg head   "$GIT_HEAD" \
-  --arg sv     "$SCRIPT_VERSION"
+  --arg sv     "$SCRIPT_VERSION" \
+  --arg agent  "claude_code"
 then
   warn_stderr 'atomic_edit failed during registration; session state unchanged'
   emit_additional_context "Coord: could not update session registry. Operating uncoordinated this turn."
