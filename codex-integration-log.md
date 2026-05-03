@@ -507,7 +507,7 @@ Append-only progress log for the Codex CLI integration. Every PR's start, comple
     - invariant: included in unit count.
   - Stub-marker grep on translator.sh: still 14 unfilled stubs. C.3 is the
     PR that takes that count to 1 (just `_coord_cx_stub` itself).
-  - Merge commit: <to be filled after commit>.
+  - Merge commit: 1230a64.
 
 ---
 
