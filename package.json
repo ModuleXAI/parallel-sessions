@@ -6,6 +6,7 @@
     "parallel-sessions": "./bin/parallel-sessions",
     "parallels-init": "./bin/parallels-init",
     "parallels-claude": "./bin/parallels-claude",
+    "parallels-codex": "./bin/parallels-codex",
     "parallels-status": "./bin/parallels-status"
   },
   "files": [

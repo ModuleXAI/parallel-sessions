@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# parallels-codex — start a Codex CLI session with coord coordination active.
+#
+# Mirror of parallels-claude (PR B.2) but exec's `codex` instead. Sets
+# COORD_ENABLED=1 (canonical) and forwards args verbatim.
+#
+# Pre-conditions:
+#   - .coord/ exists somewhere at-or-above $PWD (run `parallels-init` first).
+#   - `codex` binary on PATH.
+#   - `.codex/hooks.json` exists (warned-not-hard-erred per F-C4-01 — Phase E
+#     installer is the canonical writer; current Phase C state predates it).
+#
+# Phase C PR C.4.
+
+set -euo pipefail
+
+_walk_for_coord() {
+  local cur="$PWD"
+  while [ -n "$cur" ] && [ "$cur" != "/" ]; do
+    if [ -d "$cur/.coord" ]; then
+      printf '%s\n' "$cur"
+      return 0
+    fi
+    cur=$(dirname "$cur")
+  done
+  return 1
+}
+
+if ! coord_root=$(_walk_for_coord); then
+  printf 'parallels-codex: no .coord/ found from %s upward.\n' "$PWD" >&2
+  printf '                 Run `parallels-init` first.\n' >&2
+  exit 2
+fi
+
+if ! command -v codex >/dev/null 2>&1; then
+  printf 'parallels-codex: `codex` binary not on PATH.\n' >&2
+  printf '                 Install Codex CLI from https://github.com/openai/codex first.\n' >&2
+  exit 3
+fi
+
+# .codex/hooks.json soft check. Phase E lands the installer that writes
+# this file; until then, warn but proceed so Phase C/D testing isn't
+# blocked. Hooks won't fire without registration, so the warning matters.
+if [ ! -f "$coord_root/.codex/hooks.json" ]; then
+  printf 'parallels-codex: warning — %s/.codex/hooks.json is missing.\n' "$coord_root" >&2
+  printf '                 Coord hooks will NOT fire until the installer\n' >&2
+  printf '                 (Phase E) registers them. Proceeding anyway.\n' >&2
+fi
+
+# COORD_ENABLED=1 is the canonical participation flag (PR B.2). Codex
+# hooks honor the same gate via ${COORD_ENABLED:-${CLAUDE_COORD:-}}.
+exec env COORD_ENABLED=1 codex "$@"

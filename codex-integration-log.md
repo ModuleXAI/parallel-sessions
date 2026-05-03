@@ -563,6 +563,51 @@ Append-only progress log for the Codex CLI integration. Every PR's start, comple
   - Translator stub-marker grep on translator.sh: 0. C.3 done-when met.
   - Merge commit: 4646fee.
 
+### PR C.4 — parallels-codex launcher
+
+- **PR C.4 STARTED** — mirror parallels-claude for the codex CLI; add hooks.json
+  pre-flight (soft, per F-C4-01).
+  - Pre-conditions: C.3 merged (4646fee).
+  - Branch: `feat/codex-integration`.
+
+- **PR C.4 finding (in-scope) — F-C4-01: .codex/hooks.json check is a warning,
+  not a hard error.**
+  Plan §C.4 says "Pre-flight checks `.codex/hooks.json` exists" without
+  specifying behavior on absence. parallels-claude's analogous file
+  (.claude/settings.local.json) is hard-required and exists post-`parallels-init`.
+  But .codex/hooks.json's installer doesn't exist until Phase E; until then,
+  every Phase C/D test would fail a hard check. Decision: warn-and-proceed.
+  When the file is missing, hooks won't fire — the warning makes that visible
+  without blocking testing.
+
+- **PR C.4 COMPLETED** — 1 launcher + 1 test file + 1 package.json edit.
+  - File added: `bin/parallels-codex` (~50 lines, chmod +x).
+  - File added: `src/tests/integration/launcher_parallels_codex.bats` (5 tests
+    covering rc 2 no-coord, rc 3 no-codex, soft hooks.json warning, happy
+    path, cwd-walk-up).
+  - File edited: `package.json` — added parallels-codex to bin map.
+  - Tests added: 5 (integration).
+  - Test surface state at C.4 boundary:
+    - bats unit: PASS (732/732).
+    - bats integration: PASS (66/66) — was 61, +5 from launcher_parallels_codex.
+    - ship-gates: not run (deferred to PR H.1).
+    - invariant: included in unit count.
+  - Merge commit: <to be filled after commit>.
+
+---
+
+**Phase C — CODEX TRANSLATOR + APPLY_PATCH PARSER — COMPLETE.**
+- Started: 2026-05-02 (C.1).
+- Completed: 2026-05-03 (C.4).
+- PRs merged: C.1, C.2, C.3, C.4 (4 PRs).
+- Test surface delta:
+  - unit:        675 → 732 (+57: 5 translator-skeleton-then-superseded-by-38, 24 apply_patch_parser).
+  - integration: 61  → 66  (+5: launcher_parallels_codex).
+- Notable plan amendment: D-C2-01 (4 adversarial fixtures added per design preview approval).
+- In-scope findings: F-C1-01 (watchdog teardown race), F-C2-04..06 (count, hash, set-e),
+  F-C3-01..03 (test rename, marker-in-comment, extract_file_paths), F-C4-01 (soft hooks.json check).
+- Phase D (Codex hooks) may now begin — D.1 is the first actual hook, depends on full Phase C surface.
+
 ---
 
 ## Pending entries (will be filled in as PRs progress)
