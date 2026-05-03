@@ -1518,6 +1518,87 @@ Append-only progress log for the Codex CLI integration. Every PR's start, comple
 
 ---
 
+- **PR G.1 STARTED** — README + CONTRIBUTING + package.json updates.
+  - Pre-conditions verified: F.3 merged (37b8ffd) + F-F3-01 fix
+    (9855e57); 837 unit / 122 integration -r at HEAD.
+  - Branch: `feat/codex-integration`.
+  - Plan estimate: ~150 LOC across docs.
+  - Reviewer Phase G content suggestions (from F.3 close-out):
+    1. D-1 contract for Codex-only users (claude binary required;
+       MEDIATOR_SPAWN_REFUSED audit signal documented).
+    2. Mixed-mode install flow with concrete commands + resulting
+       layout.
+    3. Banner-degradation acknowledgment (intentional design, not
+       a bug; bookkeeping-vs-banner distinction).
+
+- **PR G.1 COMPLETED** — 3 doc files updated.
+  - README.md updated (96 → 213 LOC, +117):
+    - Headline: "Multi-session coordination for AI coding agents
+      (Claude Code + OpenAI Codex)".
+    - "What it does" updated to enumerate Codex hooks alongside
+      Claude's.
+    - NEW SECTION "Supported agents" with capability matrix
+      including the explicit ⚠️ row for the PreToolUse banner
+      degradation on Codex.
+    - "Quick start" updated with default install + explicit flag
+      combinations + concrete layout tree (mixed-mode produced).
+    - NEW SECTION "Cross-agent coordination" with worked example
+      (Claude holds, Codex apply_patch denied; deny-banner shape
+      surfaced; multi-file all-or-deny atomicity called out).
+    - NEW SECTION "D-1: Codex-only users still need claude" — the
+      explicit contract documentation per reviewer suggestion #1.
+      Names the MEDIATOR_SPAWN_REFUSED audit-trail signal so
+      operators can grep for it when something fails.
+    - NEW SECTION "Why Codex is quieter on PreToolUse" per reviewer
+      suggestion #3. Cites output_parser.rs:16-20 + :337-348 for
+      the source-level evidence and enumerates which banners are
+      affected. Operators wondering why a banner didn't appear
+      find the answer here, not in source.
+    - "Features" section updated to include multi-file apply_patch
+      atomicity + Codex drift detection model.
+    - "Status" section test counts updated (645 → 837 unit;
+      48 → 77/45/122 integration variants; +7 codex invariant).
+  - CONTRIBUTING.md updated (78 → 107 LOC, +29):
+    - "Development setup" updated with explicit `bats -r` for
+      cross_agent suite + cross_agent test counts.
+    - "Architecture overview" rewritten to describe the
+      core/adapters split (src/core/ + src/adapters/claude-code/ +
+      src/adapters/codex/ + top-level dispatcher).
+    - "Coding standards" updated:
+      - Path references corrected (src/lib → src/core/lib;
+        src/hooks → src/adapters/claude-code/hooks).
+      - 2-location-deny invariant restated for each adapter.
+      - NEW: A-D4-02 / D-D4-02 invariant documented (no
+        additionalContext on Codex PreToolUse — bookkeeping
+        retained, banners dropped).
+      - NEW: D-1 / D-2 / D-10 invariants documented inline as
+        contributor-facing rules.
+      - F-D4-06 lesson preserved (avoid `BASH_*` as local var
+        names — `BASH_COMMAND` is a bash builtin holding the
+        currently-executing command's text).
+    - "Pull request process" test count expectations updated to
+      include codex invariant + cross_agent.
+  - package.json updated:
+    - description rewritten for AI coding agents (multi-adapter).
+    - keywords: + codex, openai-codex, openai.
+    - bin map already had parallels-codex from C.4 — no change.
+  - F-F1-04 explicitly noted as STILL PENDING for Phase H (ship-gate
+    runner update). Documented as the visible work item that closes
+    out the cross_agent CI gap.
+  - Tests: NO new tests in G.1 (docs-only). Existing test surface
+    unchanged. Spot-checked codex_phase7_invariant + install_register
+    still green.
+  - Test surface state at G.1 boundary:
+    - bats unit:                              PASS (837/837) — unchanged.
+    - bats integration (top-level):           PASS (77/77)   — unchanged.
+    - bats integration (cross_agent -r):      PASS (45/45)   — unchanged.
+    - bats integration (full -r):             PASS (122/122) — unchanged.
+    - ship-gates: not run (deferred to PR H.1).
+    - invariant: included in unit count.
+  - Merge commit: <to be filled after commit>.
+
+---
+
 **Phase D — CODEX HOOKS — COMPLETE.**
 - Started: 2026-05-03 (D.1).
 - Completed: 2026-05-03 (D.5).

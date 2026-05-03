@@ -1,7 +1,7 @@
 {
   "name": "parallel-sessions",
   "version": "1.0.0",
-  "description": "Multi-session coordination for Claude Code — prevent concurrent edits, recover from crashes, delegate work between sessions.",
+  "description": "Multi-session coordination for AI coding agents (Claude Code + OpenAI Codex) — prevent concurrent edits, recover from crashes, delegate work between sessions, across agent types.",
   "bin": {
     "parallel-sessions": "./bin/parallel-sessions",
     "parallels-init": "./bin/parallels-init",
@@ -21,11 +21,14 @@
   },
   "keywords": [
     "claude-code",
+    "codex",
+    "openai-codex",
     "multi-session",
     "coordination",
     "lock",
     "hooks",
-    "anthropic"
+    "anthropic",
+    "openai"
   ],
   "author": "Sezer Yavuz",
   "license": "MIT",
