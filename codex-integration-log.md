@@ -856,15 +856,37 @@ Append-only progress log for the Codex CLI integration. Every PR's start, comple
 
 ### Phase F follow-up candidates
 
-- **F-D4-03 (filed 2026-05-03):** `user_prompt_submit.sh` self-task
-  reminder delivery. Codex's PreToolUse rejects additionalContext, so
-  any.sh's per-tool-call self-task reminder banner is silently dropped.
-  D.3's user_prompt_submit.sh delivers HEAD-drift on prompt submit but
-  NOT self-task reminders. A future PR could extend D.3's hook to
-  iterate `coord_self_task_check_unlocked` + emit reminders via
-  additionalContext (which IS supported on UserPromptSubmit per
-  output_parser.rs:51). Defer until Phase F integration tests show
-  whether Codex sessions actually need the reminder.
+- **F-D4-03 (filed 2026-05-03; status downgraded 2026-05-03 per F-F2-04):**
+  `user_prompt_submit.sh` self-task reminder delivery. Codex's
+  PreToolUse rejects additionalContext, so any.sh's per-tool-call
+  self-task reminder banner is silently dropped. D.3's
+  user_prompt_submit.sh delivers HEAD-drift on prompt submit but NOT
+  self-task reminders.
+
+  STATUS (post-F.2 review): MECHANISM CONFIRMED; USER IMPACT UNKNOWN.
+  F.2's cross_agent_self_task_reminder.bats (4 tests) verifies the
+  documented behavior end-to-end:
+    - Codex pre_tool_use_any.sh logs SELF_TASK_REMINDER but emits no
+      banner (D-D4-02 invariant; matches F-D4-02(c)
+      output_parser.rs:337-348 source-level evidence).
+    - Codex user_prompt_submit.sh also doesn't surface the reminder.
+    - Claude path retains banner delivery (no regression there).
+
+  F-F2-04 reviewer observation (2026-05-03): the F.2 tests prove the
+  MECHANISM behaves as documented (case (a) — tautological re-proof of
+  D-F4-02(c)), NOT that the dropped banner harms users in practice
+  (case (b) — concrete user-impact evidence). The original "Phase F
+  follow-up justified" framing was stronger than the test evidence
+  supports. Downgraded entry status:
+    - "BEHAVIOR CONFIRMED; USER IMPACT UNKNOWN."
+    - Whether to add user_prompt_submit.sh delivery (or accept the
+      degradation) is a product-quality call that needs separate
+      user-facing evidence, not just mechanism re-proof.
+    - When concrete user-impact data is available, file as a discrete
+      issue/PR with the impact description; reference F-D4-03 for
+      historical context.
+    - Until then, this entry stays at "behavior confirmed" — neither
+      a blocker nor a guaranteed follow-up.
 
 - **PR D.4 STARTED** — Codex `pre_tool_use_*.sh` (3-hook split).
   - Pre-conditions verified: plan v1.3 committed (2a82c42); F-D4-02
@@ -1395,6 +1417,84 @@ Append-only progress log for the Codex CLI integration. Every PR's start, comple
     - ship-gates: not run (deferred to PR H.1).
     - invariant: included in unit count.
   - Merge commit: e6b0481.
+
+---
+
+- **PR F.3 STARTED** — phase7_codex_invariant.bats.
+  - Pre-conditions verified: F.2 merged (e6b0481); 830 unit / 122
+    integration -r at HEAD (3cf13d4).
+  - Branch: `feat/codex-integration`.
+  - Plan §F.3 estimate: ~5 guards. Aiming for the 4 reviewer-enumerated
+    targets + the 2 D-2/D-10/D-11/A-D4-01 contract-lock guards =
+    realized 7 guards.
+  - Per reviewer's F.3 implementation suggestion: each guard cites
+    file:line in the upstream Codex source (or in the locked-decision
+    plan) establishing the invariant. WHAT-is-forbidden + WHY-it-is-
+    forbidden side by side; future contributors who hit a guard
+    failure see the rationale, not just the rule.
+
+- **PR F.3 in-progress finding F-F2-04 acknowledged (downgrade applied).**
+  - Phase F follow-up entry F-D4-03 originally framed as "deferral
+    confirmed; Phase F follow-up justified" — the framing implied
+    user-impact evidence the F.2 tests don't actually produce.
+  - F.2's self_task_reminder tests verify MECHANISM behavior (case
+    (a) — tautological re-proof of D-D4-02(c)'s source-level evidence),
+    NOT user-impact (case (b) — would require concrete user-facing
+    observations of a missed actionable signal).
+  - Action: F-D4-03 entry edited to "BEHAVIOR CONFIRMED; USER IMPACT
+    UNKNOWN." Future user-impact evidence (if any) would file as a
+    discrete issue/PR, not as an open follow-up.
+
+- **PR F.3 COMPLETED** — 1 invariant test file (7 guards).
+  - File added: `src/tests/unit/codex_phase7_invariant.bats` (~7
+    guards). Each guard:
+      1. permissionDecision in codex/hooks/ confined to
+         pre_tool_use_apply_patch.sh — citation: pre_tool_use.rs:107-110.
+      2. pre_tool_use_*.sh hooks do NOT emit additionalContext
+         (D-D4-02) — citations: output_parser.rs:16-20 + :337-348.
+      3. codex/hooks/*.sh do NOT source subagent_filter.sh (D-2).
+      4. codex install.sh writes NO SessionEnd (D-10) — citation:
+         lib.rs:25 HOOK_EVENT_NAMES_WITH_MATCHERS.
+      5. No SESSION_COMPACTED events emitted by codex hooks (D-11) —
+         citation: session-start.command.input.schema.json:38-41.
+      6. pre_tool_use_apply_patch.sh does NOT source the validator
+         pipeline (A-D4-01 plan v1.2 amendment).
+      7. install.sh writes anchored regex matchers ^Bash$ +
+         ^apply_patch$ — citation: research §H10 + post_tool_use.rs:546.
+  - Tests added: 7 (unit, src/tests/unit/codex_phase7_invariant.bats).
+  - Test surface state at F.3 boundary:
+    - bats unit:                              PASS (837/837) — was 830,
+                                               +7 from codex_phase7_invariant.
+    - bats integration (top-level):           PASS (77/77)   — unchanged.
+    - bats integration (cross_agent -r):      PASS (45/45)   — unchanged.
+    - bats integration (full -r):             PASS (122/122) — unchanged.
+    - ship-gates: not run (deferred to PR H.1).
+    - invariant: included in unit count.
+  - Merge commit: <to be filled after commit>.
+
+---
+
+**Phase F — CROSS-AGENT INTEGRATION TESTS — COMPLETE.**
+- Started: 2026-05-03 (F.1).
+- Completed: 2026-05-03 (F.3).
+- PRs merged: F.1, F.2, F.3 (3 PRs).
+- Test surface delta:
+  - unit:                                   830 → 837 (+7).
+  - integration (top-level, non-recursive): 77 → 77 (unchanged).
+  - integration (cross_agent -r):           0 → 45 (+45 — was deferred).
+  - integration (full, bats -r):            91 → 122 (+31 — F.2 only).
+- Coverage: all 8 reviewer-enumerated cross-agent scenarios + 3 deeper
+  variations exercised end-to-end (F.2). 7 invariant guards
+  (F.3) lock the Codex-shape contract.
+- HIGHEST-RISK SCENARIO (#5 Mediator under D-1) RESOLVED CLEANLY:
+  Codex-only operators without `claude` get
+  rc=1 + MEDIATOR_SPAWN_REFUSED reason=claude_binary_missing,
+  not silent hang. D-1 contract enforced; no plan amendment.
+- F-F1-04 (bats subdir test runner) STILL PENDING: ship-gate /
+  linux_probe.sh / package.json scripts must be updated to use
+  `bats -r` before Phase H closes; otherwise cross_agent suite is
+  silently invisible to CI.
+- Phase G (docs) and Phase H (final ship-gate) may now begin.
 
 ---
 
