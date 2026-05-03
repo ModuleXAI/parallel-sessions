@@ -178,6 +178,34 @@ Append-only progress log for the Codex CLI integration. Every PR's start, comple
     - invariant: included in unit count.
   - Merge commit: 8d536f0 (rename preserved at 97% similarity by git).
 
+- **PR A.4 STARTED** — add `src/core/lib/normalized_events.sh` forward-declaration.
+  - Pre-conditions: A.3 merged (8d536f0).
+  - Branch: `feat/codex-integration`.
+
+- **PR A.4 finding (in-scope) — F-A4-01:**
+  Plan A.4 calls for the new test at `src/core/tests/unit/normalized_events.bats`,
+  but the existing test surface still lives entirely under `src/tests/unit/`. No
+  Phase A PR explicitly relocates the 43 existing test files. Choosing to put the
+  new test at `src/tests/unit/normalized_events.bats` to keep all tests in one
+  directory; if a future PR reorganizes tests under `src/core/tests/` and
+  `src/adapters/<agent>/tests/`, this file moves with the rest. Pragmatic
+  trade-off: don't touch 43 unrelated files just to add 1 new test.
+
+- **PR A.4 COMPLETED** — 2 new files, 0 edits.
+  - File added: `src/core/lib/normalized_events.sh` (~50 lines, 12 constants
+    grouped lifecycle / tool-call / sentinel).
+  - File added: `src/tests/unit/normalized_events.bats` (6 tests covering source-
+    cleanly, lifecycle constants defined, tool-call constants defined, sentinel
+    defined, naming-contract regex `^[A-Z][A-Z0-9_]*$`, and uniqueness across
+    all constants).
+  - Tests added: 6.
+  - Test surface state at A.4 boundary:
+    - bats unit: PASS (651/651) — was 645, +6 from new normalized_events.bats.
+    - bats integration: still 48/48 (A.4 doesn't touch integration surface).
+    - ship-gates: not run (deferred to PR H.1).
+    - invariant: included in unit count.
+  - Merge commit: <to be filled after commit>.
+
 ---
 
 ## Pending entries (will be filled in as PRs progress)
