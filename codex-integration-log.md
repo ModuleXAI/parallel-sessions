@@ -29,12 +29,13 @@ Append-only progress log for the Codex CLI integration. Every PR's start, comple
 
 - **PR A.0 COMPLETED** — plan v1.0 + live log + research report committed to `research/codex-integration`.
   - Files committed: `codex-integration-plan.md`, `codex-integration-log.md`, `codex-integration-research.md`, `.gitignore` (codex-ref-repo entry).
-  - Test surface state at A.0 boundary (parent baseline, no code touched yet):
-    - bats unit: <pending verification — see task queue>.
-    - bats integration: <pending verification>.
-    - ship-gates: not run (gitignored fixtures, maintainer-only).
-    - invariant: <pending verification>.
-  - Merge commit: <to be filled in post-commit>.
+  - Merge commit: 5169106.
+
+- **Phase A pre-condition: test surface verified GREEN on `research/codex-integration` (parent baseline).**
+  - bats unit: PASS (645/645). First run had a flake at #631 (`pre_tool_use_any: hook latency under suspicion stays below 1000ms wall-clock`); the assertion itself passed (hook elapsed 119ms), but `teardown` raced the backgrounded watchdog probe and `rm -rf "$TMP"` failed with "Directory not empty". Re-run: 645/645 clean. Filed mentally as known teardown-race flake — not a regression.
+  - bats integration: PASS (48/48).
+  - ship-gates: not run (gitignored maintainer fixtures; will run as part of PR H.1 ship-gate).
+  - invariant: included in unit count (phase7_invariant.bats lives under src/tests/unit/).
 
 ---
 
