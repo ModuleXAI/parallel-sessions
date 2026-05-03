@@ -561,7 +561,7 @@ Append-only progress log for the Codex CLI integration. Every PR's start, comple
     - ship-gates: not run (deferred to PR H.1).
     - invariant: included in unit count.
   - Translator stub-marker grep on translator.sh: 0. C.3 done-when met.
-  - Merge commit: <to be filled after commit>.
+  - Merge commit: 4646fee.
 
 ---
 
