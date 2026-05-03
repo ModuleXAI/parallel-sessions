@@ -94,7 +94,7 @@ Append-only progress log for the Codex CLI integration. Every PR's start, comple
     - bats integration: PASS (48/48).
     - ship-gates: not run (gitignored maintainer fixtures; deferred to PR H.1).
     - invariant: included in unit count.
-  - Merge commit: <to be filled after commit>.
+  - Merge commit: 95d32a4 (29 renames preserved at 99-100% similarity by git).
 
 ---
 
