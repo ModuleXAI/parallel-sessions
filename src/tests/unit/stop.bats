@@ -8,9 +8,9 @@
 
 load "../helpers/common"
 
-H="$SRC_ROOT/hooks/stop.sh"
-HW="$SRC_ROOT/hooks/pre_tool_use_write.sh"
-H_END="$SRC_ROOT/hooks/session_end.sh"
+H="$SRC_ROOT/adapters/claude-code/hooks/stop.sh"
+HW="$SRC_ROOT/adapters/claude-code/hooks/pre_tool_use_write.sh"
+H_END="$SRC_ROOT/adapters/claude-code/hooks/session_end.sh"
 A="$SRC_ROOT/core/lib/atomic_write.sh"
 
 setup() {

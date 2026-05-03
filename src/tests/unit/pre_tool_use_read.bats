@@ -3,7 +3,7 @@
 
 load "../helpers/common"
 
-H="$SRC_ROOT/hooks/pre_tool_use_read.sh"
+H="$SRC_ROOT/adapters/claude-code/hooks/pre_tool_use_read.sh"
 
 setup() {
   TMP="$(mktemp -d -t coord-ptur-XXXX)"

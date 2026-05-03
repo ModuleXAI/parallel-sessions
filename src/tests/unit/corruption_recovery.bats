@@ -21,8 +21,8 @@ setup() {
   mk_empty_sessions "$COORD"
   export COORD_DIR="$COORD"
 
-  HSS="$SRC_ROOT/hooks/session_start.sh"
-  HANY="$SRC_ROOT/hooks/pre_tool_use_any.sh"
+  HSS="$SRC_ROOT/adapters/claude-code/hooks/session_start.sh"
+  HANY="$SRC_ROOT/adapters/claude-code/hooks/pre_tool_use_any.sh"
 
   SID="sid-corrupt-0001"
 

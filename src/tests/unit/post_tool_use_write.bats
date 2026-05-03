@@ -6,8 +6,8 @@
 
 load "../helpers/common"
 
-H="$SRC_ROOT/hooks/post_tool_use_write.sh"
-HW="$SRC_ROOT/hooks/pre_tool_use_write.sh"
+H="$SRC_ROOT/adapters/claude-code/hooks/post_tool_use_write.sh"
+HW="$SRC_ROOT/adapters/claude-code/hooks/pre_tool_use_write.sh"
 
 setup() {
   TMP="$(mktemp -d -t coord-postw-XXXX)"

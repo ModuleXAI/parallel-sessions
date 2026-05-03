@@ -14,8 +14,8 @@ load "../helpers/common"
 
 A="$SRC_ROOT/core/lib/atomic_write.sh"
 M="$SRC_ROOT/core/lib/mediator_pending.sh"
-H_ANY="$SRC_ROOT/hooks/pre_tool_use_any.sh"
-H_START="$SRC_ROOT/hooks/session_start.sh"
+H_ANY="$SRC_ROOT/adapters/claude-code/hooks/pre_tool_use_any.sh"
+H_START="$SRC_ROOT/adapters/claude-code/hooks/session_start.sh"
 
 setup() {
   TMP="$(mktemp -d -t coord-medp-XXXX)"

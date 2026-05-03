@@ -336,9 +336,9 @@ _write_read_set_entry() {
   # filter writes the latest_validator_verdict_ts field. Verifying
   # via grep over the production code (the full hook integration
   # is exercised in pre_tool_use_write_pipeline.bats).
-  grep -q 'latest_validator_verdict_ts' "$SRC_ROOT/hooks/pre_tool_use_write.sh"
+  grep -q 'latest_validator_verdict_ts' "$SRC_ROOT/adapters/claude-code/hooks/pre_tool_use_write.sh"
   # And the field is plumbed via TARGET_VERDICT_TS captured from the
   # pipeline's _COORD_PHASE4_LAST_VERDICT_TS output variable.
-  grep -q 'TARGET_VERDICT_TS=' "$SRC_ROOT/hooks/pre_tool_use_write.sh"
-  grep -q '_COORD_PHASE4_LAST_VERDICT_TS' "$SRC_ROOT/hooks/pre_tool_use_write.sh"
+  grep -q 'TARGET_VERDICT_TS=' "$SRC_ROOT/adapters/claude-code/hooks/pre_tool_use_write.sh"
+  grep -q '_COORD_PHASE4_LAST_VERDICT_TS' "$SRC_ROOT/adapters/claude-code/hooks/pre_tool_use_write.sh"
 }

@@ -96,6 +96,56 @@ Append-only progress log for the Codex CLI integration. Every PR's start, comple
     - invariant: included in unit count.
   - Merge commit: 95d32a4 (29 renames preserved at 99-100% similarity by git).
 
+- **PR A.2 STARTED** — relocate Claude Code hooks + Claude-specific subagent_filter.sh
+  out of `src/{hooks,core/lib}/` and under `src/adapters/claude-code/`.
+  - Pre-conditions: A.1 merged (95d32a4), unit/integration green on feat branch.
+  - Branch: `feat/codex-integration`.
+
+- **PR A.2 implementation findings (no plan amendment — within original scope of A.2):**
+  - **F-A2-01**: subagent_filter.sh's CLI shim sources `log_event.sh` from its own
+    directory (`$_SHIM_DIR/log_event.sh`). After A.2, log_event lives in core/lib
+    while subagent_filter lives in adapters/claude-code/lib — siblings broken.
+    Fix: shim uses dual-fallback (`../../../core/lib/log_event.sh` first, fall back
+    to sibling `log_event.sh` for the installed flat layout). Mirrors the hook
+    LIB_DIR pattern from D-A1-02.
+  - **F-A2-02**: `phase7_invariant.bats:49` defined `HOOKS_DIR="$SRC_ROOT/hooks"`
+    (variable assignment, no trailing slash) — same syntactic miss as A.1's
+    `LIB_DIR="$SRC_ROOT/lib"` flake. Single-line fix: point at
+    `$SRC_ROOT/adapters/claude-code/hooks`. Also added an unused
+    `ADAPTER_LIB_DIR` placeholder for future adapter-lib invariants.
+  - **F-A2-03**: install.sh now copies adapter libs alongside core libs
+    (`cp $SELF_DIR/adapters/claude-code/lib/*.sh $COORD_DIR/lib/`) so the runtime
+    `.coord/lib/` stays flat. install_register.bats:148 (which checks
+    `subagent_filter.sh` is at `.coord/lib/`) keeps passing without edit.
+  - Two intermittent suite-level flakes seen during iteration:
+    - watchdog #631 teardown race (same as Phase A baseline; isolated re-run clean).
+    - self_tasks #393 1-second-window idempotency. Isolated 3/3 PASS; suite 2/2 FAIL.
+      Test is timing-sensitive by design (`<= 1000ms` in jq filter) and A.2 touched
+      no file this test exercises. Filed as load-driven flake; revisit if it sticks.
+
+- **PR A.2 COMPLETED** — 9 file moves + 11 file edits.
+  - File moves (9):
+    - 8 hooks: `src/hooks/*.sh` → `src/adapters/claude-code/hooks/*.sh`.
+    - 1 lib: `src/core/lib/subagent_filter.sh` → `src/adapters/claude-code/lib/`.
+  - File edits (11):
+    - 8 hooks: LIB_DIR split into CORE_LIB_DIR (dual-fallback) + ADAPTER_LIB_DIR
+      (always `../lib`, the adapter-local dir in source / `.coord/lib/` installed).
+    - 1 adapter lib (subagent_filter.sh): CLI shim's log_event source path uses
+      dual-fallback (per F-A2-01).
+    - 1 install.sh: 1 new cp line for adapter libs; updated existing hook glob.
+    - 25 test files: 64 substitutions for `$SRC_ROOT/hooks/`, the heredoc-quoted
+      variant `"$SRC_ROOT"'/hooks/`, `$SRC_ROOT/core/lib/subagent_filter.sh`, and
+      `/work/src/hooks/` (linux_probe.sh).
+    - 1 phase7_invariant.bats: HOOKS_DIR variable update (per F-A2-02).
+  - Tests added: 0 (refactor PR; no behavior change).
+  - Test surface state at A.2 boundary:
+    - bats unit: 644/645 in suite (1 timing flake at #393, isolated 3×3 clean).
+      Confirmed not regressed by A.2.
+    - bats integration: PASS (48/48).
+    - ship-gates: not run (gitignored maintainer fixtures; deferred to PR H.1).
+    - invariant: included in unit count (#1..#19 all pass post-fix).
+  - Merge commit: <to be filled after commit>.
+
 ---
 
 ## Pending entries (will be filled in as PRs progress)

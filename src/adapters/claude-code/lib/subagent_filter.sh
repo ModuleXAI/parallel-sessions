@@ -94,8 +94,13 @@ if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
   set -euo pipefail
   _SHIM_HOOK="${1:-unknown}"
   _SHIM_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  # log_event.sh lives in core/lib/ at source-tree depth, but in the
+  # flat .coord/lib/ when installed. Dual-fallback locates it in
+  # either layout (mirrors hook LIB_DIR resolution post-A.2).
+  _SHIM_LOG_EVENT="$(cd "$_SHIM_DIR/../../../core/lib" 2>/dev/null && pwd)/log_event.sh"
+  [ -f "$_SHIM_LOG_EVENT" ] || _SHIM_LOG_EVENT="$_SHIM_DIR/log_event.sh"
   # shellcheck disable=SC1091
-  . "$_SHIM_DIR/log_event.sh"
+  . "$_SHIM_LOG_EVENT"
   _SHIM_JSON="$(cat)"
   if coord_subagent_filter "$_SHIM_HOOK" "$_SHIM_JSON"; then
     exit 0   # subagent → caller should skip

@@ -27,39 +27,44 @@
 set -euo pipefail
 
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LIB_DIR="$(cd "$HOOK_DIR/../core/lib" 2>/dev/null && pwd)" \
-  || LIB_DIR="$(cd "$HOOK_DIR/../lib" && pwd)"
+# A.2: hook libs split between core (most) and adapter (subagent_filter).
+# Source-tree: HOOK_DIR/../../../core/lib (3 levels up from
+# src/adapters/claude-code/hooks/) and HOOK_DIR/../lib for adapter libs.
+# Installed:   .coord/hooks/../lib (flat) — both vars resolve there.
+CORE_LIB_DIR="$(cd "$HOOK_DIR/../../../core/lib" 2>/dev/null && pwd)" \
+  || CORE_LIB_DIR="$(cd "$HOOK_DIR/../lib" && pwd)"
+ADAPTER_LIB_DIR="$(cd "$HOOK_DIR/../lib" && pwd)"
 # shellcheck disable=SC1091
-. "$LIB_DIR/atomic_write.sh"
+. "$CORE_LIB_DIR/atomic_write.sh"
 # shellcheck disable=SC1091
-. "$LIB_DIR/log_event.sh"
+. "$CORE_LIB_DIR/log_event.sh"
 # shellcheck disable=SC1091
-. "$LIB_DIR/subagent_filter.sh"
+. "$ADAPTER_LIB_DIR/subagent_filter.sh"
 # shellcheck disable=SC1091
-. "$LIB_DIR/participant.sh"
+. "$CORE_LIB_DIR/participant.sh"
 # shellcheck disable=SC1091
-. "$LIB_DIR/notify_waiters.sh"
+. "$CORE_LIB_DIR/notify_waiters.sh"
 # shellcheck disable=SC1091
-. "$LIB_DIR/lockdown.sh"
+. "$CORE_LIB_DIR/lockdown.sh"
 # shellcheck disable=SC1091
-[ -f "$LIB_DIR/task_processor.sh" ] && . "$LIB_DIR/task_processor.sh"
+[ -f "$CORE_LIB_DIR/task_processor.sh" ] && . "$CORE_LIB_DIR/task_processor.sh"
 # Phase 7 / T7.05 — mode-aware spawn dispatch + cost-guard
 # interlock activation for the task processor. Optional sources
 # (graceful degrade if absent).
-[ -f "$LIB_DIR/spawn_helper.sh" ] && . "$LIB_DIR/spawn_helper.sh"
-[ -f "$LIB_DIR/cost_guards.sh" ] && . "$LIB_DIR/cost_guards.sh"
+[ -f "$CORE_LIB_DIR/spawn_helper.sh" ] && . "$CORE_LIB_DIR/spawn_helper.sh"
+[ -f "$CORE_LIB_DIR/cost_guards.sh" ] && . "$CORE_LIB_DIR/cost_guards.sh"
 # T5.04 / PR-PHASE5-02 §5: notify_waiters' 4-tier diff_summary chain
 # uses validator_cache (tier 2), validator_prefilter + read_snapshots
 # (tier 3), and hash (tier 2/3 inputs). Source defensively — present
 # in Phase 4+ installs.
 # shellcheck disable=SC1091
-[ -f "$LIB_DIR/hash.sh" ] && . "$LIB_DIR/hash.sh"
+[ -f "$CORE_LIB_DIR/hash.sh" ] && . "$CORE_LIB_DIR/hash.sh"
 # shellcheck disable=SC1091
-[ -f "$LIB_DIR/validator_cache.sh" ] && . "$LIB_DIR/validator_cache.sh"
+[ -f "$CORE_LIB_DIR/validator_cache.sh" ] && . "$CORE_LIB_DIR/validator_cache.sh"
 # shellcheck disable=SC1091
-[ -f "$LIB_DIR/validator_prefilter.sh" ] && . "$LIB_DIR/validator_prefilter.sh"
+[ -f "$CORE_LIB_DIR/validator_prefilter.sh" ] && . "$CORE_LIB_DIR/validator_prefilter.sh"
 # shellcheck disable=SC1091
-[ -f "$LIB_DIR/read_snapshots.sh" ] && . "$LIB_DIR/read_snapshots.sh"
+[ -f "$CORE_LIB_DIR/read_snapshots.sh" ] && . "$CORE_LIB_DIR/read_snapshots.sh"
 
 coord_resolve_root() {
   if [ -n "${COORD_DIR:-}" ] && [ -d "$COORD_DIR" ]; then

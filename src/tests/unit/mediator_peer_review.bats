@@ -12,7 +12,7 @@
 
 load "../helpers/common"
 
-HANY="$SRC_ROOT/hooks/pre_tool_use_any.sh"
+HANY="$SRC_ROOT/adapters/claude-code/hooks/pre_tool_use_any.sh"
 LE="$SRC_ROOT/core/lib/log_event.sh"
 
 setup() {

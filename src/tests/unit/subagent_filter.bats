@@ -4,7 +4,7 @@
 
 load "../helpers/common"
 
-F="$SRC_ROOT/core/lib/subagent_filter.sh"
+F="$SRC_ROOT/adapters/claude-code/lib/subagent_filter.sh"
 
 setup() {
   TMP="$(mktemp -d -t coord-subfilter-XXXX)"

@@ -46,8 +46,9 @@
 
 load "../helpers/common"
 
-HOOKS_DIR="$SRC_ROOT/hooks"
+HOOKS_DIR="$SRC_ROOT/adapters/claude-code/hooks"
 LIB_DIR="$SRC_ROOT/core/lib"
+ADAPTER_LIB_DIR="$SRC_ROOT/adapters/claude-code/lib"
 BIN_DIR="$SRC_ROOT/bin"
 
 # === Architectural guards (8) — Phase 3+4+5+6 carry-forward ===

@@ -3,7 +3,7 @@
 
 load "../helpers/common"
 
-H="$SRC_ROOT/hooks/session_start.sh"
+H="$SRC_ROOT/adapters/claude-code/hooks/session_start.sh"
 
 setup() {
   TMP="$(mktemp -d -t coord-sessstart-XXXX)"

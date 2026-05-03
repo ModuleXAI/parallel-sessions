@@ -3,8 +3,8 @@
 
 load "../helpers/common"
 
-H_START="$SRC_ROOT/hooks/session_start.sh"
-H_END="$SRC_ROOT/hooks/session_end.sh"
+H_START="$SRC_ROOT/adapters/claude-code/hooks/session_start.sh"
+H_END="$SRC_ROOT/adapters/claude-code/hooks/session_end.sh"
 A="$SRC_ROOT/core/lib/atomic_write.sh"
 
 setup() {

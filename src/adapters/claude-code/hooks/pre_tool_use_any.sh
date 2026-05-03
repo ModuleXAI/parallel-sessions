@@ -26,34 +26,39 @@
 set -euo pipefail
 
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LIB_DIR="$(cd "$HOOK_DIR/../core/lib" 2>/dev/null && pwd)" \
-  || LIB_DIR="$(cd "$HOOK_DIR/../lib" && pwd)"
+# A.2: hook libs split between core (most) and adapter (subagent_filter).
+# Source-tree: HOOK_DIR/../../../core/lib (3 levels up from
+# src/adapters/claude-code/hooks/) and HOOK_DIR/../lib for adapter libs.
+# Installed:   .coord/hooks/../lib (flat) — both vars resolve there.
+CORE_LIB_DIR="$(cd "$HOOK_DIR/../../../core/lib" 2>/dev/null && pwd)" \
+  || CORE_LIB_DIR="$(cd "$HOOK_DIR/../lib" && pwd)"
+ADAPTER_LIB_DIR="$(cd "$HOOK_DIR/../lib" && pwd)"
 # shellcheck disable=SC1091
-. "$LIB_DIR/atomic_write.sh"
+. "$CORE_LIB_DIR/atomic_write.sh"
 # shellcheck disable=SC1091
-. "$LIB_DIR/log_event.sh"
+. "$CORE_LIB_DIR/log_event.sh"
 # shellcheck disable=SC1091
-. "$LIB_DIR/subagent_filter.sh"
+. "$ADAPTER_LIB_DIR/subagent_filter.sh"
 # shellcheck disable=SC1091
-. "$LIB_DIR/participant.sh"
+. "$CORE_LIB_DIR/participant.sh"
 # shellcheck disable=SC1091
-. "$LIB_DIR/head_tracking.sh"
+. "$CORE_LIB_DIR/head_tracking.sh"
 # shellcheck disable=SC1091
-. "$LIB_DIR/lockdown.sh"
+. "$CORE_LIB_DIR/lockdown.sh"
 # shellcheck disable=SC1091
-. "$LIB_DIR/watchdog_cache.sh"
+. "$CORE_LIB_DIR/watchdog_cache.sh"
 # shellcheck disable=SC1091
-. "$LIB_DIR/mediator_pending.sh"
+. "$CORE_LIB_DIR/mediator_pending.sh"
 # shellcheck disable=SC1091
-. "$LIB_DIR/watchdog.sh"
+. "$CORE_LIB_DIR/watchdog.sh"
 # shellcheck disable=SC1091
-. "$LIB_DIR/critical_check.sh"
+. "$CORE_LIB_DIR/critical_check.sh"
 # shellcheck disable=SC1091
-. "$LIB_DIR/verdict_apply.sh"
+. "$CORE_LIB_DIR/verdict_apply.sh"
 # shellcheck disable=SC1091
-. "$LIB_DIR/mediator_spawn.sh"
+. "$CORE_LIB_DIR/mediator_spawn.sh"
 # shellcheck disable=SC1091
-[ -f "$LIB_DIR/self_tasks.sh" ] && . "$LIB_DIR/self_tasks.sh"
+[ -f "$CORE_LIB_DIR/self_tasks.sh" ] && . "$CORE_LIB_DIR/self_tasks.sh"
 
 coord_resolve_root() {
   if [ -n "${COORD_DIR:-}" ] && [ -d "$COORD_DIR" ]; then

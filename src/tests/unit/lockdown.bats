@@ -186,7 +186,7 @@ _pre_read_input() {
   local target="$TMP/foo.txt"
   printf 'content\n' >"$target"
   CLAUDE_COORD=1 run bash -c 'printf "%s" "$1" | "$2"' \
-    _ "$(_pre_read_input "$target")" "$SRC_ROOT/hooks/pre_tool_use_read.sh"
+    _ "$(_pre_read_input "$target")" "$SRC_ROOT/adapters/claude-code/hooks/pre_tool_use_read.sh"
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null
   # Read NOT recorded into read_sets
@@ -200,7 +200,7 @@ _pre_read_input() {
   printf 'content\n' >"$target"
   local input='{"session_id":"'"$SID"'","cwd":"'"$TMP"'","hook_event_name":"PreToolUse","tool_name":"Write","tool_input":{"file_path":"'"$target"'"}}'
   CLAUDE_COORD=1 run bash -c 'printf "%s" "$1" | "$2"' \
-    _ "$input" "$SRC_ROOT/hooks/pre_tool_use_write.sh"
+    _ "$input" "$SRC_ROOT/adapters/claude-code/hooks/pre_tool_use_write.sh"
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null
   # Lock NOT acquired
@@ -220,7 +220,7 @@ _pre_read_input() {
   mv "$COORD_DIR/sessions.json.new" "$COORD_DIR/sessions.json"
   local input='{"session_id":"'"$SID"'","cwd":"'"$TMP"'","hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"ls"}}'
   CLAUDE_COORD=1 run bash -c 'printf "%s" "$1" | "$2"' \
-    _ "$input" "$SRC_ROOT/hooks/pre_tool_use_any.sh"
+    _ "$input" "$SRC_ROOT/adapters/claude-code/hooks/pre_tool_use_any.sh"
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null
   # Notification still present (NOT consumed)
@@ -233,13 +233,13 @@ _pre_read_input() {
   local target="$TMP/foo.txt"
   printf 'content\n' >"$target"
   local pre='{"session_id":"'"$SID"'","cwd":"'"$TMP"'","hook_event_name":"PreToolUse","tool_name":"Write","tool_input":{"file_path":"'"$target"'"}}'
-  CLAUDE_COORD=1 bash -c 'printf "%s" "$1" | "$2"' _ "$pre" "$SRC_ROOT/hooks/pre_tool_use_write.sh" >/dev/null
+  CLAUDE_COORD=1 bash -c 'printf "%s" "$1" | "$2"' _ "$pre" "$SRC_ROOT/adapters/claude-code/hooks/pre_tool_use_write.sh" >/dev/null
   run jq -r --arg f "$target" '.locks[$f].session // ""' "$COORD_DIR/sessions.json"
   [ "$output" = "$SID" ]   # lock acquired
   # Now activate lockdown and run post-hook.
   _activate_lockdown "system pause" "mediator_verdict"
   local post='{"session_id":"'"$SID"'","cwd":"'"$TMP"'","hook_event_name":"PostToolUse","tool_name":"Write","tool_input":{"file_path":"'"$target"'"}}'
-  CLAUDE_COORD=1 run bash -c 'printf "%s" "$1" | "$2"' _ "$post" "$SRC_ROOT/hooks/post_tool_use_write.sh"
+  CLAUDE_COORD=1 run bash -c 'printf "%s" "$1" | "$2"' _ "$post" "$SRC_ROOT/adapters/claude-code/hooks/post_tool_use_write.sh"
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null
   # Lock NOT released
@@ -254,7 +254,7 @@ _pre_read_input() {
   mv "$COORD_DIR/sessions.json.new" "$COORD_DIR/sessions.json"
   _activate_lockdown "system pause" "mediator_verdict"
   local input='{"session_id":"'"$SID"'","cwd":"'"$TMP"'","hook_event_name":"SessionStart","source":"startup"}'
-  CLAUDE_COORD=1 run bash -c 'printf "%s" "$1" | "$2"' _ "$input" "$SRC_ROOT/hooks/session_start.sh"
+  CLAUDE_COORD=1 run bash -c 'printf "%s" "$1" | "$2"' _ "$input" "$SRC_ROOT/adapters/claude-code/hooks/session_start.sh"
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null
   # Session NOT registered
@@ -269,12 +269,12 @@ _pre_read_input() {
   local target="$TMP/foo.txt"
   printf 'content\n' >"$target"
   local pre='{"session_id":"'"$SID"'","cwd":"'"$TMP"'","hook_event_name":"PreToolUse","tool_name":"Write","tool_input":{"file_path":"'"$target"'"}}'
-  CLAUDE_COORD=1 bash -c 'printf "%s" "$1" | "$2"' _ "$pre" "$SRC_ROOT/hooks/pre_tool_use_write.sh" >/dev/null
+  CLAUDE_COORD=1 bash -c 'printf "%s" "$1" | "$2"' _ "$pre" "$SRC_ROOT/adapters/claude-code/hooks/pre_tool_use_write.sh" >/dev/null
   run jq -r --arg f "$target" '.locks[$f].session // ""' "$COORD_DIR/sessions.json"
   [ "$output" = "$SID" ]
   _activate_lockdown "system pause" "mediator_verdict"
   local input='{"session_id":"'"$SID"'","hook_event_name":"SessionEnd","reason":"exit"}'
-  CLAUDE_COORD=1 run bash -c 'printf "%s" "$1" | "$2"' _ "$input" "$SRC_ROOT/hooks/session_end.sh"
+  CLAUDE_COORD=1 run bash -c 'printf "%s" "$1" | "$2"' _ "$input" "$SRC_ROOT/adapters/claude-code/hooks/session_end.sh"
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null
   # Lock NOT released
@@ -287,10 +287,10 @@ _pre_read_input() {
   local target="$TMP/foo.txt"
   printf 'content\n' >"$target"
   local pre='{"session_id":"'"$SID"'","cwd":"'"$TMP"'","hook_event_name":"PreToolUse","tool_name":"Write","tool_input":{"file_path":"'"$target"'"}}'
-  CLAUDE_COORD=1 bash -c 'printf "%s" "$1" | "$2"' _ "$pre" "$SRC_ROOT/hooks/pre_tool_use_write.sh" >/dev/null
+  CLAUDE_COORD=1 bash -c 'printf "%s" "$1" | "$2"' _ "$pre" "$SRC_ROOT/adapters/claude-code/hooks/pre_tool_use_write.sh" >/dev/null
   _activate_lockdown "system pause" "mediator_verdict"
   local input='{"session_id":"'"$SID"'","hook_event_name":"Stop"}'
-  CLAUDE_COORD=1 run bash -c 'printf "%s" "$1" | "$2"' _ "$input" "$SRC_ROOT/hooks/stop.sh"
+  CLAUDE_COORD=1 run bash -c 'printf "%s" "$1" | "$2"' _ "$input" "$SRC_ROOT/adapters/claude-code/hooks/stop.sh"
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null
   run jq -r --arg f "$target" '.locks[$f].session // "ABSENT"' "$COORD_DIR/sessions.json"
@@ -300,7 +300,7 @@ _pre_read_input() {
 @test "hook gate: user_prompt_submit.sh under active lockdown → emits deny + skips prompt capture" {
   _activate_lockdown "system pause" "mediator_verdict"
   local input='{"session_id":"'"$SID"'","cwd":"'"$TMP"'","hook_event_name":"UserPromptSubmit","prompt":"hello"}'
-  CLAUDE_COORD=1 run bash -c 'printf "%s" "$1" | "$2"' _ "$input" "$SRC_ROOT/hooks/user_prompt_submit.sh"
+  CLAUDE_COORD=1 run bash -c 'printf "%s" "$1" | "$2"' _ "$input" "$SRC_ROOT/adapters/claude-code/hooks/user_prompt_submit.sh"
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null
   # prompt_id NOT updated (still null)
@@ -338,7 +338,7 @@ _pre_read_input() {
   local target="$TMP/foo.txt"
   printf 'content\n' >"$target"
   local input='{"session_id":"'"$SID"'","cwd":"'"$TMP"'","hook_event_name":"PreToolUse","tool_name":"Write","tool_input":{"file_path":"'"$target"'"}}'
-  CLAUDE_COORD=1 run bash -c 'printf "%s" "$1" | "$2" 2>/dev/null' _ "$input" "$SRC_ROOT/hooks/pre_tool_use_write.sh"
+  CLAUDE_COORD=1 run bash -c 'printf "%s" "$1" | "$2" 2>/dev/null' _ "$input" "$SRC_ROOT/adapters/claude-code/hooks/pre_tool_use_write.sh"
   [ "$status" -eq 0 ]
   # No deny in output (lockdown parse failed → fall through → normal lock acquire)
   case "$output" in *permissionDecision*) echo "FAIL: deny emitted on malformed lockdown.json: $output"; return 1 ;; esac

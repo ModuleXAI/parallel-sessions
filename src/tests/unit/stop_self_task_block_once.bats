@@ -12,7 +12,7 @@
 
 load "../helpers/common"
 
-H="$SRC_ROOT/hooks/stop.sh"
+H="$SRC_ROOT/adapters/claude-code/hooks/stop.sh"
 
 setup() {
   TMP="$(mktemp -d -t coord-stop-st-XXXX)"

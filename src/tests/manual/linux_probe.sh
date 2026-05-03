@@ -154,13 +154,13 @@ mv "$LX_TMP/.coord/sessions.json.new" "$LX_TMP/.coord/sessions.json"
 LX_F="$LX_TMP/foo.ts"; printf 'foo\n' >"$LX_F"
 export COORD_DIR="$LX_TMP/.coord" CLAUDE_COORD=1
 printf '%s' '{"session_id":"'"$A_SID"'","cwd":"'"$LX_TMP"'","hook_event_name":"PreToolUse","tool_name":"Edit","tool_input":{"file_path":"'"$LX_F"'"}}' \
-  | /work/src/hooks/pre_tool_use_write.sh >/dev/null
+  | /work/src/adapters/claude-code/hooks/pre_tool_use_write.sh >/dev/null
 sleep 1
 DENY_OUT=$(printf '%s' '{"session_id":"'"$B_SID"'","cwd":"'"$LX_TMP"'","hook_event_name":"PreToolUse","tool_name":"Edit","tool_input":{"file_path":"'"$LX_F"'"}}' \
-  | /work/src/hooks/pre_tool_use_write.sh 2>/dev/null)
+  | /work/src/adapters/claude-code/hooks/pre_tool_use_write.sh 2>/dev/null)
 echo "deny stdout (truncated):"; echo "$DENY_OUT" | head -c 200; echo "..."
 printf '%s' '{"session_id":"'"$A_SID"'","cwd":"'"$LX_TMP"'","hook_event_name":"PostToolUse","tool_name":"Edit","tool_input":{"file_path":"'"$LX_F"'"}}' \
-  | /work/src/hooks/post_tool_use_write.sh >/dev/null
+  | /work/src/adapters/claude-code/hooks/post_tool_use_write.sh >/dev/null
 sleep 0.4
 echo "Phase 2 events (kind counts):"
 jq -rs '

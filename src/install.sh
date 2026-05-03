@@ -198,8 +198,14 @@ materialize_coord() {
            "$COORD_DIR/bin" \
            "$COORD_DIR/agents"
   # Copy source artefacts.
+  # Core libs: shared across all agent adapters.
   cp -f "$SELF_DIR"/core/lib/*.sh    "$COORD_DIR/lib/"
-  cp -f "$SELF_DIR"/hooks/*.sh  "$COORD_DIR/hooks/"
+  # Adapter-specific libs (Claude Code): subagent_filter.sh etc. The runtime
+  # layout flattens core + adapter libs into .coord/lib/; hooks resolve a
+  # single dir at runtime via dual-fallback LIB_DIR resolution.
+  cp -f "$SELF_DIR"/adapters/claude-code/lib/*.sh "$COORD_DIR/lib/"
+  # Claude Code hooks (the ones registered in .claude/settings.local.json).
+  cp -f "$SELF_DIR"/adapters/claude-code/hooks/*.sh  "$COORD_DIR/hooks/"
   if [ -d "$SELF_DIR/agents" ]; then
     # Agents may not exist yet in Phase 0; copy only .md files if present.
     if ls "$SELF_DIR/agents"/*.md >/dev/null 2>&1; then

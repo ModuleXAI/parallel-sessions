@@ -9,7 +9,7 @@
 
 load "../helpers/common"
 
-H="$SRC_ROOT/hooks/pre_tool_use_any.sh"
+H="$SRC_ROOT/adapters/claude-code/hooks/pre_tool_use_any.sh"
 
 setup() {
   TMP="$(mktemp -d -t coord-stk-rem-XXXX)"

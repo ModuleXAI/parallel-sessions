@@ -26,29 +26,34 @@
 set -euo pipefail
 
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LIB_DIR="$(cd "$HOOK_DIR/../core/lib" 2>/dev/null && pwd)" \
-  || LIB_DIR="$(cd "$HOOK_DIR/../lib" && pwd)"
+# A.2: hook libs split between core (most) and adapter (subagent_filter).
+# Source-tree: HOOK_DIR/../../../core/lib (3 levels up from
+# src/adapters/claude-code/hooks/) and HOOK_DIR/../lib for adapter libs.
+# Installed:   .coord/hooks/../lib (flat) — both vars resolve there.
+CORE_LIB_DIR="$(cd "$HOOK_DIR/../../../core/lib" 2>/dev/null && pwd)" \
+  || CORE_LIB_DIR="$(cd "$HOOK_DIR/../lib" && pwd)"
+ADAPTER_LIB_DIR="$(cd "$HOOK_DIR/../lib" && pwd)"
 # shellcheck disable=SC1091
-. "$LIB_DIR/atomic_write.sh"
+. "$CORE_LIB_DIR/atomic_write.sh"
 # shellcheck disable=SC1091
-. "$LIB_DIR/log_event.sh"
+. "$CORE_LIB_DIR/log_event.sh"
 # shellcheck disable=SC1091
-. "$LIB_DIR/subagent_filter.sh"
+. "$ADAPTER_LIB_DIR/subagent_filter.sh"
 # shellcheck disable=SC1091
-. "$LIB_DIR/notify_waiters.sh"
+. "$CORE_LIB_DIR/notify_waiters.sh"
 # T5.04 / PR-PHASE5-02 §5: notify_waiters' 4-tier diff_summary chain.
 # shellcheck disable=SC1091
-[ -f "$LIB_DIR/hash.sh" ] && . "$LIB_DIR/hash.sh"
+[ -f "$CORE_LIB_DIR/hash.sh" ] && . "$CORE_LIB_DIR/hash.sh"
 # shellcheck disable=SC1091
-[ -f "$LIB_DIR/validator_cache.sh" ] && . "$LIB_DIR/validator_cache.sh"
+[ -f "$CORE_LIB_DIR/validator_cache.sh" ] && . "$CORE_LIB_DIR/validator_cache.sh"
 # shellcheck disable=SC1091
-[ -f "$LIB_DIR/validator_prefilter.sh" ] && . "$LIB_DIR/validator_prefilter.sh"
+[ -f "$CORE_LIB_DIR/validator_prefilter.sh" ] && . "$CORE_LIB_DIR/validator_prefilter.sh"
 # shellcheck disable=SC1091
-[ -f "$LIB_DIR/read_snapshots.sh" ] && . "$LIB_DIR/read_snapshots.sh"
+[ -f "$CORE_LIB_DIR/read_snapshots.sh" ] && . "$CORE_LIB_DIR/read_snapshots.sh"
 # shellcheck disable=SC1091
-. "$LIB_DIR/lockdown.sh"
+. "$CORE_LIB_DIR/lockdown.sh"
 # shellcheck disable=SC1091
-. "$LIB_DIR/read_snapshots.sh"
+. "$CORE_LIB_DIR/read_snapshots.sh"
 
 coord_resolve_root() {
   if [ -n "${COORD_DIR:-}" ] && [ -d "$COORD_DIR" ]; then

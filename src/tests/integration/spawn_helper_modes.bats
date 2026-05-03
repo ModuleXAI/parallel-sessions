@@ -80,23 +80,23 @@ teardown() {
 @test "pre_tool_use_write.sh sources spawn_helper.sh + cost_guards.sh defensively" {
   # Static check: T7.05 wired the sourcing in. Regression guard
   # against future edits that drop these lines.
-  grep -q 'spawn_helper.sh' "$SRC_ROOT/hooks/pre_tool_use_write.sh"
-  grep -q 'cost_guards.sh' "$SRC_ROOT/hooks/pre_tool_use_write.sh"
+  grep -q 'spawn_helper.sh' "$SRC_ROOT/adapters/claude-code/hooks/pre_tool_use_write.sh"
+  grep -q 'cost_guards.sh' "$SRC_ROOT/adapters/claude-code/hooks/pre_tool_use_write.sh"
 }
 
 @test "post_tool_use_write.sh sources spawn_helper.sh + cost_guards.sh defensively" {
-  grep -q 'spawn_helper.sh' "$SRC_ROOT/hooks/post_tool_use_write.sh"
-  grep -q 'cost_guards.sh' "$SRC_ROOT/hooks/post_tool_use_write.sh"
+  grep -q 'spawn_helper.sh' "$SRC_ROOT/adapters/claude-code/hooks/post_tool_use_write.sh"
+  grep -q 'cost_guards.sh' "$SRC_ROOT/adapters/claude-code/hooks/post_tool_use_write.sh"
 }
 
 @test "spawn_helper.sh + cost_guards.sh sources are guarded with [ -f ] (graceful degrade)" {
   # Defensive sourcing pattern: `[ -f "$LIB_DIR/<name>.sh" ] && . ...`
   # ensures hooks don't break on a coord installation that
   # predates Phase 7. Per CLAUDE.md §A.5 fail-open posture.
-  grep -q '\[ -f .*spawn_helper\.sh.* \] && \.' "$SRC_ROOT/hooks/pre_tool_use_write.sh"
-  grep -q '\[ -f .*cost_guards\.sh.* \] && \.' "$SRC_ROOT/hooks/pre_tool_use_write.sh"
-  grep -q '\[ -f .*spawn_helper\.sh.* \] && \.' "$SRC_ROOT/hooks/post_tool_use_write.sh"
-  grep -q '\[ -f .*cost_guards\.sh.* \] && \.' "$SRC_ROOT/hooks/post_tool_use_write.sh"
+  grep -q '\[ -f .*spawn_helper\.sh.* \] && \.' "$SRC_ROOT/adapters/claude-code/hooks/pre_tool_use_write.sh"
+  grep -q '\[ -f .*cost_guards\.sh.* \] && \.' "$SRC_ROOT/adapters/claude-code/hooks/pre_tool_use_write.sh"
+  grep -q '\[ -f .*spawn_helper\.sh.* \] && \.' "$SRC_ROOT/adapters/claude-code/hooks/post_tool_use_write.sh"
+  grep -q '\[ -f .*cost_guards\.sh.* \] && \.' "$SRC_ROOT/adapters/claude-code/hooks/post_tool_use_write.sh"
 }
 
 # -----------------------------------------------------------------
@@ -112,7 +112,7 @@ teardown() {
   # block fires regardless of pipeline outcome since hooks always
   # source spawn_helper.sh.
   local input='{"session_id":"'"$SESSION_ID"'","cwd":"'"$TMP"'","hook_event_name":"PreToolUse","tool_name":"Edit","tool_input":{"file_path":"'"$TARGET"'"}}'
-  run env CLAUDE_COORD=1 COORD_TEST_MODE=semi bash -c "printf '%s' '$input' | '$SRC_ROOT/hooks/pre_tool_use_write.sh'"
+  run env CLAUDE_COORD=1 COORD_TEST_MODE=semi bash -c "printf '%s' '$input' | '$SRC_ROOT/adapters/claude-code/hooks/pre_tool_use_write.sh'"
   [ "$status" -eq 0 ]
   sleep 0.3  # let backgrounded log_event flush
 
