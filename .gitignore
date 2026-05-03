@@ -84,3 +84,7 @@ node_modules/
 Thumbs.db
 *.swp
 *.swo
+
+# Upstream Codex CLI checkout — kept locally as reference for the
+# codex-integration work; not part of the ship surface. ~470M.
+codex-ref-repo/
