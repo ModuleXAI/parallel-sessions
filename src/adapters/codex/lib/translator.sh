@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # translator.sh — Codex CLI adapter contract for the coord core.
 #
-# Phase C PR C.1: SKELETON ONLY. Every function below is stubbed —
-# either returns rc=1 silently, or returns a placeholder. C.3 fills in
-# the real logic; C.2 supplies the apply_patch_parser.sh that several
-# of these functions will call into.
+# Phase C PR C.3 (skeleton landed in C.1). Every function is now filled
+# in. The internal _coord_cx_stub helper that carried the C.1 done-when
+# marker has been removed; the test at translator.bats verifies its
+# absence.
 #
 # This file is the symmetric counterpart to whatever Claude-Code uses
 # inline today. Every adapter exposes the same set of `coord_<agent>_*`
@@ -15,117 +15,225 @@
 # Style: bash 3.2 compatible, jq-friendly. No `set -euo pipefail`
 # (sourced; caller governs).
 #
-# Forward declarations (filled in C.3 unless noted):
+# Codex stdin JSON shape per hook event (verified against
+# codex-ref-repo/codex/codex-rs/hooks/schema/generated/*.schema.json):
+#   common to all:    session_id, cwd, transcript_path, model, permission_mode, hook_event_name
+#   all but SessionStart: turn_id
+#   SessionStart only:    source ∈ {startup, resume, clear}
+#   PreToolUse/PostToolUse: tool_name, tool_input, tool_use_id (Pre/Post)
+#   PostToolUse only:     tool_response
+#   PermissionRequest:    tool_name, tool_input, run_id_suffix
+#   UserPromptSubmit:     prompt
+#   Stop:                 stop_hook_active, last_assistant_message
 #
-#   coord_cx_translate_event <hook_event_name> <tool_name>
-#       Map a Codex hook event + tool pair to a COORD_EVENT_* constant
-#       from normalized_events.sh. Stdout: the constant value
-#       (e.g., "PRE_FILE_WRITE"). Returns 0 on known mappings, 1 on
-#       unknown. C.3 fills mappings; C.1 returns 1.
-#
-#   coord_cx_extract_session_id <input_json>
-#   coord_cx_extract_cwd <input_json>
-#   coord_cx_extract_source <input_json>
-#   coord_cx_extract_prompt <input_json>
-#   coord_cx_extract_tool_name <input_json>
-#   coord_cx_extract_tool_input <input_json>
-#   coord_cx_extract_tool_use_id <input_json>
-#   coord_cx_extract_turn_id <input_json>
-#   coord_cx_extract_permission_mode <input_json>
-#       Pull a single field out of Codex's hook stdin JSON. Each
-#       returns the field value on stdout (empty string when absent),
-#       and exit code 0 when the input parses as JSON, 1 otherwise.
-#       C.3 fills jq filters; C.1 returns rc=1 with empty stdout.
-#
-#   coord_cx_extract_subagent <input_json>
-#       Per D-2: Codex has no subagent concept. This function ALWAYS
-#       returns rc=1 — no implementation will ever change that. The
-#       subagent_filter pattern is Claude-Code-specific and lives at
-#       src/adapters/claude-code/lib/subagent_filter.sh; Codex hooks
-#       simply skip the call.
-#
-#   coord_cx_emit_deny <reason> <hook_event_name>
-#   coord_cx_emit_additional_context <text> <hook_event_name>
-#   coord_cx_emit_permission_request_decision <allow|deny> [<message>]
-#       Build the JSON response shape Codex expects on stdout for the
-#       given hook event. Per D-9, deny + additional_context use
-#       `hookSpecificOutput.permissionDecision` / `additionalContext`
-#       (same envelope as Claude); permission_request uses
-#       `hookSpecificOutput.decision.behavior` (Codex-specific).
-#       C.3 fills jq templates; C.1 returns rc=1.
-#
-# Future-callers see a coherent contract even though every function
-# currently no-ops. The skeleton is what lets PR-D hooks compile-check
-# their call sites without waiting for C.3.
+# Codex stdout response envelope (Pre/Post/PermissionRequest):
+#   { "hookSpecificOutput": { "hookEventName": "<event>", ... } }
+# Specific shapes per emitter function; see below.
 
-# --- Stub helper used by every skeleton function ---
-# Returns rc=1 with no stdout. Marker comment so grep can find every
-# stub when C.3 fills them in.
-_coord_cx_stub() {
-  return 1   # PR-C.1 skeleton stub
-}
+# Source normalized_events.sh so COORD_EVENT_* constants are in scope.
+# Resolve relative to this file's location, not LIB_DIR (which the calling
+# hook owns and may have a different home).
+_CX_TRANSLATOR_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Source normalized_events from the core lib. Dual-fallback mirrors the
+# hook LIB_DIR pattern (per A.5 D-A1-02): in source tree, normalized_events
+# lives at ../../../core/lib; in installed flat layout at ../../lib.
+if [ -f "$_CX_TRANSLATOR_DIR/../../../core/lib/normalized_events.sh" ]; then
+  # shellcheck disable=SC1091
+  . "$_CX_TRANSLATOR_DIR/../../../core/lib/normalized_events.sh"
+elif [ -f "$_CX_TRANSLATOR_DIR/../../lib/normalized_events.sh" ]; then
+  # shellcheck disable=SC1091
+  . "$_CX_TRANSLATOR_DIR/../../lib/normalized_events.sh"
+fi
+# Defensive defaults for tests that skip sourcing the constants file.
+: "${COORD_EVENT_SESSION_START:=SESSION_START}"
+: "${COORD_EVENT_SESSION_END:=SESSION_END}"
+: "${COORD_EVENT_STOP:=STOP}"
+: "${COORD_EVENT_PROMPT_SUBMIT:=PROMPT_SUBMIT}"
+: "${COORD_EVENT_PRE_TOOL_ANY:=PRE_TOOL_ANY}"
+: "${COORD_EVENT_PRE_FILE_READ:=PRE_FILE_READ}"
+: "${COORD_EVENT_PRE_FILE_WRITE:=PRE_FILE_WRITE}"
+: "${COORD_EVENT_POST_FILE_WRITE:=POST_FILE_WRITE}"
+: "${COORD_EVENT_PRE_BASH:=PRE_BASH}"
+: "${COORD_EVENT_POST_BASH:=POST_BASH}"
+: "${COORD_EVENT_PERMISSION_REQUEST:=PERMISSION_REQUEST}"
+: "${COORD_EVENT_UNKNOWN:=UNKNOWN}"
 
 # === Event translation ===
 
+# coord_cx_translate_event <hook_event_name> <tool_name>
+# Map a Codex hook event + tool pair to a COORD_EVENT_* constant.
+# Returns 0 with constant on stdout for known mappings, 1 for unknown.
 coord_cx_translate_event() {
-  _coord_cx_stub
+  local event="${1:-}" tool="${2:-}"
+  case "$event" in
+    SessionStart)      printf '%s\n' "$COORD_EVENT_SESSION_START"; return 0 ;;
+    Stop)              printf '%s\n' "$COORD_EVENT_STOP"; return 0 ;;
+    UserPromptSubmit)  printf '%s\n' "$COORD_EVENT_PROMPT_SUBMIT"; return 0 ;;
+    PermissionRequest) printf '%s\n' "$COORD_EVENT_PERMISSION_REQUEST"; return 0 ;;
+    PreToolUse)
+      case "$tool" in
+        apply_patch)   printf '%s\n' "$COORD_EVENT_PRE_FILE_WRITE"; return 0 ;;
+        Bash|bash)     printf '%s\n' "$COORD_EVENT_PRE_BASH"; return 0 ;;
+        ""|"*")        printf '%s\n' "$COORD_EVENT_PRE_TOOL_ANY"; return 0 ;;
+        *)             printf '%s\n' "$COORD_EVENT_PRE_TOOL_ANY"; return 0 ;;
+      esac
+      ;;
+    PostToolUse)
+      case "$tool" in
+        apply_patch)   printf '%s\n' "$COORD_EVENT_POST_FILE_WRITE"; return 0 ;;
+        Bash|bash)     printf '%s\n' "$COORD_EVENT_POST_BASH"; return 0 ;;
+        *)             printf '%s\n' "$COORD_EVENT_UNKNOWN"; return 0 ;;
+      esac
+      ;;
+    *) return 1 ;;
+  esac
 }
 
 # === Field extractors (Codex stdin JSON) ===
 
-coord_cx_extract_session_id() {
-  _coord_cx_stub
+# Each helper validates the input parses as JSON, then runs a jq filter.
+# Returns 0 + extracted value on stdout, 1 on JSON parse error / unset
+# COORD-side prerequisites. Empty value is reported as empty stdout (rc 0).
+
+_coord_cx_jq_field() {
+  local input="${1:-}" filter="$2"
+  if [ -z "$input" ]; then return 1; fi
+  printf '%s' "$input" | jq -r "$filter" 2>/dev/null || return 1
 }
 
-coord_cx_extract_cwd() {
-  _coord_cx_stub
-}
+coord_cx_extract_session_id()    { _coord_cx_jq_field "${1:-}" '.session_id // ""'; }
+coord_cx_extract_cwd()           { _coord_cx_jq_field "${1:-}" '.cwd // ""'; }
+coord_cx_extract_source()        { _coord_cx_jq_field "${1:-}" '.source // ""'; }
+coord_cx_extract_prompt()        { _coord_cx_jq_field "${1:-}" '.prompt // ""'; }
+coord_cx_extract_tool_name()     { _coord_cx_jq_field "${1:-}" '.tool_name // ""'; }
 
-coord_cx_extract_source() {
-  _coord_cx_stub
-}
-
-coord_cx_extract_prompt() {
-  _coord_cx_stub
-}
-
-coord_cx_extract_tool_name() {
-  _coord_cx_stub
-}
-
+# tool_input is a structured value, not a string — emit compact JSON.
 coord_cx_extract_tool_input() {
-  _coord_cx_stub
+  local input="${1:-}"
+  if [ -z "$input" ]; then return 1; fi
+  printf '%s' "$input" | jq -c '.tool_input // null' 2>/dev/null || return 1
 }
 
-coord_cx_extract_tool_use_id() {
-  _coord_cx_stub
-}
+coord_cx_extract_tool_use_id()   { _coord_cx_jq_field "${1:-}" '.tool_use_id // ""'; }
+coord_cx_extract_turn_id()       { _coord_cx_jq_field "${1:-}" '.turn_id // ""'; }
+coord_cx_extract_permission_mode() { _coord_cx_jq_field "${1:-}" '.permission_mode // ""'; }
 
-coord_cx_extract_turn_id() {
-  _coord_cx_stub
-}
-
-coord_cx_extract_permission_mode() {
-  _coord_cx_stub
-}
-
-# Per D-2: Codex has no subagent concept. This stub will REMAIN a
-# permanent rc=1; no later PR replaces it. Documented here so future
-# readers don't think the skeleton was forgotten.
+# Per D-2: Codex has no subagent concept. PERMANENT rc=1; this stub is
+# deliberately not implemented and never will be. Hooks that try to filter
+# subagent calls should source subagent_filter.sh under the Claude adapter
+# instead, or simply not call this function from Codex hooks.
 coord_cx_extract_subagent() {
-  return 1   # PERMANENT — no subagent in Codex (D-2)
+  return 1
+}
+
+# === apply_patch path extraction ===
+
+# coord_cx_extract_file_paths <input_json>
+# For PreToolUse/PostToolUse with tool_name="apply_patch", parse the patch
+# text out of tool_input.command (or tool_input.input) and return the file
+# paths via the parser. For other tools, return empty (rc 0).
+#
+# tool_input.command shape (from Codex apply_patch invocations):
+#   ["apply_patch", "<patch text>"]  OR  ["bash","-lc","apply_patch <<EOF\n...\nEOF"]
+# Codex's lenient parser handles both via _coord_cx_strip_heredoc; we just
+# need the patch text itself.
+coord_cx_extract_file_paths() {
+  local input="${1:-}"
+  if [ -z "$input" ]; then return 1; fi
+  local tool patch
+  tool=$(coord_cx_extract_tool_name "$input") || return 1
+  if [ "$tool" != "apply_patch" ]; then
+    # Non-apply_patch tool — no file paths to extract.
+    return 0
+  fi
+  # tool_input.input is the canonical field for apply_patch
+  # (Codex Responses API). Fall back to .command[1] for the
+  # legacy local_shell shape, then .command[-1] (last array element)
+  # in case of bash -lc wrapping.
+  patch=$(printf '%s' "$input" | jq -r '
+    .tool_input
+    | (.input // .command[-1] // "")
+  ' 2>/dev/null) || return 1
+  if [ -z "$patch" ]; then return 0; fi
+  # Source parser if not already loaded (lazy — translator doesn't
+  # auto-source; hooks would, but the test surface may call us
+  # standalone).
+  if ! command -v coord_cx_apply_patch_paths >/dev/null 2>&1; then
+    if [ -f "$_CX_TRANSLATOR_DIR/apply_patch_parser.sh" ]; then
+      # shellcheck disable=SC1091
+      . "$_CX_TRANSLATOR_DIR/apply_patch_parser.sh"
+    fi
+  fi
+  coord_cx_apply_patch_paths "$patch"
 }
 
 # === Response emitters (build JSON for Codex stdout) ===
 
+# coord_cx_emit_deny <reason> <hook_event_name>
+# Build the PreToolUse / PermissionRequest deny envelope. Stdout: JSON
+# document expected by Codex on the hook's stdout.
 coord_cx_emit_deny() {
-  _coord_cx_stub
+  local reason="${1:-}" event="${2:-PreToolUse}"
+  if [ -z "$reason" ]; then return 1; fi
+  jq -nc \
+    --arg ev "$event" \
+    --arg r "$reason" \
+    '{
+      hookSpecificOutput: {
+        hookEventName: $ev,
+        permissionDecision: "deny",
+        permissionDecisionReason: $r
+      }
+    }'
 }
 
+# coord_cx_emit_additional_context <text> <hook_event_name>
+# Build the SessionStart / UserPromptSubmit / Pre/PostToolUse banner
+# envelope. Codex appends the additionalContext text to the model's
+# next-turn context window, NOT to user-visible stdout.
 coord_cx_emit_additional_context() {
-  _coord_cx_stub
+  local text="${1:-}" event="${2:-SessionStart}"
+  if [ -z "$text" ]; then return 1; fi
+  jq -nc \
+    --arg ev "$event" \
+    --arg t "$text" \
+    '{
+      hookSpecificOutput: {
+        hookEventName: $ev,
+        additionalContext: $t
+      }
+    }'
 }
 
+# coord_cx_emit_permission_request_decision <allow|deny> [<message>]
+# Build the PermissionRequest decision envelope. Codex routes this to
+# the hook subscribed to PermissionRequest events for non-auto-approved
+# tool calls. Behavior MUST be one of "allow" or "deny" per
+# PermissionRequestBehaviorWire.
 coord_cx_emit_permission_request_decision() {
-  _coord_cx_stub
+  local behavior="${1:-}" message="${2:-}"
+  case "$behavior" in
+    allow|deny) ;;
+    *) return 1 ;;
+  esac
+  if [ -z "$message" ]; then
+    jq -nc \
+      --arg b "$behavior" \
+      '{
+        hookSpecificOutput: {
+          hookEventName: "PermissionRequest",
+          decision: { behavior: $b }
+        }
+      }'
+  else
+    jq -nc \
+      --arg b "$behavior" \
+      --arg m "$message" \
+      '{
+        hookSpecificOutput: {
+          hookEventName: "PermissionRequest",
+          decision: { behavior: $b, message: $m }
+        }
+      }'
+  fi
 }

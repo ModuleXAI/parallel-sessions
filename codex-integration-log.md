@@ -509,6 +509,60 @@ Append-only progress log for the Codex CLI integration. Every PR's start, comple
     PR that takes that count to 1 (just `_coord_cx_stub` itself).
   - Merge commit: 1230a64.
 
+### PR C.3 — Translator complete
+
+- **PR C.3 STARTED** — fill in every C.1 stub with real implementation; wire
+  `coord_cx_extract_file_paths` through the C.2 apply_patch parser.
+  - Pre-conditions: C.2 merged (1230a64); design preview's "no separate
+    review needed for C.3 unless contract changes" applies.
+  - Branch: `feat/codex-integration`.
+
+- **PR C.3 finding (in-scope) — F-C3-01: skeleton-test rename + supersession.**
+  C.1's tests at `src/tests/unit/translator_skeleton.bats` asserted "every
+  function is a stub returning rc=1 with no stdout" — directly contradicting
+  C.3's contract. Renamed via `git mv` to `translator.bats` (history follows)
+  and rewrote contents. Two C.1 tests carry forward: function-defined check
+  and bash -n syntax. The "stubs return rc=1" test is removed; replaced by
+  per-function behavior tests. The "stub marker present" test is INVERTED to
+  "marker absent" — the C.3 done-when signal.
+
+- **PR C.3 finding (in-scope) — F-C3-02: marker text in comments tripped the
+  done-when grep.** First C.3 test run had 1 failure: the C.3 done-when test
+  fired because translator.sh's top-level docstring referenced the marker
+  text literally ("`PR-C.1 skeleton stub` marker has been removed"). Fix:
+  reworded the comment to refer to "the C.1 done-when marker" without
+  embedding the literal string.
+
+- **PR C.3 finding (in-scope) — F-C3-03: extract_file_paths is a NEW
+  function vs C.1 contract.** Plan §C.3 lists `coord_cx_extract_file_paths`
+  as a translator function, but C.1's skeleton (which followed plan §C.1
+  verbatim) didn't include it. Added to translator.sh in C.3 since the hook
+  layer (D.4) needs it for apply_patch routing. The translator.bats
+  `every contract function is defined` test now covers 15 functions, not 14.
+
+- **PR C.3 COMPLETED** — translator.sh stubs filled + new test surface.
+  - File edited (1):
+    - `src/adapters/codex/lib/translator.sh`: 14 stubs replaced with real
+      implementations; +1 new function (`coord_cx_extract_file_paths`);
+      +1 jq filter helper (`_coord_cx_jq_field`); sources
+      `normalized_events.sh` via dual-fallback (mirrors hook LIB_DIR pattern
+      from D-A1-02).
+  - File renamed:
+    - `src/tests/unit/translator_skeleton.bats` → `translator.bats` via
+      `git mv` (history follows). Rewrote contents: 38 tests covering event
+      translation matrix (11), field extractors (12), apply_patch path
+      extraction (4), response emitters (8), plus 4 sanity carry-forwards
+      (functions defined, bash -n, extract_subagent permanent rc=1, C.3
+      done-when marker absence).
+  - Tests added/changed: net +33 (38 new − 5 old skeleton tests).
+  - Test surface state at C.3 boundary:
+    - bats unit: PASS (732/732) — was 699, +33 net from translator.bats.
+    - bats integration: PASS (61/61).
+    - ship-gates: not run (deferred to PR H.1).
+    - invariant: included in unit count.
+  - Translator stub-marker grep on translator.sh: 0. C.3 done-when met.
+  - Merge commit: <to be filled after commit>.
+
 ---
 
 ## Pending entries (will be filled in as PRs progress)
