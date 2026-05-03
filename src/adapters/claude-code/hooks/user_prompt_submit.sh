@@ -55,7 +55,7 @@ emit_additional_context() {
 warn_stderr() { printf 'coord user_prompt_submit: %s\n' "$*" >&2; }
 
 # Pre-participant gate.
-[ "${CLAUDE_COORD:-}" != "1" ] && exit 0
+[ "${COORD_ENABLED:-${CLAUDE_COORD:-}}" != "1" ] && exit 0
 
 INPUT="$(cat)"
 

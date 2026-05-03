@@ -68,7 +68,7 @@ ADAPTER_LIB_DIR="$(cd "$HOOK_DIR/../lib" && pwd)"
 warn_stderr() { printf 'coord stop: %s\n' "$*" >&2; }
 
 # --- main ---
-[ "${CLAUDE_COORD:-}" != "1" ] && exit 0
+[ "${COORD_ENABLED:-${CLAUDE_COORD:-}}" != "1" ] && exit 0
 
 INPUT="$(cat)"
 

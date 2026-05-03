@@ -3,7 +3,10 @@
   "version": "1.0.0",
   "description": "Multi-session coordination for Claude Code — prevent concurrent edits, recover from crashes, delegate work between sessions.",
   "bin": {
-    "parallel-sessions": "./bin/parallel-sessions"
+    "parallel-sessions": "./bin/parallel-sessions",
+    "parallels-init": "./bin/parallels-init",
+    "parallels-claude": "./bin/parallels-claude",
+    "parallels-status": "./bin/parallels-status"
   },
   "files": [
     "bin/",

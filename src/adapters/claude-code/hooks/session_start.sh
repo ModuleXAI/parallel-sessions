@@ -61,7 +61,7 @@ warn_stderr() {
 }
 
 # --- main ---
-if [ "${CLAUDE_COORD:-}" != "1" ]; then
+if [ "${COORD_ENABLED:-${CLAUDE_COORD:-}}" != "1" ]; then
   exit 0
 fi
 

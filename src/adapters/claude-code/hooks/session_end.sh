@@ -58,7 +58,7 @@ ADAPTER_LIB_DIR="$(cd "$HOOK_DIR/../lib" && pwd)"
 
 warn_stderr() { printf 'coord session_end: %s\n' "$*" >&2; }
 
-[ "${CLAUDE_COORD:-}" != "1" ] && exit 0
+[ "${COORD_ENABLED:-${CLAUDE_COORD:-}}" != "1" ] && exit 0
 
 INPUT="$(cat)"
 SESSION_ID=$(printf '%s' "$INPUT" | jq -r '.session_id // ""' 2>/dev/null || printf '')

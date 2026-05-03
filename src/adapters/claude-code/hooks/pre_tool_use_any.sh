@@ -70,7 +70,7 @@ emit_additional_context() {
 warn_stderr() { printf 'coord pre_tool_use_any: %s\n' "$*" >&2; }
 
 # --- main ---
-[ "${CLAUDE_COORD:-}" != "1" ] && exit 0
+[ "${COORD_ENABLED:-${CLAUDE_COORD:-}}" != "1" ] && exit 0
 
 INPUT="$(cat)"
 

@@ -324,6 +324,74 @@ Append-only progress log for the Codex CLI integration. Every PR's start, comple
     - invariant: included in unit count.
   - Merge commit: cb6501a.
 
+### PR B.2 — Launcher scripts + COORD_ENABLED participation gate
+
+- **PR B.2 STARTED** — add `bin/parallels-{init,claude,status}` launchers;
+  introduce `COORD_ENABLED=1` as canonical participation flag (CLAUDE_COORD
+  preserved as legacy alias).
+  - Pre-conditions: B.1 merged (cb6501a) — launchers are first writers of
+    schema 1.1, so the strict B.1-before-B.2 ordering is honored.
+  - Branch: `feat/codex-integration`.
+
+- **PR B.2 finding (in-scope) — F-B2-01:**
+  Plan's `parallels-claude` snippet had a one-liner `bash -c '... walk-up
+  loop ... '` to find .coord/. Inlined too tightly — fragile across shells
+  and hard to read. Used a small `_walk_for_coord()` function instead.
+  Same pattern in `parallels-status` (which the plan didn't show but needs
+  the same lookup since `coord status` resolves COORD_DIR from the CLI's
+  install location, not cwd).
+
+- **PR B.2 finding (in-scope) — F-B2-02:**
+  Initial `launcher_parallels_claude.bats #2` test set `PATH="$STUB_BIN"`
+  alone to test the "claude binary absent" branch. That stripped /usr/bin
+  too, breaking the launcher's own `#!/usr/bin/env bash` shebang
+  resolution — exit 127 instead of the expected exit 3. Fix: keep
+  `/usr/bin:/bin` in PATH so the launcher itself runs; STUB_BIN is empty
+  so `claude` lookup still fails and rc 3 fires correctly.
+
+- **PR B.2 COMPLETED** — 3 launcher scripts + 8 hook gate updates +
+  package.json bin map + 4 new test files.
+  - Files added (3 launchers, all chmod +x):
+    - `bin/parallels-init`: thin pass-through to `src/install.sh`.
+    - `bin/parallels-claude`: cwd-walk-up for .coord/, claude PATH check,
+      then `exec env COORD_ENABLED=1 claude "$@"`.
+    - `bin/parallels-status`: cwd-walk-up for .coord/, then exec
+      `coord status "$@"` with COORD_DIR set.
+  - Files added (4 test files):
+    - `src/tests/integration/launcher_parallels_init.bats` (3 tests).
+    - `src/tests/integration/launcher_parallels_claude.bats` (4 tests).
+    - `src/tests/integration/launcher_parallels_status.bats` (2 tests).
+    - `src/tests/unit/coord_enabled_legacy.bats` (5 tests covering
+      COORD_ENABLED canonical, CLAUDE_COORD legacy, both-unset, and the
+      precedence cases when both are set with conflicting values).
+  - Files edited:
+    - 8 hooks: participation gate updated from
+      `[ "${CLAUDE_COORD:-}" != "1" ]` to
+      `[ "${COORD_ENABLED:-${CLAUDE_COORD:-}}" != "1" ]`. Legacy
+      CLAUDE_COORD=1 keeps working through the parameter expansion
+      fallback.
+    - `package.json`: 3 new entries in `bin` map.
+  - Tests added: 14 (5 unit + 9 integration).
+  - Test surface state at B.2 boundary:
+    - bats unit: PASS (670/670) — was 665, +5 from coord_enabled_legacy.bats.
+    - bats integration: PASS (61/61) — was 52, +9 from 3 launcher .bats.
+    - ship-gates: not run (deferred to PR H.1).
+    - invariant: included in unit count.
+  - Merge commit: <to be filled after commit>.
+
+---
+
+**Phase B — SCHEMA + LAUNCHERS — COMPLETE.**
+- Started: 2026-05-02 (B.1).
+- Completed: 2026-05-03 (B.2).
+- PRs merged: B.1, B.2 (2 PRs).
+- Test surface delta:
+  - unit:        659 → 670 (+11: 6 schema_v1_1 + 5 coord_enabled_legacy).
+  - integration: 52  → 61  (+9: 3 launcher .bats).
+- Notable deviations: none requiring plan amendment.
+- In-scope findings: F-B1-01, F-B1-02, F-B2-01, F-B2-02.
+- Phase C (Codex translator + apply_patch parser) may now begin.
+
 ---
 
 ## Pending entries (will be filled in as PRs progress)

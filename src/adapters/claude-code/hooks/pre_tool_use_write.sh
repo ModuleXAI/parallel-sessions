@@ -467,7 +467,7 @@ build_deny_reason() {
 }
 
 # --- main ---
-[ "${CLAUDE_COORD:-}" != "1" ] && exit 0
+[ "${COORD_ENABLED:-${CLAUDE_COORD:-}}" != "1" ] && exit 0
 
 INPUT="$(cat)"
 
