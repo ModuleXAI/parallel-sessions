@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # stress_semi.sh — Phase 7 / T7.08 manual stress test for
 # COORD_TEST_MODE=semi per PR-PHASE7-04 §"Manual stress test
-# scripts" + the Phase 7 hazırlık konuşması T7.08 binding.
+# scripts" + the Phase 7 prep discussion T7.08 binding.
 #
 # Mode: semi.
 #   - Mediator + Task Processor → real `claude -p` (per
