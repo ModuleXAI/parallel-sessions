@@ -250,7 +250,7 @@ Append-only progress log for the Codex CLI integration. Every PR's start, comple
     paths all pass; the BASH_SOURCE walk-up is exercised indirectly via hook tests
     (every hook runs from src/adapters/.../hooks/ in tests). No fs-boundary issue
     surfaced.
-  - Merge commit: <to be filled after commit>.
+  - Merge commit: 2e5d085.
 
 ---
 
