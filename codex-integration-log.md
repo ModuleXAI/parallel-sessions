@@ -710,6 +710,48 @@ Append-only progress log for the Codex CLI integration. Every PR's start, comple
     - invariant: included in unit count.
   - Merge commit: c5c354d.
 
+- **PR D.3 STARTED** — Codex `user_prompt_submit.sh` hook.
+  - Pre-conditions verified: D.2 merged (c5c354d); 754 unit / 66 integration
+    green at HEAD (3cd0d53).
+  - Estimated diff: ~140 lines (hook) + ~7 bats tests.
+  - Branch: `feat/codex-integration`.
+  - Mirror source: `src/adapters/claude-code/hooks/user_prompt_submit.sh`.
+  - Translator helpers used: `coord_cx_extract_session_id`,
+    `coord_cx_extract_prompt`, `coord_cx_extract_cwd`,
+    `coord_cx_emit_additional_context`.
+  - Differences vs Claude mirror:
+    - Drops `subagent_filter.sh` source + `coord_subagent_filter` call per
+      D-2 (Codex has no subagent concept).
+    - Banner emitted via translator's `coord_cx_emit_additional_context`
+      (same envelope shape as Claude).
+    - Codex UserPromptSubmit shape: same `.prompt` field as Claude — no
+      schema differences in the consumed fields.
+
+- **PR D.3 COMPLETED** — 1 hook file + 1 test file (7 unit tests).
+  - File added: `src/adapters/codex/hooks/user_prompt_submit.sh` (~140 lines,
+    chmod +x).
+  - File added: `src/tests/unit/codex_user_prompt_submit.bats` (7 tests
+    covering: gate negative, D-2 agent_type ignored, non-participant no-op,
+    participant happy path with prompt_id + read-set invalidation + env
+    cache + PROMPT_SUBMIT event, HEAD drift with superseded_by_head_change
+    + HEAD_CHANGE event + additionalContext, no-drift negative invariant,
+    lockdown deny gate).
+  - Tests added: 7 (unit).
+  - Test surface state at D.3 boundary:
+    - bats unit:        PASS (761/761) — was 754, +7 from
+                         codex_user_prompt_submit.
+    - bats integration: PASS (66/66) — unchanged.
+    - ship-gates: not run (deferred to PR H.1).
+    - invariant: included in unit count.
+  - Merge commit: <to be filled after commit>.
+
+- **PR D.3 boundary — STOP per reviewer gating.**
+  - Per Phase D gating established in the Phase C → D handoff: D.4 + D.5
+    must be designed together (lock acquisition contract symmetric with
+    release/task-processor semantics; D-9/D-10 cross-cutting; pre_tool_use
+    dispatch across 3 files). No D.4/D.5 code may be written before a
+    unified design preview lands and reviewer approves.
+
 ---
 
 ## Pending entries (will be filled in as PRs progress)
