@@ -1,9 +1,9 @@
 {
-  "name": "gearcode",
+  "name": "parallel-sessions",
   "version": "1.0.0",
   "description": "Multi-session coordination for Claude Code — prevent concurrent edits, recover from crashes, delegate work between sessions.",
   "bin": {
-    "gearcode": "./bin/gearcode"
+    "parallel-sessions": "./bin/parallel-sessions"
   },
   "files": [
     "bin/",
@@ -27,12 +27,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/sezeryavuz/gearcode.git"
+    "url": "https://github.com/ModuleXAI/parallel-sessions.git"
   },
   "bugs": {
-    "url": "https://github.com/sezeryavuz/gearcode/issues"
+    "url": "https://github.com/ModuleXAI/parallel-sessions/issues"
   },
-  "homepage": "https://github.com/sezeryavuz/gearcode#readme",
+  "homepage": "https://github.com/ModuleXAI/parallel-sessions#readme",
   "engines": {
     "node": ">=14.0.0"
   }

@@ -1,4 +1,4 @@
-# GearCode
+# Parallel Sessions
 
 Multi-session coordination for Claude Code — prevent concurrent edits, recover from crashes, delegate work between sessions.
 
@@ -6,7 +6,7 @@ Multi-session coordination for Claude Code — prevent concurrent edits, recover
 
 When you run multiple Claude Code sessions against the same repository, they have no awareness of each other. Two sessions can edit the same file simultaneously and clobber each other's work; one session can read a stale version of a file another has just changed; a crashed session can leave locks behind that block everyone else indefinitely.
 
-GearCode is a coordination layer that sits between Claude Code and your repository. It registers Claude Code hooks (`PreToolUse`, `PostToolUse`, `Stop`, `SessionStart`, `SessionEnd`) that observe and arbitrate every Read, Write, and Edit. Files get locked when a session starts editing them; other sessions trying to write the same file see a deny banner with three options (delegate the work, self-delegate and come back later, or wait). Stale reads are detected and classified by a Validator agent into SAFE, MINOR, or CRITICAL drift. Crashes are recovered by a Watchdog and a Mediator agent.
+Parallel Sessions is a coordination layer that sits between Claude Code and your repository. It registers Claude Code hooks (`PreToolUse`, `PostToolUse`, `Stop`, `SessionStart`, `SessionEnd`) that observe and arbitrate every Read, Write, and Edit. Files get locked when a session starts editing them; other sessions trying to write the same file see a deny banner with three options (delegate the work, self-delegate and come back later, or wait). Stale reads are detected and classified by a Validator agent into SAFE, MINOR, or CRITICAL drift. Crashes are recovered by a Watchdog and a Mediator agent.
 
 The mental model is deliberately small. There is no server, no daemon, no UI. State lives at `.coord/sessions.json` (atomically edited under `flock`). The audit log lives at `.coord/events.jsonl`. The hooks are pure Bash 3.2 + `jq` + `flock`. Everything is observable; nothing runs unless a Claude Code session triggers it.
 
@@ -14,11 +14,11 @@ Scope: single-developer / single-machine. Multi-machine team scenarios are out o
 
 ## Quick start
 
-GearCode v1 ships with a Bash installer. The npx wrapper is coming in a follow-up release.
+Parallel Sessions v1 ships with a Bash installer. The npx wrapper is coming in a follow-up release.
 
 ```bash
-git clone https://github.com/sezeryavuz/gearcode.git
-cd gearcode
+git clone https://github.com/ModuleXAI/parallel-sessions.git
+cd parallel-sessions
 bash src/install.sh           # registers hooks into .claude/settings.local.json
 
 # Activate in your Claude Code session:
@@ -30,7 +30,7 @@ The installer is idempotent. To remove: `bash src/install.sh --uninstall` (prese
 
 ### Optional: install with permission bypass
 
-`bash src/install.sh --bypass-permissions` (or `npx gearcode init --bypass-permissions`) additionally sets `permissions.defaultMode = "bypassPermissions"` in `.claude/settings.local.json`, auto-approving every Claude Code tool-permission prompt in this repo. **DANGEROUS — opt-in only.** Off by default. Useful for trusted single-developer workflows where the prompts add friction without risk; never the right default for shared or untrusted environments. Combinable with `--yes` and `--repair`. To revert, remove the `defaultMode` key from `.claude/settings.local.json` or set it back to `"default"` / `"acceptEdits"` / `"plan"`.
+`bash src/install.sh --bypass-permissions` (or `npx parallel-sessions init --bypass-permissions`) additionally sets `permissions.defaultMode = "bypassPermissions"` in `.claude/settings.local.json`, auto-approving every Claude Code tool-permission prompt in this repo. **DANGEROUS — opt-in only.** Off by default. Useful for trusted single-developer workflows where the prompts add friction without risk; never the right default for shared or untrusted environments. Combinable with `--yes` and `--repair`. To revert, remove the `defaultMode` key from `.claude/settings.local.json` or set it back to `"default"` / `"acceptEdits"` / `"plan"`.
 
 ## Features
 

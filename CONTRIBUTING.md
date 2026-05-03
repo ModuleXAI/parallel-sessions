@@ -1,10 +1,10 @@
-# Contributing to GearCode
+# Contributing to Parallel Sessions
 
-Thanks for your interest. GearCode is a small, opinionated coordination layer for Claude Code, and contributions that align with its scope and discipline are welcome.
+Thanks for your interest. Parallel Sessions is a small, opinionated coordination layer for Claude Code, and contributions that align with its scope and discipline are welcome.
 
 ## Reporting issues
 
-File issues at [github.com/sezeryavuz/gearcode/issues](https://github.com/sezeryavuz/gearcode/issues). Please include:
+File issues at [github.com/ModuleXAI/parallel-sessions/issues](https://github.com/ModuleXAI/parallel-sessions/issues). Please include:
 
 - OS (`uname -a`) and Bash version (`bash --version`)
 - `jq --version`, `flock --version` (Linux) or note macOS, `perl -v`
@@ -17,8 +17,8 @@ If the issue is intermittent, attach the relevant slice of `.coord/events.jsonl`
 ## Development setup
 
 ```bash
-git clone https://github.com/sezeryavuz/gearcode.git
-cd gearcode
+git clone https://github.com/ModuleXAI/parallel-sessions.git
+cd parallel-sessions
 
 # Run the unit suite (645 tests, 54 .bats files):
 bats src/tests/unit
@@ -38,7 +38,7 @@ Required tooling: Bash 3.2+, `jq`, `flock`, `perl`, `bats`. Optional but recomme
 
 ## Architecture overview
 
-GearCode is two layers of Bash:
+Parallel Sessions is two layers of Bash:
 
 1. **Hooks** (`src/hooks/`) — entry points wired into `.claude/settings.local.json`. Each hook source `src/lib/lockdown.sh` for the global pause check, `src/lib/participant.sh` for the early-exit check, and the relevant subsystem libraries.
 2. **Libraries** (`src/lib/`) — atomic state writes (`atomic_write.sh`), event log (`log_event.sh`), validator pipeline (`validator_*.sh`), wait-queue + cycle detection (`wait_queue.sh`, `cycle_detection.sh`), spawn helpers (`spawn_helper.sh`, `mediator_spawn.sh`, `validator_spawn.sh`, `task_processor.sh`), and many more.

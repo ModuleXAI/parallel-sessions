@@ -13,13 +13,13 @@ const SCRIPTS_ROOT = path.join(PACKAGE_ROOT, 'scripts');
 
 function showHelp() {
   console.log(`
-GearCode - Multi-session coordination for Claude Code
+Parallel Sessions - Multi-session coordination for Claude Code
 
 Usage:
-  npx gearcode init [flags]   Install hooks into current project
-  npx gearcode status         Show coordination state
-  npx gearcode test           Run ship-gate fixtures
-  npx gearcode help           Show this help
+  npx parallel-sessions init [flags]   Install hooks into current project
+  npx parallel-sessions status         Show coordination state
+  npx parallel-sessions test           Run ship-gate fixtures
+  npx parallel-sessions help           Show this help
 
 init flags (forwarded to install.sh):
   --yes, -y               non-interactive; accept defaults
@@ -30,7 +30,7 @@ init flags (forwarded to install.sh):
                           DANGEROUS — disables every Claude Code tool-permission
                           prompt in this repo. Off by default.
 
-Documentation: https://github.com/sezeryavuz/gearcode
+Documentation: https://github.com/ModuleXAI/parallel-sessions
 `);
 }
 
@@ -59,9 +59,9 @@ switch (command) {
 
     if (checkGit.status !== 0) {
       console.error(`
-Error: GearCode requires a git repository.
+Error: Parallel Sessions requires a git repository.
 
-Run 'git init' first, then 'npx gearcode init'.
+Run 'git init' first, then 'npx parallel-sessions init'.
 
 Current directory: ${process.cwd()}
 `);
