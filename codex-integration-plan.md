@@ -729,9 +729,9 @@ bin/
 - **Goal:** All three PreToolUse variants — `pre_tool_use_any.sh` (matcher *), `pre_tool_use_bash.sh` (matcher ^Bash$), `pre_tool_use_apply_patch.sh` (matcher ^apply_patch$). The apply_patch variant implements multi-file lock-acquire-all-or-deny atomicity.
 - **Pre-conditions:** D.3 merged.
 - **Implementation highlights:**
-  - `pre_tool_use_any.sh`: cross-cutting consumer (notification consume, HEAD recheck, watchdog ambient probe, verdict pointer advance). Mostly a copy of Claude's variant with translator-driven extraction.
-  - `pre_tool_use_bash.sh`: registers `Bash` invocations as `WRITE` events (no, wait — Bash is not a file write). Just logs intent + does lockdown gate. NOT a file-locking event.
-  - `pre_tool_use_apply_patch.sh`: the multi-file write hook. Algorithm:
+  - `pre_tool_use_any.sh` (AMENDED 2026-05-03 plan v1.3 — see D-D4-02 below): cross-cutting BOOKKEEPING-ONLY consumer (notification atomic clear, HEAD recheck + drift mark, watchdog ambient probe, mediator verdict pointer advance + actions[] application). NEVER emits `additionalContext` — Codex's hook output parser explicitly rejects `additionalContext` on `PreToolUse` (`output_parser.rs:337-348`); a hook returning it is marked `HookRunStatus::Failed`. The only output channel for this hook is `permissionDecision: deny` via the lockdown gate. Bookkeeping side effects identical to Claude's mirror; the banner-emission code paths are removed.
+  - `pre_tool_use_bash.sh`: just logs intent + does lockdown gate. NOT a file-locking event. Output channel: `permissionDecision: deny` (lockdown only) or empty stdout. NEVER emits `additionalContext`.
+  - `pre_tool_use_apply_patch.sh`: the multi-file write hook. Header comment must declare that `additionalContext` is verboten on this event (Codex parser rejects). Output channel: `permissionDecision: deny` (lock conflict / drift / lockdown / race-loss) or empty stdout (allow). Algorithm:
     1. Lockdown gate.
     2. Extract all paths via `coord_cx_apply_patch_paths`.
     3. Sort paths alphabetically (deadlock prevention per D-12).
@@ -741,11 +741,11 @@ bin/
     7. If all drift-clean: acquire all locks atomically (one `coord_atomic_edit` with N `.locks[$path] = {...}` updates).
     8. Emit no-op (allow).
 - **Drift detection adaptation (AMENDED 2026-05-03 plan v1.2 — see D-D4-01 below):** for each `*** Update File: <path>` operation, the hook reads the file at lock time and searches it for each hunk's `pre_image` text. If every hunk's `pre_image` is found at a unique location (or disambiguated by the `@@` context label when present), drift is clean — `apply_patch` will apply. If any hunk's `pre_image` is not found, or is found ambiguously, drift is detected and the patch is denied. Pure-addition hunks (empty `pre_image`) are always drift-clean (nothing to anchor). Add File operations require the file to NOT exist; Delete File operations require it to exist. Move ops apply Update semantics on the source file before move; the destination is treated as Add. The Phase 4 validator pipeline (cache → pre-filter → validator agent → Mediator) is NOT invoked by this hook; rationale in D-D4-01.
-- **Tests:** ~45 bats (revised from ~30 per unified D.4+D.5 design preview): single-file allow, single-file deny, multi-file all-allow, multi-file partial-block (deny entire), multi-file with drift, drift edge cases (pure-addition skip, header-label disambiguation, Add-on-existing, Delete-on-absent, Move locks both, large-file skip, ambiguous match), race-loss filter abort, lockdown gate (apply_patch + lockdown supersedes lock-conflict), D-9 mutex (no additionalContext on the apply_patch hook), D-2 negative (`agent_type` field doesn't bypass any branch).
+- **Tests:** ~45 bats (revised from ~30 per unified D.4+D.5 design preview): single-file allow, single-file deny, multi-file all-allow, multi-file partial-block (deny entire), multi-file with drift, drift edge cases (pure-addition skip, header-label disambiguation, Add-on-existing, Delete-on-absent, Move locks both, large-file skip, ambiguous match), race-loss filter abort, lockdown gate (apply_patch + lockdown supersedes lock-conflict), D-9 mutex (no additionalContext on ANY of the 3 PreToolUse hooks — per-branch, jq field-presence assertion `.hookSpecificOutput.additionalContext // empty | length == 0`), D-2 negative (`agent_type` field doesn't bypass any branch). On `pre_tool_use_any.sh`: per-branch tests assert empty stdout AND state mutations still occur (notifications cleared, HEAD mark applied, etc.) — banner removal must NOT regress bookkeeping.
 - **Acceptance:** Tests green; full v1 + Codex unit surface green.
 - **Risk:** High. This is the core Codex coordination logic.
 - **Dependencies:** D.3, C.2 (parser), C.3 (translator complete).
-- **Estimated diff:** ~800 lines across 3 files (revised from ~600 — preview §1 documents the apportionment: any.sh ~330, bash.sh ~70, apply_patch.sh ~400).
+- **Estimated diff (AMENDED 2026-05-03 plan v1.3 — see D-D4-02):** ~740 lines across 3 files (revised from v1.2's ~800 — banner-emission code removed from `pre_tool_use_any.sh`). Apportionment: any.sh ~220, bash.sh ~70, apply_patch.sh ~400. Plus a small (~50) shared-helper budget for the consolidated validate-or-abort filter (F-D4-01) inline in the apply_patch hook.
 
 #### Deviations recorded for D.4
 
@@ -753,6 +753,39 @@ bin/
 *Rule changed:* From "validator pipeline gets called per-file with read_hash = pre_image_hash, current_hash = current_disk_hash" to the structural pre_image-search description above.
 *Why:* `pre_image_hash` (per-hunk fragment hash, produced by `coord_cx_apply_patch_pre_image_hash`) and the full-file disk hash are over different content shapes. Feeding mismatched-shape inputs to the validator pipeline produces meaningless SAFE/MINOR/CRITICAL classifications. Drift on `apply_patch` is structural — `apply_patch` itself fails when a hunk's `pre_image` cannot be located in the file — not semantic-stale-read. Claude's stale-read pipeline addresses a different mechanism (full-file replacement via Edit/Write, where the agent's understanding of the file is what matters semantically); Codex `apply_patch` is hunk-anchored and the gate's question is "would `apply_patch` itself fail to find the anchor?". A future PR may add the validator pipeline as POST-apply telemetry (classify the patch's full diff vs prior state for SAFE/MINOR/CRITICAL audit), but that is OUT of scope for D.4. The C.2 design agreement ("hook compares against on-disk anchor for drift detection") is the authoritative source the v1.2 wording aligns with.
 *Impact:* `pre_tool_use_apply_patch.sh` does NOT source `validator_cache.sh`, `validator_prefilter.sh`, `validator_spawn.sh`, or `verdict_apply.sh`. The drift loop is a single read of the file at lock time + per-hunk substring search. Files >= 1 MB skip the drift gate (soft-warning + acquire) per preview §4.3 — symmetric with `validator_prefilter.sh`'s existing SKIPPED_LARGE behavior.
+
+**D-D4-02 (2026-05-03 plan v1.3): PreToolUse hooks emit NO `additionalContext`; PreToolUse handlers run in PARALLEL; PostToolUse fires ONLY on tool success.**
+
+*Sub-finding D-D4-02(a) — PreToolUse handlers run in parallel.*
+The unified design preview's claim that matcher `*` "fires before" tool-specific matchers in `PreToolUse` is FALSE as a runtime claim. Codex dispatches all matched handlers concurrently via `futures::future::join_all` (`codex-rs/hooks/src/engine/dispatcher.rs:91-96`). Output collection at `codex-rs/hooks/src/events/pre_tool_use.rs:107-110`:
+- `should_block = results.iter().any(|r| r.data.should_block)` — ANY deny blocks the dispatch.
+- `block_reason = results.iter().find_map(|r| r.data.block_reason.clone())` — FIRST deny reason in the results vector wins for the displayed text. Results vector is ordered by declaration order in `hooks.json` (join_all preserves input ordering).
+*Impact:* Atomic_edit's flock still serializes mutations. Two parallel hooks each read sessions.json independently; either may see the other's pre-mutation state. The ordering correctness for our design relies on declaration order in `hooks.json` (E.1 declares `*` ahead of `^apply_patch$`, so any.sh's lockdown deny supersedes apply_patch.sh's lock-conflict deny). NO architectural break; the design output is unchanged.
+
+*Sub-finding D-D4-02(b) — PostToolUse fires only on tool success.*
+Citation: `codex-rs/core/src/tools/registry.rs:414-421`:
+```rust
+let post_tool_use_payload = if success {
+    guard.as_ref().and_then(|result| result.post_tool_use_payload.clone())
+} else { None };
+```
+If the tool errored, `post_tool_use_payload` is `None` and PostToolUse hooks are NOT dispatched. This aligns with D-10's literal text ("Lock release via Stop + Watchdog only"); error-path lock release is solely Stop's responsibility (D.2 contract). D.5's contract simplifies — no `tool_response.error` inspection needed.
+
+*Sub-finding D-D4-02(c) — `additionalContext` is REJECTED on PreToolUse.*
+This is the substantive design-changing finding. Citations:
+- `codex-rs/hooks/src/engine/output_parser.rs:16-20` — `PreToolUseOutput` struct has NO `additional_context` field, in contrast to `SessionStartOutput` (line 12), `PostToolUseOutput` (line 41), and `UserPromptSubmitOutput` (line 51).
+- `codex-rs/hooks/src/engine/output_parser.rs:337-348` — `unsupported_pre_tool_use_hook_specific_output` returns `Some("PreToolUse hook returned unsupported additionalContext")` if a hook emits non-empty `additionalContext` on PreToolUse. The hook is marked `HookRunStatus::Failed`, no banner reaches the model, dispatch falls open.
+
+*Rule changed:* The unified design preview routed cross-cutting banners (notification, HEAD-drift, mediator verdict, self-task reminder, corruption, mediator-pending) through `pre_tool_use_any.sh`'s `additionalContext` channel. Under Codex this channel is rejected. Plan v1.3 removes ALL `emit_additional_context` calls from the three `pre_tool_use_*.sh` hooks. The bookkeeping side effects (atomic clear, HEAD mark, verdict actions[] application, watchdog probe firing, pointer advance) remain unchanged. The lockdown deny via `permissionDecision` is the ONLY output channel for these hooks.
+
+*Impact:*
+- **CHANGE 1 (`pre_tool_use_any.sh`):** Bookkeeping-only. No `emit_additional_context`. Notifications still atomic-cleared but the in-turn banner is dropped. HEAD-drift still marks read-set superseded. Mediator verdict's actions[] still applied + pointer advanced; `message_to_caller` not surfaced on PreToolUse. Self-task reminder logs `SELF_TASK_REMINDER` but emits no banner. Watchdog probes still backgrounded. Line count: 330 → ~220 LOC.
+- **CHANGE 2 (`pre_tool_use_apply_patch.sh`):** Header comment must declare `additionalContext` is verboten on this event with file:line citations. Allow path is silent (already so per original design). Deny paths use `permissionDecision` only.
+- **CHANGE 3 (banner-degradation acknowledgment):** Codex sessions see fewer in-turn signals than Claude. HEAD-drift surface remains via D.3's `user_prompt_submit.sh` banner. Mediator-verdict and self-task-reminder degradation are not compensated in D.4; deferred-delivery rerouting through `user_prompt_submit.sh` / `post_tool_use_apply_patch.sh` is a future-PR consideration. Phase F integration tests will surface real impact.
+- **D-9 simplification:** D-9's "permissionDecision OR additionalContext" mutual-exclusion framing is stricter on PreToolUse — only `permissionDecision` is a valid output. `additionalContext` on PreToolUse is INVALID, period.
+- **§7 Scenario B correction:** "Tool crash, PostToolUse fires" row removed; tool error → no PostToolUse → Stop releases.
+
+The file:line citations above are load-bearing — bake them in here so future contributors do not re-litigate the design.
 
 ### PR D.5 — `src/adapters/codex/hooks/post_tool_use_apply_patch.sh`
 - **Goal:** Release all locks held for the apply_patch's files; trigger task processor per-file; notify waiters.

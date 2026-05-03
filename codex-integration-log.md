@@ -790,6 +790,82 @@ Append-only progress log for the Codex CLI integration. Every PR's start, comple
     by reviewer.
   - Plan v1.1 → v1.2.
 
+- **F-D4-02 verification — BOTH ASSUMPTIONS FALSE plus new finding (c)
+  surfaced; STOPPED per Plan Amendment Policy.**
+  - F-D4-02(a) FALSE: PreToolUse handlers run in PARALLEL via
+    futures::future::join_all
+    (`codex-rs/hooks/src/engine/dispatcher.rs:91-96`). Output collection
+    aggregates ANY deny → block, FIRST deny reason wins by declaration
+    order (`pre_tool_use.rs:107-110`).
+  - F-D4-02(b) FALSE: PostToolUse fires ONLY when the tool succeeds
+    (`core/src/tools/registry.rs:414-421` — `if success { ... } else { None }`).
+    Tool error → no PostToolUse → D.5's release loop never runs;
+    Stop handles release (D.2 contract).
+  - F-D4-02(c) NEW: Codex REJECTS additionalContext on PreToolUse —
+    `PreToolUseOutput` struct has NO additional_context field
+    (`output_parser.rs:16-20`); `unsupported_pre_tool_use_hook_specific_output`
+    returns "PreToolUse hook returned unsupported additionalContext"
+    when the field is non-empty (`output_parser.rs:337-348`). Hook is
+    marked HookRunStatus::Failed; no banner reaches the model.
+
+- **Plan amendment A-D4-02 (2026-05-03 plan v1.3) — PreToolUse hooks
+  emit NO additionalContext; PreToolUse handlers run in parallel;
+  PostToolUse fires only on tool success.**
+  - Plan section affected: §"PR D.4 — pre_tool_use_*.sh" "Implementation
+    highlights" + "Estimated diff" + "Deviations recorded for D.4"
+    subsection (new D-D4-02 entry).
+  - Reason: source-level evidence (file:line citations baked into the
+    deviation entry) shows that Codex's PreToolUse output parser
+    explicitly rejects additionalContext. Mirroring Claude's banner
+    emission would produce HookRunStatus::Failed entries in the audit
+    log without any model-visible benefit. Removing the banner emission
+    is the lower-noise choice; bookkeeping side effects remain.
+  - Three CHANGES locked in v1.3:
+    - CHANGE 1: `pre_tool_use_any.sh` is bookkeeping-only; all
+      `emit_additional_context` calls removed; line count revises
+      330 → ~220.
+    - CHANGE 2: `pre_tool_use_apply_patch.sh` header comment declares
+      additionalContext is verboten on this event (with file:line
+      citations).
+    - CHANGE 3: Banner-degradation acknowledgment — Codex sessions see
+      fewer in-turn signals; deferred-delivery rerouting through
+      user_prompt_submit.sh / post_tool_use_apply_patch.sh is a future
+      consideration, NOT in D.4 scope.
+  - Test pattern locked: per-branch `jq -e '.hookSpecificOutput.additionalContext // empty | length == 0'`
+    field-presence check (preferred over substring match — avoids false
+    positives where "additionalContext" appears in some other field's
+    text). Asserted in EVERY non-deny branch of the three PreToolUse
+    hooks.
+  - Three findings to track during implementation:
+    - F-D4-03 (retrospective, non-blocking): D.3's user_prompt_submit.sh
+      could be upgraded later to deliver self-task reminders deferred
+      from any.sh. Logged under "Phase F follow-up candidates" below;
+      do NOT amend D.3 retroactively.
+    - F-D4-04 (verify in tests): per-branch tests must assert empty
+      stdout AND state mutations still occur after banner removal —
+      banner removal must NOT regress bookkeeping.
+    - F-D4-05 (line count audit at end of D.4): confirm any.sh
+      realized count is within 10% of 220. >280 = dead banner code
+      remains; <180 = bookkeeping was cut along with banners. Flag
+      either case.
+  - Source of amendment: F-D4-02 verification with file:line citations
+    (output_parser.rs:16-20 + 337-348 for finding c; registry.rs:414-421
+    for finding b; dispatcher.rs:91-96 + pre_tool_use.rs:107-110 for
+    finding a). Citations are baked into plan §D-D4-02 permanently.
+  - Plan v1.2 → v1.3.
+
+### Phase F follow-up candidates
+
+- **F-D4-03 (filed 2026-05-03):** `user_prompt_submit.sh` self-task
+  reminder delivery. Codex's PreToolUse rejects additionalContext, so
+  any.sh's per-tool-call self-task reminder banner is silently dropped.
+  D.3's user_prompt_submit.sh delivers HEAD-drift on prompt submit but
+  NOT self-task reminders. A future PR could extend D.3's hook to
+  iterate `coord_self_task_check_unlocked` + emit reminders via
+  additionalContext (which IS supported on UserPromptSubmit per
+  output_parser.rs:51). Defer until Phase F integration tests show
+  whether Codex sessions actually need the reminder.
+
 ---
 
 ## Pending entries (will be filled in as PRs progress)
