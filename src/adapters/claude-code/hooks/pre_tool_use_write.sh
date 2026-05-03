@@ -420,7 +420,7 @@ coord_human_age() {
 # value would silently bypass the check via `// true`. Use explicit
 # `if has("task_delegation") then .task_delegation else true end`
 # pattern to distinguish absent-key from present-and-false (mirrors
-# coord task-open T6.03 toggle handling at src/bin/coord).
+# coord task-open T6.03 toggle handling at src/core/bin/coord).
 _coord_pwh_task_delegation_enabled() {
   local cfg
   if [ -n "${COORD_DIR:-}" ]; then

@@ -213,8 +213,8 @@ materialize_coord() {
     fi
   fi
   # bin: copy coord CLI (may be absent in very early Phase 0 commits).
-  if [ -f "$SELF_DIR/bin/coord" ]; then
-    cp -f "$SELF_DIR/bin/coord" "$COORD_DIR/bin/coord"
+  if [ -f "$SELF_DIR/core/bin/coord" ]; then
+    cp -f "$SELF_DIR/core/bin/coord" "$COORD_DIR/bin/coord"
   fi
   # T3.07: copy MEDIATOR_REFERENCE.md alongside lib/. Idempotent —
   # if the user customized the installed copy, preserve it (compare

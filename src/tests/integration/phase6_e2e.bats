@@ -24,7 +24,7 @@ H_PRE="$SRC_ROOT/adapters/claude-code/hooks/pre_tool_use_write.sh"
 H_POST="$SRC_ROOT/adapters/claude-code/hooks/post_tool_use_write.sh"
 H_ANY="$SRC_ROOT/adapters/claude-code/hooks/pre_tool_use_any.sh"
 H_STOP="$SRC_ROOT/adapters/claude-code/hooks/stop.sh"
-CLI="$SRC_ROOT/bin/coord"
+CLI="$SRC_ROOT/core/bin/coord"
 
 setup() {
   TMP="$(mktemp -d -t coord-p6-e2e-XXXX)"

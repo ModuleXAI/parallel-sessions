@@ -4,7 +4,7 @@
 
 load "../helpers/common"
 
-CLI="$SRC_ROOT/bin/coord"
+CLI="$SRC_ROOT/core/bin/coord"
 HW="$SRC_ROOT/adapters/claude-code/hooks/pre_tool_use_write.sh"
 HP="$SRC_ROOT/adapters/claude-code/hooks/post_tool_use_write.sh"
 

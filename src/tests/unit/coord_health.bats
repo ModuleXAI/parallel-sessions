@@ -9,7 +9,7 @@
 
 load "../helpers/common"
 
-C="$SRC_ROOT/bin/coord"
+C="$SRC_ROOT/core/bin/coord"
 
 # Build a minimal isolated repo with a valid coord layout + config.
 mk_isolated_repo() {

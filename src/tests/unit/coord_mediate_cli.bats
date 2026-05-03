@@ -19,7 +19,7 @@
 
 load "../helpers/common"
 
-COORD_BIN="$SRC_ROOT/bin/coord"
+COORD_BIN="$SRC_ROOT/core/bin/coord"
 
 setup() {
   TMP="$(mktemp -d -t coord-mediate-XXXX)"

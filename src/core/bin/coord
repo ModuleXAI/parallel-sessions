@@ -20,14 +20,16 @@ set -euo pipefail
 COORD_BIN="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 COORD_DIR="${COORD_DIR:-$(cd "$COORD_BIN/.." && pwd)}"
 # LIB_DIR resolves relative to the bin script's location, not COORD_DIR.
-# Dual-fallback covers both layouts (post-A.1 refactor):
-#   source tree under tests:  src/bin/coord -> src/core/lib/  (try first)
-#   installed by install.sh:  .coord/bin/coord -> .coord/lib/  (flat fallback)
-# Either way, the `cd` succeeds in exactly one of the two locations.
-# This also lets COORD_DIR be overridden to a per-test `.coord/` workspace
-# whose `lib/` directory may be empty.
-LIB_DIR="$(cd "$COORD_BIN/../core/lib" 2>/dev/null && pwd)" \
-  || LIB_DIR="$(cd "$COORD_BIN/../lib" && pwd)"
+# Post-A.3 layout puts bin and lib as siblings in both contexts:
+#   source tree under tests:  src/core/bin/coord -> src/core/lib/
+#   installed by install.sh:  .coord/bin/coord   -> .coord/lib/
+# A single `../lib` resolution works in both — the A.1/A.2 dual-fallback
+# is no longer needed here (still required for hooks under
+# src/adapters/<agent>/hooks/, where core/lib is 3 dirs up in source).
+# Tests may also override COORD_DIR to a per-test .coord/ workspace
+# whose lib/ may be empty; the bin file is still resolved by absolute
+# path from $COORD_BIN, so this works.
+LIB_DIR="$(cd "$COORD_BIN/../lib" && pwd)"
 export COORD_DIR
 
 # Utilities -----------------------------------------------------------------

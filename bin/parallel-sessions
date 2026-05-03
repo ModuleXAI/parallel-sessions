@@ -73,7 +73,7 @@ Current directory: ${process.cwd()}
     break;
   }
   case 'status': {
-    const coordPath = path.join(SRC_ROOT, 'bin', 'coord');
+    const coordPath = path.join(SRC_ROOT, 'core', 'bin', 'coord');
     runBash(coordPath, ['status']);
     break;
   }

@@ -5,7 +5,7 @@
 
 load "../helpers/common"
 
-CLI="$SRC_ROOT/bin/coord"
+CLI="$SRC_ROOT/core/bin/coord"
 
 setup() {
   TMP="$(mktemp -d -t coord-sd-XXXX)"

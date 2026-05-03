@@ -37,7 +37,7 @@
 #         - Recent watchdog probe verdicts
 #       No state mutation.
 #
-# Bash 3.2 compat. Sourced by src/bin/coord.
+# Bash 3.2 compat. Sourced by src/core/bin/coord.
 
 # Tunables (env-overridable).
 : "${COORD_MEDIATE_STATUS_VERDICT_LIMIT:=10}"
@@ -307,7 +307,7 @@ coord_mediate_status() {
 }
 
 # coord_mediate_dispatch <args...>
-#   Top-level subcommand router invoked by src/bin/coord.
+#   Top-level subcommand router invoked by src/core/bin/coord.
 coord_mediate_dispatch() {
   if [ $# -eq 0 ]; then
     _coord_mediate_usage

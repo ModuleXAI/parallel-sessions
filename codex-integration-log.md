@@ -146,6 +146,38 @@ Append-only progress log for the Codex CLI integration. Every PR's start, comple
     - invariant: included in unit count (#1..#19 all pass post-fix).
   - Merge commit: 567d4cf (9 renames preserved at 86-96% similarity by git).
 
+- **PR A.3 STARTED** — relocate `coord` CLI to `src/core/bin/`.
+  - Pre-conditions: A.2 merged (567d4cf).
+  - Branch: `feat/codex-integration`.
+
+- **PR A.3 finding (in-scope, no plan amendment) — F-A3-01:**
+  Post-A.3 the `coord` CLI lives at `src/core/bin/coord` and core libs at
+  `src/core/lib/`, so they are siblings — `$COORD_BIN/../lib` resolves
+  cleanly in both layouts (source: `src/core/bin/../lib` = `src/core/lib`;
+  installed: `.coord/bin/../lib` = `.coord/lib`). The A.1/A.2 dual-fallback
+  in `bin/coord` is no longer needed and was simplified back to a single
+  `LIB_DIR=$(cd "$COORD_BIN/../lib" && pwd)`. Hooks still need their
+  dual-fallback — they live deeper under `src/adapters/<agent>/hooks/`.
+
+- **PR A.3 COMPLETED** — 1 file move + ~13 reference updates.
+  - File moves: `src/bin/coord` → `src/core/bin/coord` (1 file).
+  - File edits:
+    - `src/install.sh`: 2 path updates (file-exists check + cp source).
+    - `bin/parallel-sessions`: 1 path update (npx wrapper).
+    - `src/core/bin/coord`: simplified LIB_DIR + comment refresh (per F-A3-01).
+    - 7 unit/integration .bats: `$SRC_ROOT/bin/coord` and BIN_DIR variable updates.
+    - `src/tests/manual/linux_probe.sh`: 1 path update.
+    - 3 lib/hook comment refreshes (cosmetic): `src/core/lib/coord_mediate.sh`,
+      `src/core/lib/log_event.sh`, `src/adapters/claude-code/hooks/pre_tool_use_write.sh`.
+    - `src/tests/unit/phase7_invariant.bats`: 3 cosmetic message updates.
+  - Tests added: 0 (refactor PR; no behavior change).
+  - Test surface state at A.3 boundary:
+    - bats unit: PASS (645/645) — flake-free this run.
+    - bats integration: PASS (48/48).
+    - ship-gates: not run (deferred to PR H.1).
+    - invariant: included in unit count.
+  - Merge commit: <to be filled after commit>.
+
 ---
 
 ## Pending entries (will be filled in as PRs progress)

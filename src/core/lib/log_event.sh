@@ -126,7 +126,7 @@ coord_log_event() {
 #   "log-then-exit" path where the caller is about to exit before
 #   the kernel could schedule a backgrounded subshell to flush.
 #
-#   Canonical caller: src/bin/coord cmd_wait::cleanup_interrupt
+#   Canonical caller: src/core/bin/coord cmd_wait::cleanup_interrupt
 #   (SIGINT trap that emits WAIT_TIMEOUT(reason=interrupted) then
 #   `exit 130`). Async variant raced exit-130 in bats, leaving the
 #   audit-log entry missing intermittently (F-016 root cause).

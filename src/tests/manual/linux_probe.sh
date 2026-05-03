@@ -198,7 +198,7 @@ mv "$LXW/.coord/sessions.json.new" "$LXW/.coord/sessions.json"
        [ -e "$w" ] && printf 'modified by holder\n' > "$w"
      done ) &
 T0=$(date -u +%s%N)
-COORD_DIR="$LXW/.coord" SESSION_ID=waiter /work/src/bin/coord wait "$LXF" --timeout 30 >/dev/null
+COORD_DIR="$LXW/.coord" SESSION_ID=waiter /work/src/core/bin/coord wait "$LXF" --timeout 30 >/dev/null
 T1=$(date -u +%s%N)
 wait
 echo "Linux coord wait detection latency: $(( (T1 - T0) / 1000000 )) ms (release at t=1000ms; expect ~1000-1100ms with inotifywait, ~1000-1300ms with polling)"
