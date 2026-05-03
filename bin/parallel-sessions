@@ -52,20 +52,22 @@ function runBash(scriptPath, scriptArgs) {
 
 switch (command) {
   case 'init': {
+    // A.5: git repo no longer required. Warn when absent so the user
+    // knows .coord/ won't get auto-ignored — but proceed regardless.
     const checkGit = spawnSync('git', ['rev-parse', '--show-toplevel'], {
       cwd: process.cwd(),
       encoding: 'utf8',
     });
 
     if (checkGit.status !== 0) {
-      console.error(`
-Error: Parallel Sessions requires a git repository.
+      console.warn(`
+Note: not inside a git repository.
 
-Run 'git init' first, then 'npx parallel-sessions init'.
-
-Current directory: ${process.cwd()}
+.coord/ state will live in '${process.cwd()}'. Without git, you must
+add .coord/ to your own ignore mechanism (or delete it manually
+before commits to other VCS systems). The installer's --yes flag
+skips the interactive confirmation.
 `);
-      process.exit(1);
     }
 
     const installerPath = path.join(SRC_ROOT, 'install.sh');

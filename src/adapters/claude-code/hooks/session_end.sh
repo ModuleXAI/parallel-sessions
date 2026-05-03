@@ -52,21 +52,9 @@ ADAPTER_LIB_DIR="$(cd "$HOOK_DIR/../lib" && pwd)"
 [ -f "$CORE_LIB_DIR/read_snapshots.sh" ] && . "$CORE_LIB_DIR/read_snapshots.sh"
 # shellcheck disable=SC1091
 . "$CORE_LIB_DIR/lockdown.sh"
+. "$CORE_LIB_DIR/folder_resolver.sh"
 # shellcheck disable=SC1091
 . "$CORE_LIB_DIR/read_snapshots.sh"
-
-coord_resolve_root() {
-  if [ -n "${COORD_DIR:-}" ] && [ -d "$COORD_DIR" ]; then
-    printf '%s\n' "$COORD_DIR"; return 0
-  fi
-  local base="${CLAUDE_PROJECT_DIR:-}"
-  if [ -z "$base" ]; then
-    base=$(git rev-parse --show-toplevel 2>/dev/null || printf '')
-  fi
-  if [ -z "$base" ]; then return 1; fi
-  if [ -d "$base/.coord" ]; then printf '%s/.coord\n' "$base"; return 0; fi
-  return 1
-}
 
 warn_stderr() { printf 'coord session_end: %s\n' "$*" >&2; }
 

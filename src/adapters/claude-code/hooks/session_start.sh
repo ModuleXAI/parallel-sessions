@@ -48,24 +48,7 @@ ADAPTER_LIB_DIR="$(cd "$HOOK_DIR/../lib" && pwd)"
 . "$CORE_LIB_DIR/head_tracking.sh"
 # shellcheck disable=SC1091
 . "$CORE_LIB_DIR/lockdown.sh"
-
-# --- locate coord root (written by installer) ---
-coord_resolve_root() {
-  if [ -n "${COORD_DIR:-}" ] && [ -d "$COORD_DIR" ]; then
-    printf '%s\n' "$COORD_DIR"
-    return 0
-  fi
-  local base="${CLAUDE_PROJECT_DIR:-}"
-  if [ -z "$base" ]; then
-    base=$(git rev-parse --show-toplevel 2>/dev/null || printf '')
-  fi
-  if [ -z "$base" ]; then return 1; fi
-  if [ -d "$base/.coord" ]; then
-    printf '%s/.coord\n' "$base"
-    return 0
-  fi
-  return 1
-}
+. "$CORE_LIB_DIR/folder_resolver.sh"
 
 emit_additional_context() {
   local text="$1"

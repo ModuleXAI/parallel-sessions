@@ -69,11 +69,22 @@ if [ "$BYPASS" = 1 ] && [ "$MODE" = uninstall ]; then
   BYPASS=0
 fi
 
-# --- Step 1: repo root ---
-if ! REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null); then
-  die "not inside a git repository; run this from inside a repo"
+# --- Step 1: install root (no longer requires a git repo per A.5) ---
+# Prefer the git repo top-level when present; fall back to $PWD otherwise.
+# Non-git installs print a banner so the user knows where .coord/ landed.
+if REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null); then
+  say "install root: $REPO_ROOT (git repo top-level)"
+else
+  REPO_ROOT="$PWD"
+  say "install root: $REPO_ROOT (no git repo detected)"
+  if [ "${YES:-0}" != 1 ]; then
+    say "Note: .coord/ state will live at '$REPO_ROOT/.coord'."
+    say "      Re-run with --yes to skip this prompt next time."
+    printf 'Continue? (y/n): '
+    read -r _ans
+    [ "$_ans" = "y" ] || die "install aborted"
+  fi
 fi
-say "repo root: $REPO_ROOT"
 
 COORD_DIR="$REPO_ROOT/.coord"
 CLAUDE_SETTINGS="$REPO_ROOT/.claude/settings.local.json"
@@ -455,6 +466,12 @@ register_hooks() {
 # --- Step 8: .gitignore entries ---
 gitignore_entries() {
   local gi="$REPO_ROOT/.gitignore"
+  # Skip entirely when not a git repo AND no pre-existing .gitignore.
+  # Per A.5: non-git installs are a supported configuration.
+  if [ ! -d "$REPO_ROOT/.git" ] && [ ! -f "$gi" ]; then
+    say "skipping .gitignore (no git repo, no existing .gitignore)"
+    return 0
+  fi
   [ -f "$gi" ] || : >"$gi"
   local entry
   for entry in '.coord/' '.claude/settings.local.json' 'IMPLEMENTATION_LOG.md' 'FINDINGS.md' 'phase-*-signoff.md' 'phase0-verification.md'; do

@@ -206,6 +206,66 @@ Append-only progress log for the Codex CLI integration. Every PR's start, comple
     - invariant: included in unit count.
   - Merge commit: 014ab10.
 
+- **PR A.5 STARTED** — add `src/core/lib/folder_resolver.sh`; drop git-repo
+  requirement from installer + npx wrapper.
+  - Pre-conditions: A.4 merged (014ab10).
+  - Branch: `feat/codex-integration`.
+
+- **PR A.5 finding (in-scope) — F-A5-01:**
+  Plan put new tests under `src/core/tests/{unit,integration}/` to match the
+  target architecture, but Phase A has no PR that relocates the existing 43
+  unit + 4 integration test files. Per F-A4-01 (same call), placing both new
+  test files under the existing `src/tests/{unit,integration}/` so all tests
+  stay discoverable by the standard `bats src/tests/{unit,integration}` run.
+  When/if a future PR splits tests into core/adapter trees, these move along.
+
+- **PR A.5 COMPLETED** — 1 lib added, 1 lib edited, 1 npx-wrapper edited, 8 hooks
+  shrunk by ~12 lines each, 2 install.sh sites edited, 2 new test files added.
+  - Files added (3):
+    - `src/core/lib/folder_resolver.sh` (~85 lines, single function `coord_resolve_root`
+      implementing the 5-step resolution algorithm: COORD_DIR > cwd-walk-up >
+      BASH_SOURCE-walk-up > legacy CLAUDE_PROJECT_DIR > git fallback).
+    - `src/tests/unit/folder_resolver.bats` (8 tests covering each resolution step
+      and the rc-1 no-match path).
+    - `src/tests/integration/non_git_install.bats` (4 tests covering full
+      `bash install.sh --yes` in a non-git mktemp dir, hook resolution post-install,
+      banner output, and pre-existing .gitignore preservation).
+  - Files edited (12):
+    - `src/install.sh`: Step 1 now falls back to $PWD when no git, prompts user
+      unless --yes; Step 8 (gitignore_entries) skips entirely when neither
+      .git/ nor .gitignore exists.
+    - `bin/parallel-sessions`: git check downgraded from hard error to
+      `console.warn` advisory; install proceeds either way.
+    - 8 Claude Code hooks (`src/adapters/claude-code/hooks/*.sh`): inline
+      `coord_resolve_root() { ... }` blocks (12-16 lines each) removed; each
+      hook now sources `$CORE_LIB_DIR/folder_resolver.sh` after `lockdown.sh`.
+  - Tests added: 12 (8 unit + 4 integration).
+  - Test surface state at A.5 boundary:
+    - bats unit: PASS (659/659) — was 651, +8 from new folder_resolver.bats.
+    - bats integration: PASS (52/52) — was 48, +4 from new non_git_install.bats.
+    - ship-gates: not run (deferred to PR H.1).
+    - invariant: included in unit count.
+  - Risk note: plan flagged this PR as High-risk because of the BASH_SOURCE walk-up
+    on macOS (filesystem boundaries). Live tests covering the cwd and explicit-arg
+    paths all pass; the BASH_SOURCE walk-up is exercised indirectly via hook tests
+    (every hook runs from src/adapters/.../hooks/ in tests). No fs-boundary issue
+    surfaced.
+  - Merge commit: <to be filled after commit>.
+
+---
+
+**Phase A — REFACTOR — COMPLETE.**
+- Started: 2026-05-02 (A.0).
+- Completed: 2026-05-02 (A.5).
+- PRs merged: A.0, A.1, A.2, A.3, A.4, A.5 (6 PRs).
+- Test surface delta:
+  - unit:        645 → 659 (+14: 6 normalized_events + 8 folder_resolver).
+  - integration: 48  → 52  (+4: non_git_install).
+- Notable deviations recorded in plan v1.1: D-A1-01, D-A1-02, D-A1-03 (all A.1).
+- In-scope findings (no plan amendment): F-A2-01..03, F-A3-01, F-A4-01, F-A5-01.
+- Test surface contract met: unit + integration both PASS at A.5 boundary.
+- Phase B (schema 1.1 + launchers) may now begin.
+
 ---
 
 ## Pending entries (will be filled in as PRs progress)

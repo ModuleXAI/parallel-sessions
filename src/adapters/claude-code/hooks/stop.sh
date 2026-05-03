@@ -52,6 +52,7 @@ ADAPTER_LIB_DIR="$(cd "$HOOK_DIR/../lib" && pwd)"
 . "$CORE_LIB_DIR/notify_waiters.sh"
 # shellcheck disable=SC1091
 . "$CORE_LIB_DIR/lockdown.sh"
+. "$CORE_LIB_DIR/folder_resolver.sh"
 # shellcheck disable=SC1091
 [ -f "$CORE_LIB_DIR/self_tasks.sh" ] && . "$CORE_LIB_DIR/self_tasks.sh"
 # T5.04 / PR-PHASE5-02 §5: notify_waiters' 4-tier diff_summary chain.
@@ -63,19 +64,6 @@ ADAPTER_LIB_DIR="$(cd "$HOOK_DIR/../lib" && pwd)"
 [ -f "$CORE_LIB_DIR/validator_prefilter.sh" ] && . "$CORE_LIB_DIR/validator_prefilter.sh"
 # shellcheck disable=SC1091
 [ -f "$CORE_LIB_DIR/read_snapshots.sh" ] && . "$CORE_LIB_DIR/read_snapshots.sh"
-
-coord_resolve_root() {
-  if [ -n "${COORD_DIR:-}" ] && [ -d "$COORD_DIR" ]; then
-    printf '%s\n' "$COORD_DIR"; return 0
-  fi
-  local base="${CLAUDE_PROJECT_DIR:-}"
-  if [ -z "$base" ]; then
-    base=$(git rev-parse --show-toplevel 2>/dev/null || printf '')
-  fi
-  if [ -z "$base" ]; then return 1; fi
-  if [ -d "$base/.coord" ]; then printf '%s/.coord\n' "$base"; return 0; fi
-  return 1
-}
 
 warn_stderr() { printf 'coord stop: %s\n' "$*" >&2; }
 
