@@ -809,7 +809,7 @@ The file:line citations above are load-bearing — bake them in here so future c
 - Detection of `claude` and `codex` binaries works; smoke tests run for the requested agent(s).
 
 ### PR E.1 — `src/adapters/codex/install.sh`
-- **Goal:** Adapter-specific installer for Codex. Writes `.codex/hooks.json` with all 6 hook entries (no SessionEnd). Verifies/asks-for-confirmation for `[features] codex_hooks = true` in `.codex/config.toml`.
+- **Goal:** Adapter-specific installer for Codex. Writes `.codex/hooks.json` with all 6 hook entries (no SessionEnd). Always writes/merges `[features] codex_hooks = true` into `.codex/config.toml` (AMENDED 2026-05-05 plan v1.4 — see A-M-T1-04 below; Codex requires an active config layer alongside `hooks.json` for hook discovery).
 - **Pre-conditions:** Phase D complete.
 - **Files added:** `src/adapters/codex/install.sh`.
 - **`.codex/hooks.json` shape produced:**
@@ -839,7 +839,7 @@ The file:line citations above are load-bearing — bake them in here so future c
     }
   }
   ```
-- **Feature flag handling:** Check `<repo>/.codex/config.toml` for `[features] codex_hooks = true`. If absent and `--enable-codex-feature` flag passed, set it. Otherwise warn user with copy-paste instructions.
+- **Feature flag handling (AMENDED 2026-05-05 plan v1.4 — see A-M-T1-04 below):** Always ensure `[features] codex_hooks = true` is present in `<repo>/.codex/config.toml`. If the file is absent, create it with the minimal flag content. If it exists without the flag (user-authored other settings), merge the flag into the existing `[features]` block — or append a new `[features]` block if none exists — preserving user content byte-for-byte outside the merge point. If it already contains the flag, no-op. The `--enable-codex-feature` CLI flag is retained as an accepted no-op alias for back-compat with pre-v1.4 install runbooks. Rationale: per OpenAI's Codex hooks documentation, hooks load only "next to active config layers"; a directory containing `hooks.json` alone is NOT an active layer until a sibling `config.toml` exists, so the prior warn-and-continue path produced a silent product failure (install reported success but no hook ever fired).
 - **Idempotency:** Strip prior coord-owned entries (commands containing `/.coord/hooks/codex/`) before appending — same pattern as Claude.
 - **Smoke test:** Pipe canned Codex SessionStart JSON into `session_start.sh` against a tmpdir `.coord/`. Verify `.active` marker created.
 - **Tests:** New `src/adapters/codex/tests/unit/install.bats` (~10 tests).
@@ -847,6 +847,51 @@ The file:line citations above are load-bearing — bake them in here so future c
 - **Risk:** Medium. JSON merge correctness.
 - **Dependencies:** Phase D.
 - **Estimated diff:** ~300 lines.
+
+#### Deviations recorded for E.1
+
+**A-M-T1-04 (2026-05-05 plan v1.4): `.codex/config.toml` is always written by the Codex adapter installer; `--enable-codex-feature` becomes a no-op back-compat alias.**
+
+*Source:* M-T1-04 manual-test finding, filed post-H.1 during clean-install smoke on macOS with Codex CLI v0.128.0. With only `.codex/hooks.json` present and no sibling `.codex/config.toml`, Codex never attempted hook discovery; the entire coord pipeline was silently dead despite the installer reporting `[6/6] coord installation ready` / `EXIT_CODE=0` / `next steps: Run parallels-codex`. The user opened the Codex TUI, saw no SessionStart banner, exited, and confirmed via `grep -i hook ~/.codex/log/codex-tui.log` that Codex emitted ZERO hook-related log lines for the run. Manually creating `.codex/config.toml` with `[features] codex_hooks = true` and re-running `parallels-codex` immediately produced the banner + full event stream (`SESSION_REGISTER`, `PROMPT_SUBMIT`, `PRE_BASH`). The diff between "broken" and "working" is the existence of `.codex/config.toml`.
+
+*Authoritative reference:* OpenAI Codex hooks documentation:
+> "Codex discovers hooks next to active config layers in either of these forms:
+>  - hooks.json
+>  - inline [hooks] tables inside config.toml
+> In practice, the four most useful locations are:
+>  - ~/.codex/hooks.json
+>  - ~/.codex/config.toml
+>  - <repo>/.codex/hooks.json
+>  - <repo>/.codex/config.toml
+> ...
+> Project-local hooks load only when the project .codex/ layer is trusted."
+
+The load-bearing phrase is **"next to active config layers"**. A `.codex/` directory containing only `hooks.json` is NOT an active config layer; the layer becomes active only when `config.toml` exists in the same directory. Without an active layer, Codex skips hooks discovery — silently, with no surface in the TUI banner stream and no entry in `~/.codex/log/codex-tui.log` indicating the layer was even considered.
+
+*Rule changed:* Plan v1.3's "Feature flag handling" bullet permitted creating `.codex/config.toml` with the codex_hooks flag ONLY if `--enable-codex-feature` was passed; otherwise the installer warned with copy-paste instructions and exited rc=0. Plan v1.4 requires the installer to ALWAYS write or merge `[features] codex_hooks = true` into `.codex/config.toml`. The `--enable-codex-feature` flag remains an accepted no-op (so existing user runbooks/scripts that still pass it continue to work without a "unknown flag" error).
+
+*Why the prior rule was wrong:* The warn-and-continue path produced a silent product failure. Install reported success; the user followed the next-steps banner; no SessionStart banner appeared in the Codex TUI; no `SESSION_REGISTER` appeared in `.coord/events.jsonl`; no hook lifecycle line appeared in `~/.codex/log/codex-tui.log` (Codex never attempted discovery because the layer was dormant). The user had no in-product mechanism to discover the missing `config.toml` without reading Codex's internal logs. The full automated test surface (837 unit + 122 integration + 24 ship-gate at H.1) missed this because tests inject hooks via direct invocation rather than going through Codex's own discovery path. Tests pass ≠ user-facing behavior works.
+
+*Idempotency contract:* If `.codex/config.toml` already exists with `codex_hooks = true`, no-op (file unchanged byte-for-byte). If it exists without the flag, merge the flag into the existing `[features]` block — or append a new `[features]` block if absent — preserving user content outside the merge point. If it doesn't exist, create it with the minimal flag content. Repeated runs of `bash src/adapters/codex/install.sh` against the same repo are stable on `.codex/config.toml` after the first run.
+
+*Uninstall contract:* `--uninstall` does NOT delete `.codex/config.toml` if the file contains user-authored content beyond what the installer added. The installer strips its own `codex_hooks = true` line (and an empty `[features]` block if that was the only inhabitant) when other user content remains; if the file was created by the installer with only the flag (no user content), removing the file is acceptable. The chosen behavior is documented inline in `src/adapters/codex/install.sh`.
+
+*Impact on §E.1 implementation:*
+- Step 3 `codex_feature_check` rewritten to unconditionally ensure the flag is present; the four-arm conditional (`[file absent + flag] / [file absent + no flag] / [file present + flag set] / [file present + flag unset]`) collapses into `[absent → create] / [present + flag set → no-op] / [present + flag unset → merge]`.
+- The three `warn:` lines about missing `config.toml` are removed and replaced with a single neutral info note (e.g. `codex install: ensured [features] codex_hooks = true in .codex/config.toml`).
+- The "next steps" banner's `NOTE: enable [features] codex_hooks = true ...` block is removed.
+- New unit tests under `src/adapters/codex/tests/unit/` cover: always-write without flag, idempotent re-run, user-content preservation under merge, "warn: config.toml does not exist" string never emitted post-fix, uninstall preserves user content.
+- New invariant guard added to the Codex invariant suite pattern-matching `install.sh` for the unconditional-write semantics — prevents future regression to flag-gated behavior. Guard cites this finding ID (M-T1-04) so reviewers retain the historical motivation.
+- Integration test (extends `install_dispatcher.bats` or adds equivalent) verifies post-install `.codex/config.toml` exists with the flag (covers M-T1-04) AND `.coord/sessions.json` contains no install-smoke residue (covers in-scope finding M-T1-05; smoke residue cleanup is a separate non-amendment fix landing in the same PR).
+- README.md "Quick start" and `docs/codex-quickstart.md` updated to drop `--enable-codex-feature` from quickstart command examples and add a "If hooks aren't firing in Codex" troubleshooting entry referencing M-T1-04.
+
+*Estimated diff revised (directional):* ~300 → ~400 lines across `install.sh` rewrite + ~6 new unit tests + 1 new invariant guard + integration test extensions + docs. Apportionment reported in the PR completion entry.
+
+*Test surface delta (forecast):* +unit (codex_install always-write/idempotent/preserve/uninstall/warn-string-absent), +integration (config.toml existence + sessions.json clean), +invariant (unconditional-write guard). Counts confirmed in PR completion. No regression of any prior test.
+
+*Pre-conditions for resuming the fix PR:*
+- Plan v1.4 amendment (THIS commit) lands on `feat/codex-integration` and is reviewer-confirmed.
+- Then: `install.sh` rewrite + tests + docs land in a separate commit on the same branch.
 
 ### PR E.2 — Top-level `src/install.sh` becomes adapter dispatcher
 - **Goal:** Detect installed agents; install hooks for each requested.

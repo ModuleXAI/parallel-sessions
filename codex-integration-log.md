@@ -1894,6 +1894,151 @@ SHA commits across 8 phases (A through H).**
 
 ---
 
+## 2026-05-05
+
+Post-H.1 manual-testing arc: clean-install smoke on macOS with Codex CLI
+v0.128.0 surfaced findings invisible to the automated test surface. The
+H.1 ship-gate ran every test green (837 unit + 122 integration full -r +
+24 ship-gate fixtures + 19 Claude invariants + 7 Codex invariants), yet
+the user-facing first-run experience on a clean machine was a silent
+product failure. Tests pass ≠ user-facing behavior works. Filing
+findings + plan amendment + fix PR follows the same Plan Amendment
+Policy used for A-D4-01 / A-D4-02.
+
+### Manual-test findings filed by user
+
+- **M-T1-01 (DEFERRED — out of scope for this fix arc).** Launcher
+  binaries (`bin/parallels-codex`, `bin/parallels-claude`,
+  `bin/parallels-init`, `bin/parallels-status`) are not symlinked into
+  a system PATH dir on install. User must manually `ln -s` them into
+  `/usr/local/bin/` or equivalent. Scoped to a future "package
+  distribution" effort by the user. NOT included in this PR.
+
+- **M-T1-04 (BLOCKER — root of this fix arc).** `bash install.sh
+  --with-codex` (no `--enable-codex-feature` flag) writes
+  `.codex/hooks.json` but NOT `.codex/config.toml`. Per OpenAI's Codex
+  hooks documentation, hooks discovery requires an "active config
+  layer" — i.e. a sibling `config.toml` in the same directory as
+  `hooks.json`. Without `.codex/config.toml`, the layer is dormant,
+  Codex never attempts hook discovery, and the entire coord pipeline
+  is silently dead. Install nonetheless reports `EXIT_CODE=0` /
+  `[6/6] coord installation ready` / `next steps: Run parallels-codex`.
+  - BEFORE evidence captured by user (clean repo
+    `parallel-test-baseline`):
+    - Install banner sequence: prints `codex install: warn:
+      .codex/config.toml does not exist` three times, then
+      `[6/6] coord installation ready`. EXIT_CODE=0.
+    - Filesystem: `.codex/hooks.json` present, `.codex/config.toml`
+      absent.
+    - User runs `parallels-codex`, opens TUI: NO SessionStart banner.
+    - `grep -i hook ~/.codex/log/codex-tui.log` → ZERO lines (Codex
+      never attempted discovery).
+    - `.coord/events.jsonl` contains only install-time smoke entries;
+      no real-session SESSION_REGISTER / PROMPT_SUBMIT / PRE_BASH.
+    - `coord status` shows only IDLE_CLOSED smoke residue rows.
+  - REMEDIATION verified by user: manually creating `.codex/config.toml`
+    with `[features] codex_hooks = true` and re-running
+    `parallels-codex` immediately produced the SessionStart banner +
+    full event stream + `coord status` showing `agent=codex
+    state=ACTIVE`. The diff between "broken" and "working" is the
+    existence of `.codex/config.toml`.
+  - Authoritative reference (OpenAI Codex hooks docs, load-bearing
+    excerpt):
+    > "Codex discovers hooks next to active config layers in either
+    > of these forms: hooks.json | inline [hooks] tables inside
+    > config.toml. ... Project-local hooks load only when the project
+    > .codex/ layer is trusted."
+
+- **M-T1-05 (NON-BLOCKING — included in this fix PR for hygiene).**
+  Install-time smoke test pollutes coord state. Each install run
+  leaves a `claude-install-smoke-*` and a `codex-install-smoke-*`
+  row in `.coord/sessions.json`. The Codex smoke test additionally
+  registers but never emits SESSION_END (per D-10 — Codex has no
+  SessionEnd; Stop is the graceful release). After three reinstalls,
+  `coord status` shows three smoke residue rows. The xagent_setup
+  helpers in F.1 already perform this reset for tests; same hygiene
+  is owed to a real first-time user. Smoke logic must clean up its
+  own row on completion.
+
+### Why automated tests missed M-T1-04
+
+- Bats unit + integration tests inject hooks into adapter scripts via
+  direct invocation (`COORD_ENABLED=1 .../session_start.sh <<<JSON`)
+  bypassing Codex's own discovery layer.
+- `install_dispatcher_codex_only.bats` and friends verify
+  `.codex/hooks.json` shape but not `.codex/config.toml` existence.
+- Phase 7 invariant suite verifies hook scripts' deny-paths and
+  output shape but does not pattern-match `install.sh` for the
+  config.toml-write semantic.
+- Conclusion: the test surface lacks any guard that a real user's
+  first invocation of `parallels-codex` would produce a working hook
+  pipeline. This is the gap M-T1-04's invariant guard closes.
+
+### Plan amendment A-M-T1-04 (2026-05-05 plan v1.4) — `.codex/config.toml` is always written; `--enable-codex-feature` becomes a no-op back-compat alias.
+
+- Plan section affected: §"PR E.1 — `src/adapters/codex/install.sh`"
+  Goal trailing clause + "Feature flag handling" bullet + new
+  "Deviations recorded for E.1" subsection (A-M-T1-04 entry with the
+  full OpenAI docs excerpt + idempotency contract + uninstall
+  contract + impact list).
+- Reason: see M-T1-04 above. Active-config-layer rule is load-bearing
+  in Codex's hook discovery; the warn-and-continue path produced a
+  silent product failure with no in-product mechanism for the user
+  to discover the missing file. The full automated test surface
+  (837 unit + 122 integration + 24 ship-gate + 26 invariants at H.1)
+  missed this because tests don't go through Codex's own discovery
+  path.
+- Idempotency contract locked: file absent → create with minimal
+  content; file present + flag set → no-op; file present + flag
+  unset → merge into existing `[features]` block (or append) while
+  preserving user content. Repeated installer runs are byte-stable
+  on `.codex/config.toml` after the first.
+- Uninstall contract locked: do NOT delete the file if user content
+  exists beyond the installer-added line; strip only our own
+  contribution; remove the file only if it is solely our content.
+  Documented inline in `src/adapters/codex/install.sh`.
+- Source of amendment: M-T1-04 manual-test finding + OpenAI Codex
+  hooks documentation excerpt (active config layers rule). Authoritative
+  reference baked into plan §A-M-T1-04 permanently.
+- Plan v1.3 → v1.4.
+- Naming note: the post-completion finding ID scheme `M-T<phase>-<seq>`
+  (`M` = Manual-test) and amendment ID scheme `A-M-T<phase>-<seq>`
+  is honored explicitly per user direction (rather than the
+  section-seq scheme `D-{section}-{seq}` / `A-{section}-{seq}` used
+  by A-D4-01 / A-D4-02), since these findings sit outside the
+  pre-H.1 phase-by-phase implementation arc.
+
+### Pre-conditions for the fix PR
+
+- THIS commit (plan v1.4 amendment + log entry) lands as a standalone
+  commit on `feat/codex-integration`.
+- User confirms before the install.sh + tests + docs PR proceeds.
+- Then: A single fix PR rewrites `src/adapters/codex/install.sh`'s
+  `codex_feature_check` to always-write semantics; cleans up smoke
+  residue (M-T1-05); adds new unit tests, an integration extension,
+  and a new invariant guard pattern-matching the unconditional-write
+  semantic; updates README.md + docs/codex-quickstart.md to drop
+  `--enable-codex-feature` from quickstart commands and add a
+  "If hooks aren't firing in Codex" troubleshooting entry citing
+  M-T1-04.
+- Completion report mandate: re-run the user's BEFORE evidence
+  sequence on the same clean-repo pattern post-fix, capture AFTER
+  evidence for each of the 9 evidence points (TUI banner, hook
+  lifecycle log, events.jsonl, coord status, sessions.json clean,
+  config.toml exists with flag), and report a BEFORE/AFTER table.
+  Test surface delta and final commit SHA also reported.
+
+### Out-of-scope for this fix PR (deferred / future work)
+
+- M-T1-01 (launcher PATH symlinking) — future "package distribution"
+  effort.
+- POST-apply validator-pipeline telemetry on apply_patch (mentioned
+  in A-D4-01) — still future work; not affected by M-T1-04.
+- Any feature additions or refactors not directly required by
+  M-T1-04 / M-T1-05 fixes.
+
+---
+
 ## Pending entries (will be filled in as PRs progress)
 
 The structure below is a template; remove it once real entries replace it.
