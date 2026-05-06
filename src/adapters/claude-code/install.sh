@@ -229,6 +229,23 @@ EOF
   if [ -e "$COORD_DIR/sessions/${sid}.active" ]; then
     die "smoke test failed: .active marker not removed after SessionEnd"
   fi
+  # M-T1-05 hygiene (post-H.1 finding): SessionEnd transitions the
+  # session to IDLE_CLOSED but leaves the row in sessions.json. Pre-fix
+  # this left a `claude-install-smoke-*` row in `coord status` after
+  # every install. Mirror the codex installer's coord_atomic_edit
+  # cleanup so a real first-time user's `coord status` doesn't show
+  # install-smoke residue.
+  if [ -s "$COORD_DIR/sessions.json" ] && [ -s "$COORD_DIR/lib/atomic_write.sh" ]; then
+    # shellcheck disable=SC1091
+    . "$COORD_DIR/lib/atomic_write.sh"
+    coord_atomic_edit "$COORD_DIR/sessions.json" \
+      'del(.sessions[$sid])
+       | del(.read_sets[$sid])
+       | .locks |= with_entries(select(.value.session != $sid))
+       | .wait_queues |= with_entries(.value |= map(select(.session != $sid)))
+       | .wait_queues |= with_entries(select((.value // []) | length > 0))' \
+      --arg sid "$sid" >/dev/null 2>&1 || true
+  fi
   say "smoke test passed"
 }
 smoke_test

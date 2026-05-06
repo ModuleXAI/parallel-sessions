@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# Tests for src/adapters/codex/install.sh — PR E.1.
+# Tests for src/adapters/codex/install.sh — PR E.1 + A-M-T1-04 plan v1.4.
 #
 # Coverage:
 #   - Pre-flight: .coord/ must exist (helpful error if absent)
@@ -7,10 +7,16 @@
 #   - .codex/hooks.json shape: 5 events, 7 hook commands, correct matchers
 #   - Idempotent re-run: no duplicate entries
 #   - User-authored entries preserved across coord install/repair
-#   - Feature flag handling (warn-only by default; --enable-codex-feature
-#     writes config.toml)
-#   - Smoke test runs (session_start emits banner)
-#   - Uninstall strips coord-owned entries
+#   - codex_hooks feature flag in .codex/config.toml (A-M-T1-04 plan v1.4):
+#     unconditionally written/merged on install; three paths exercised
+#     (absent / present-with-flag / present-without-flag); user content
+#     under [features] preserved; "warn: config.toml does not exist"
+#     never emitted; --enable-codex-feature accepted as no-op back-compat
+#   - Smoke test runs (session_start emits banner) AND leaves no
+#     install-smoke residue in sessions.json (M-T1-05)
+#   - Uninstall strips coord-owned entries from hooks.json AND strips
+#     codex_hooks line from config.toml while preserving user content;
+#     removes config.toml only when it was solely our content
 #   - Installed hooks resolve LIB_DIR correctly (.coord/hooks/codex/ →
 #     .coord/lib/codex/ + .coord/lib/)
 
@@ -146,40 +152,148 @@ teardown() {
   [ "$output" = "1" ]
 }
 
-# === Feature flag (codex_hooks) ===
+# === Feature flag (codex_hooks) — A-M-T1-04 plan v1.4 always-write contract ==
+#
+# Per A-M-T1-04 the installer ALWAYS ensures `[features] codex_hooks =
+# true` in `.codex/config.toml`. The five contract paths covered below:
+#   (1) file absent → create with minimal flag content
+#   (2) file present + flag set → idempotent no-op (byte-stable)
+#   (3) file present + [features] block has OTHER flags but not
+#       codex_hooks → grep+awk inline merge under [features]; preserve
+#       OTHER flags AND non-features blocks byte-for-byte
+#   (4) file present without [features] block at all → append a new
+#       [features] block at EOF; preserve other content
+#   (5) "warn: .codex/config.toml does not exist" stderr line is NEVER
+#       emitted post-fix (this is the M-T1-04 BEFORE-evidence string;
+#       its presence indicates a regression to flag-gated behavior)
+#
+# Plus back-compat:
+#   - --enable-codex-feature accepted as no-op (does not error on
+#     unknown-flag rejection; same behavior with or without the flag)
 
-@test "codex install: warns when .codex/config.toml is absent (no flag)" {
+@test "codex install: (1) creates .codex/config.toml unconditionally when absent (A-M-T1-04)" {
+  # No --enable-codex-feature flag passed.
   run bash "$INSTALL" --yes --repo-root "$TMP"
   [ "$status" -eq 0 ]
-  echo "$output" | grep -q 'codex_hooks'
-}
-
-@test "codex install: --enable-codex-feature creates config.toml when absent" {
-  run bash "$INSTALL" --yes --enable-codex-feature --repo-root "$TMP"
-  [ "$status" -eq 0 ]
   [ -f "$TMP/.codex/config.toml" ]
-  grep -qE '^[[:space:]]*codex_hooks[[:space:]]*=[[:space:]]*true' "$TMP/.codex/config.toml"
-  grep -qE '^[[:space:]]*\[features\]' "$TMP/.codex/config.toml"
+  grep -qE '^[[:space:]]*\[features\][[:space:]]*$' "$TMP/.codex/config.toml"
+  grep -qE '^[[:space:]]*codex_hooks[[:space:]]*=[[:space:]]*true[[:space:]]*$' "$TMP/.codex/config.toml"
 }
 
-@test "codex install: --enable-codex-feature appends to config.toml without [features]" {
-  mkdir -p "$TMP/.codex"
-  printf '[other]\nfoo = "bar"\n' >"$TMP/.codex/config.toml"
-  bash "$INSTALL" --yes --enable-codex-feature --repo-root "$TMP" >/dev/null
-  grep -qE '^[[:space:]]*\[other\]' "$TMP/.codex/config.toml"
-  grep -qE '^[[:space:]]*\[features\]' "$TMP/.codex/config.toml"
-  grep -qE '^[[:space:]]*codex_hooks[[:space:]]*=[[:space:]]*true' "$TMP/.codex/config.toml"
-}
-
-@test "codex install: --enable-codex-feature is idempotent on already-enabled config" {
+@test "codex install: (2) idempotent on already-enabled config (byte-stable)" {
   mkdir -p "$TMP/.codex"
   printf '[features]\ncodex_hooks = true\n' >"$TMP/.codex/config.toml"
   local SHA1
   SHA1=$(shasum -a 256 "$TMP/.codex/config.toml" | awk '{print $1}')
-  bash "$INSTALL" --yes --enable-codex-feature --repo-root "$TMP" >/dev/null
+  bash "$INSTALL" --yes --repo-root "$TMP" >/dev/null
   local SHA2
   SHA2=$(shasum -a 256 "$TMP/.codex/config.toml" | awk '{print $1}')
   [ "$SHA1" = "$SHA2" ]
+  # Twice for good measure — running install three times in a row leaves
+  # the file byte-stable.
+  bash "$INSTALL" --yes --repo-root "$TMP" >/dev/null
+  local SHA3
+  SHA3=$(shasum -a 256 "$TMP/.codex/config.toml" | awk '{print $1}')
+  [ "$SHA1" = "$SHA3" ]
+}
+
+@test "codex install: (3) merge under [features] preserves OTHER flags + sibling blocks" {
+  # The canonical merge case the reviewer flagged as easy to miss: user
+  # already has a [features] block with OTHER flags. The installer must
+  # add `codex_hooks = true` UNDER [features] AND leave the other flags
+  # AND non-features blocks alone.
+  mkdir -p "$TMP/.codex"
+  cat >"$TMP/.codex/config.toml" <<'TOML'
+[other]
+foo = "bar"
+nested_value = 42
+
+[features]
+unrelated_user_flag = true
+another_flag = false
+
+[third_section]
+preserved = "yes"
+TOML
+  bash "$INSTALL" --yes --repo-root "$TMP" >/dev/null
+
+  # Our flag inserted under [features].
+  grep -qE '^[[:space:]]*codex_hooks[[:space:]]*=[[:space:]]*true[[:space:]]*$' "$TMP/.codex/config.toml"
+
+  # OTHER user flags preserved verbatim.
+  grep -qE '^[[:space:]]*unrelated_user_flag[[:space:]]*=[[:space:]]*true[[:space:]]*$' "$TMP/.codex/config.toml"
+  grep -qE '^[[:space:]]*another_flag[[:space:]]*=[[:space:]]*false[[:space:]]*$' "$TMP/.codex/config.toml"
+
+  # Sibling blocks preserved.
+  grep -qE '^[[:space:]]*\[other\][[:space:]]*$' "$TMP/.codex/config.toml"
+  grep -qE '^[[:space:]]*foo[[:space:]]*=[[:space:]]*"bar"[[:space:]]*$' "$TMP/.codex/config.toml"
+  grep -qE '^[[:space:]]*nested_value[[:space:]]*=[[:space:]]*42[[:space:]]*$' "$TMP/.codex/config.toml"
+  grep -qE '^[[:space:]]*\[third_section\][[:space:]]*$' "$TMP/.codex/config.toml"
+  grep -qE '^[[:space:]]*preserved[[:space:]]*=[[:space:]]*"yes"[[:space:]]*$' "$TMP/.codex/config.toml"
+
+  # Exactly ONE [features] block (we did not duplicate the header).
+  local features_count
+  features_count=$(grep -cE '^[[:space:]]*\[features\][[:space:]]*$' "$TMP/.codex/config.toml")
+  [ "$features_count" = "1" ]
+
+  # Exactly ONE codex_hooks line (we did not duplicate the line).
+  local codex_hooks_count
+  codex_hooks_count=$(grep -cE '^[[:space:]]*codex_hooks[[:space:]]*=[[:space:]]*true[[:space:]]*$' "$TMP/.codex/config.toml")
+  [ "$codex_hooks_count" = "1" ]
+
+  # Re-running the install is a no-op (still byte-stable on the merged content).
+  local SHA1 SHA2
+  SHA1=$(shasum -a 256 "$TMP/.codex/config.toml" | awk '{print $1}')
+  bash "$INSTALL" --yes --repo-root "$TMP" >/dev/null
+  SHA2=$(shasum -a 256 "$TMP/.codex/config.toml" | awk '{print $1}')
+  [ "$SHA1" = "$SHA2" ]
+}
+
+@test "codex install: (4) appends [features] block when config.toml has only other sections" {
+  mkdir -p "$TMP/.codex"
+  printf '[other]\nfoo = "bar"\n' >"$TMP/.codex/config.toml"
+  bash "$INSTALL" --yes --repo-root "$TMP" >/dev/null
+  # Other section preserved, new [features] block appended with our flag.
+  grep -qE '^[[:space:]]*\[other\][[:space:]]*$' "$TMP/.codex/config.toml"
+  grep -qE '^[[:space:]]*foo[[:space:]]*=[[:space:]]*"bar"[[:space:]]*$' "$TMP/.codex/config.toml"
+  grep -qE '^[[:space:]]*\[features\][[:space:]]*$' "$TMP/.codex/config.toml"
+  grep -qE '^[[:space:]]*codex_hooks[[:space:]]*=[[:space:]]*true[[:space:]]*$' "$TMP/.codex/config.toml"
+}
+
+@test "codex install: (5) NEVER emits 'config.toml does not exist' warn (M-T1-04 regression sentinel)" {
+  # The pre-v1.4 install path printed `codex install: warn:
+  # .codex/config.toml does not exist.` and copy-paste instructions
+  # whenever the user did not pass --enable-codex-feature. Plan v1.4
+  # eliminates the warn entirely (the installer creates the file
+  # unconditionally). If this string EVER appears in the install
+  # output again, the M-T1-04 fix has regressed.
+  run bash "$INSTALL" --yes --repo-root "$TMP"
+  [ "$status" -eq 0 ]
+  ! echo "$output" | grep -q 'config\.toml does not exist'
+  ! echo "$output" | grep -q 'Re-run with --enable-codex-feature'
+}
+
+# === --enable-codex-feature back-compat (no-op) ============================
+
+@test "codex install: --enable-codex-feature accepted as no-op (back-compat)" {
+  # Pre-v1.4 the flag was required for unattended config.toml writes.
+  # Plan v1.4 makes it a no-op. Existing user runbooks that still pass
+  # the flag must continue working without an "unknown flag" error.
+  run bash "$INSTALL" --yes --enable-codex-feature --repo-root "$TMP"
+  [ "$status" -eq 0 ]
+  [ -f "$TMP/.codex/config.toml" ]
+  grep -qE '^[[:space:]]*codex_hooks[[:space:]]*=[[:space:]]*true' "$TMP/.codex/config.toml"
+  # Behavior with the flag is identical to behavior without — the
+  # install must produce the SAME .codex/config.toml content.
+  rm -f "$TMP/.codex/config.toml"
+  bash "$INSTALL" --yes --repo-root "$TMP" >/dev/null
+  local SHA_NO_FLAG
+  SHA_NO_FLAG=$(shasum -a 256 "$TMP/.codex/config.toml" | awk '{print $1}')
+  rm -f "$TMP/.codex/config.toml"
+  bash "$INSTALL" --yes --enable-codex-feature --repo-root "$TMP" >/dev/null
+  local SHA_WITH_FLAG
+  SHA_WITH_FLAG=$(shasum -a 256 "$TMP/.codex/config.toml" | awk '{print $1}')
+  [ "$SHA_NO_FLAG" = "$SHA_WITH_FLAG" ]
 }
 
 # === Smoke test ===
@@ -188,6 +302,32 @@ teardown() {
   run bash "$INSTALL" --yes --repo-root "$TMP"
   [ "$status" -eq 0 ]
   echo "$output" | grep -q 'smoke test passed'
+}
+
+@test "codex install: smoke test leaves no codex-install-smoke-* residue in sessions.json (M-T1-05)" {
+  # Per M-T1-05 the install-time smoke session must NOT leave a row in
+  # sessions.json after install completes. The cleanup path uses
+  # coord_atomic_edit (per reviewer guidance) to atomically delete the
+  # synthetic row, eliminating the race window where the watchdog
+  # spawned by session_start.sh could re-insert it.
+  bash "$INSTALL" --yes --repo-root "$TMP" >/dev/null
+  # Zero codex-install-smoke-* rows.
+  local residue
+  residue=$(jq -r '
+    .sessions // {}
+    | to_entries
+    | map(select(.key | startswith("codex-install-smoke-")))
+    | length
+  ' "$TMP/.coord/sessions.json")
+  [ "$residue" = "0" ]
+  # Also verify no orphan locks/wait_queues for the smoke session.
+  local locks_residue
+  locks_residue=$(jq -r '
+    [(.locks // {}) | to_entries[].value.session]
+    | map(select(. // "" | startswith("codex-install-smoke-")))
+    | length
+  ' "$TMP/.coord/sessions.json")
+  [ "$locks_residue" = "0" ]
 }
 
 # === Installed-layout LIB_DIR resolution ===
@@ -243,4 +383,50 @@ teardown() {
     | map(select(. == "/path/to/user-hook.sh")) | length
   ' "$TMP/.codex/hooks.json"
   [ "$output" = "1" ]
+}
+
+# === Uninstall config.toml preservation (A-M-T1-04 uninstall contract) =====
+
+@test "codex install --uninstall: removes config.toml when it is solely our content" {
+  # Install creates config.toml with ONLY [features] codex_hooks = true.
+  bash "$INSTALL" --yes --repo-root "$TMP" >/dev/null
+  [ -f "$TMP/.codex/config.toml" ]
+  # Uninstall should remove the file entirely.
+  bash "$INSTALL" --yes --uninstall --repo-root "$TMP" >/dev/null
+  [ ! -f "$TMP/.codex/config.toml" ]
+}
+
+@test "codex install --uninstall: preserves user content; strips only codex_hooks" {
+  # User has a config.toml with their own content; install merged our
+  # flag in. Uninstall must remove only our line and leave their content.
+  mkdir -p "$TMP/.codex"
+  cat >"$TMP/.codex/config.toml" <<'TOML'
+[other]
+foo = "bar"
+
+[features]
+unrelated_user_flag = true
+
+[third]
+preserved = "yes"
+TOML
+  bash "$INSTALL" --yes --repo-root "$TMP" >/dev/null
+  # Sanity: install added our flag.
+  grep -qE '^[[:space:]]*codex_hooks[[:space:]]*=[[:space:]]*true' "$TMP/.codex/config.toml"
+  grep -qE '^[[:space:]]*unrelated_user_flag[[:space:]]*=[[:space:]]*true' "$TMP/.codex/config.toml"
+
+  # Uninstall.
+  bash "$INSTALL" --yes --uninstall --repo-root "$TMP" >/dev/null
+
+  # File still exists (user content remained).
+  [ -f "$TMP/.codex/config.toml" ]
+  # Our line gone.
+  ! grep -qE '^[[:space:]]*codex_hooks[[:space:]]*=[[:space:]]*true' "$TMP/.codex/config.toml"
+  # User flags preserved.
+  grep -qE '^[[:space:]]*\[other\]' "$TMP/.codex/config.toml"
+  grep -qE '^[[:space:]]*foo[[:space:]]*=[[:space:]]*"bar"' "$TMP/.codex/config.toml"
+  grep -qE '^[[:space:]]*\[features\]' "$TMP/.codex/config.toml"
+  grep -qE '^[[:space:]]*unrelated_user_flag[[:space:]]*=[[:space:]]*true' "$TMP/.codex/config.toml"
+  grep -qE '^[[:space:]]*\[third\]' "$TMP/.codex/config.toml"
+  grep -qE '^[[:space:]]*preserved[[:space:]]*=[[:space:]]*"yes"' "$TMP/.codex/config.toml"
 }

@@ -21,10 +21,10 @@ If the issue is intermittent, attach the relevant slice of `.coord/events.jsonl`
 git clone https://github.com/ModuleXAI/parallel-sessions.git
 cd parallel-sessions
 
-# Run the unit suite (837 tests across the bats files):
+# Run the unit suite (843 tests across the bats files):
 bats src/tests/unit
 
-# Run the integration suite top-level (77 tests):
+# Run the integration suite top-level (83 tests):
 bats src/tests/integration
 
 # Run the cross-agent integration suite (45 tests under
@@ -32,7 +32,7 @@ bats src/tests/integration
 # so an explicit -r is required):
 bats -r src/tests/integration/cross_agent
 
-# Run the full integration surface (122 tests including cross_agent):
+# Run the full integration surface (128 tests including cross_agent):
 bats -r src/tests/integration
 
 # Run the ship-gate drivers (24 scenarios across Phases 3-7):
@@ -88,13 +88,13 @@ In-line reference docs near the code: `src/core/lib/MEDIATOR_REFERENCE.md` and `
 1. Fork the repository and create a topic branch (`feat/...` or `fix/...`).
 2. Make your changes. Add or update tests; new behavior requires either a unit test or an integration test, and ideally a ship-gate fixture if it touches a hook contract. Cross-agent behavior changes require a `src/tests/integration/cross_agent/` scenario.
 3. Confirm the full local verification surface is green:
-   - `bats src/tests/unit` — 837/837 PASS
-   - `bats src/tests/integration` — 77/77 PASS (top-level)
+   - `bats src/tests/unit` — 843/843 PASS
+   - `bats src/tests/integration` — 83/83 PASS (top-level)
    - `bats -r src/tests/integration/cross_agent` — 45/45 PASS
-   - `bats -r src/tests/integration` — 122/122 PASS (full with recursion)
+   - `bats -r src/tests/integration` — 128/128 PASS (full with recursion)
    - `bash src/tests/manual/phase{3,4,5,6,7}_ship_gate.sh` — 24/24 PASS
    - `bats src/tests/unit/phase7_invariant.bats` — 19/19 PASS (Claude invariant)
-   - `bats src/tests/unit/codex_phase7_invariant.bats` — 7/7 PASS (Codex invariant)
+   - `bats src/tests/unit/codex_phase7_invariant.bats` — 8/8 PASS (Codex invariant; +1 in plan v1.4 for the unconditional config.toml-write contract per A-M-T1-04)
 4. Update documentation when behavior changes. Public-facing behavior changes go in `README.md`; in-tree reference docs (`src/core/lib/MEDIATOR_REFERENCE.md`, `src/core/lib/VALIDATOR_REFERENCE.md`) get updated when the relevant subsystem contract shifts. Codex-specific operator notes go in `docs/codex-quickstart.md` (when present).
 5. Open a PR. Describe what changed, why, and reference any issue. One reviewer approval is required before merge.
 6. Squash-merge is preferred for small/medium PRs; a clean linear history is the project default.

@@ -217,3 +217,116 @@ STUB
   grep -qxF '.codex/hooks.json' "$TMP/.gitignore"
   grep -qxF '.coord/' "$TMP/.gitignore"
 }
+
+# === A-M-T1-04 plan v1.4: codex install always writes .codex/config.toml ===
+
+@test "dispatcher: --with-codex (no flag) writes .codex/config.toml with codex_hooks (A-M-T1-04)" {
+  # Per A-M-T1-04 the codex adapter installs .codex/config.toml
+  # unconditionally — without this file, Codex's hook discovery layer is
+  # dormant and hooks.json is invisible (M-T1-04 BEFORE evidence).
+  # No --enable-codex-feature flag passed; the file must still appear.
+  cd "$TMP"
+  _make_codex_stub
+  PATH="$TEST_BASE_PATH" run bash "$INSTALL" --yes --with-codex
+  [ "$status" -eq 0 ]
+  [ -f "$TMP/.codex/config.toml" ]
+  grep -qE '^[[:space:]]*\[features\][[:space:]]*$' "$TMP/.codex/config.toml"
+  grep -qE '^[[:space:]]*codex_hooks[[:space:]]*=[[:space:]]*true[[:space:]]*$' "$TMP/.codex/config.toml"
+  # The pre-fix warn line MUST NOT appear.
+  ! echo "$output" | grep -q 'config\.toml does not exist'
+  # The pre-fix dispatcher NOTE block MUST NOT appear.
+  ! echo "$output" | grep -q 'NOTE: enable \[features\] codex_hooks = true'
+}
+
+@test "dispatcher: auto-detected codex install also writes .codex/config.toml" {
+  # The default code path (codex auto-detected on PATH, user did not pass
+  # any --with-* flag) is the one a real first-time user is most likely
+  # to hit. The M-T1-04 fix must apply here too.
+  cd "$TMP"
+  _make_codex_stub
+  PATH="$TEST_BASE_PATH" run bash "$INSTALL" --yes
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q 'codex binary detected on PATH'
+  [ -f "$TMP/.codex/config.toml" ]
+  grep -qE '^[[:space:]]*codex_hooks[[:space:]]*=[[:space:]]*true' "$TMP/.codex/config.toml"
+}
+
+# === M-T1-05: install smoke residue purged from .coord/sessions.json ===
+
+@test "dispatcher: post-install sessions.json contains zero install-smoke residue (M-T1-05)" {
+  # M-T1-05: the install-time smoke tests for both adapters used to leave
+  # `claude-install-smoke-*` and `codex-install-smoke-*` rows in
+  # sessions.json after install completed. Real first-time users would
+  # see these as "active" sessions in `coord status`. The fix uses
+  # coord_atomic_edit cleanup post-smoke for both installers.
+  cd "$TMP"
+  _make_codex_stub
+  PATH="$TEST_BASE_PATH" bash "$INSTALL" --yes --with-claude-code --with-codex >/dev/null
+  # Zero residue rows for either adapter.
+  local claude_residue codex_residue
+  claude_residue=$(jq -r '
+    .sessions // {}
+    | to_entries
+    | map(select(.key | startswith("claude-install-smoke-")))
+    | length
+  ' "$TMP/.coord/sessions.json")
+  codex_residue=$(jq -r '
+    .sessions // {}
+    | to_entries
+    | map(select(.key | startswith("codex-install-smoke-")))
+    | length
+  ' "$TMP/.coord/sessions.json")
+  [ "$claude_residue" = "0" ] || { echo "claude residue: $claude_residue"; jq '.sessions' "$TMP/.coord/sessions.json"; return 1; }
+  [ "$codex_residue" = "0" ] || { echo "codex residue: $codex_residue"; jq '.sessions' "$TMP/.coord/sessions.json"; return 1; }
+}
+
+@test "dispatcher: re-running install does not accumulate smoke residue (M-T1-05)" {
+  # Three reinstalls in a row — the user's BEFORE evidence reported
+  # accumulation of three smoke rows after three reinstalls. Post-fix
+  # the count stays at zero regardless of how many times install is run.
+  cd "$TMP"
+  _make_codex_stub
+  PATH="$TEST_BASE_PATH" bash "$INSTALL" --yes >/dev/null
+  PATH="$TEST_BASE_PATH" bash "$INSTALL" --yes >/dev/null
+  PATH="$TEST_BASE_PATH" bash "$INSTALL" --yes >/dev/null
+  local total_residue
+  total_residue=$(jq -r '
+    .sessions // {}
+    | to_entries
+    | map(select(.key | (startswith("claude-install-smoke-") or startswith("codex-install-smoke-"))))
+    | length
+  ' "$TMP/.coord/sessions.json")
+  [ "$total_residue" = "0" ]
+}
+
+# === --uninstall preserves user content in .codex/config.toml =============
+
+@test "dispatcher: --uninstall removes installer-only .codex/config.toml" {
+  cd "$TMP"
+  _make_codex_stub
+  PATH="$TEST_BASE_PATH" bash "$INSTALL" --yes --with-codex >/dev/null
+  [ -f "$TMP/.codex/config.toml" ]
+  PATH="$TEST_BASE_PATH" bash "$INSTALL" --yes --uninstall --with-codex >/dev/null
+  # Installer-only file removed.
+  [ ! -f "$TMP/.codex/config.toml" ]
+}
+
+@test "dispatcher: --uninstall preserves user content in .codex/config.toml" {
+  cd "$TMP"
+  _make_codex_stub
+  # Pre-seed user-authored config.toml with content beyond [features].
+  mkdir -p "$TMP/.codex"
+  printf '[other]\nfoo = "bar"\n' >"$TMP/.codex/config.toml"
+  # Install merges our flag in.
+  PATH="$TEST_BASE_PATH" bash "$INSTALL" --yes --with-codex >/dev/null
+  grep -qE 'codex_hooks[[:space:]]*=[[:space:]]*true' "$TMP/.codex/config.toml"
+  # Uninstall.
+  PATH="$TEST_BASE_PATH" bash "$INSTALL" --yes --uninstall --with-codex >/dev/null
+  # File preserved (it had user content).
+  [ -f "$TMP/.codex/config.toml" ]
+  # User content preserved.
+  grep -qE '^\[other\]$' "$TMP/.codex/config.toml"
+  grep -qE '^foo[[:space:]]*=[[:space:]]*"bar"$' "$TMP/.codex/config.toml"
+  # Our flag stripped.
+  ! grep -qE 'codex_hooks[[:space:]]*=[[:space:]]*true' "$TMP/.codex/config.toml"
+}

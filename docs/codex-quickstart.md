@@ -23,8 +23,7 @@ cd ~/parallel-sessions
 bash src/install.sh \
   --yes \
   --without-claude-code \
-  --with-codex \
-  --enable-codex-feature
+  --with-codex
 ```
 
 This:
@@ -32,14 +31,16 @@ This:
 - Copies Codex hooks into `<your-repo>/.coord/hooks/codex/`.
 - Copies Codex adapter libs into `<your-repo>/.coord/lib/codex/`.
 - Writes `<your-repo>/.codex/hooks.json` registering 5 events (SessionStart, Stop, UserPromptSubmit, PreToolUse with three matchers, PostToolUse on `^apply_patch$`).
-- Sets `[features] codex_hooks = true` in `<your-repo>/.codex/config.toml` (required for Codex to fire hooks; `--enable-codex-feature` flips it for you, otherwise the installer warns and prints copy-paste instructions).
+- Always writes/merges `[features] codex_hooks = true` into `<your-repo>/.codex/config.toml` (A-M-T1-04, plan v1.4). Codex's hook discovery requires this "active config layer" alongside `hooks.json`; without it, the discovery layer is dormant and the installer's hook registration is invisible to the Codex CLI. The installer is idempotent — if `.codex/config.toml` already contains the flag, it is left byte-stable; if it contains other user settings, the flag is merged in preserving user content.
 
 **Run from inside your project directory** (or pass an explicit repo root). The dispatcher resolves `.coord/` relative to git's `--show-toplevel` or `$PWD`.
+
+> The `--enable-codex-feature` flag from earlier releases is **deprecated** but still accepted as a no-op for back-compat with existing runbooks. Plan v1.4 makes the flag unnecessary because the installer always writes the active config layer.
 
 ### Option B — Codex + Claude (mixed mode)
 
 ```bash
-bash src/install.sh --yes --with-claude-code --with-codex --enable-codex-feature
+bash src/install.sh --yes --with-claude-code --with-codex
 ```
 
 Both adapters install into the same `.coord/`. Claude hooks land at `.coord/hooks/` (flat); Codex hooks at `.coord/hooks/codex/`. One shared `sessions.json` arbitrates writes from either agent type. See [README §Cross-agent coordination](../README.md#cross-agent-coordination).
@@ -120,14 +121,36 @@ The cross-agent invariants are exercised end-to-end across 45 integration tests 
 
 ## Troubleshooting
 
-### "codex_hooks feature flag is not set"
+### My Codex session doesn't show the SessionStart "Coord v1.0 active" banner — hooks aren't firing
 
-Re-run the installer with `--enable-codex-feature`, OR add to `.codex/config.toml` manually:
+Symptoms (from M-T1-04 BEFORE evidence, post-H.1 manual testing on macOS with Codex CLI v0.128.0):
 
-```toml
-[features]
-codex_hooks = true
+- Codex TUI opens, but no SessionStart banner appears.
+- `grep -i hook ~/.codex/log/codex-tui.log` returns ZERO lines (Codex never even attempted hook discovery).
+- `.coord/events.jsonl` has no real-session `SESSION_REGISTER` / `PROMPT_SUBMIT` / `PRE_BASH` entries — only install-time smoke entries.
+- `coord status` shows no active session despite the TUI being open.
+
+**Diagnostic command:**
+
+```bash
+cat .codex/config.toml
+# Should print at minimum:
+#   [features]
+#   codex_hooks = true
 ```
+
+**Root cause:** Codex's hook discovery requires an "active config layer" — a sibling `config.toml` in the same directory as `hooks.json`. Without `.codex/config.toml`, the layer is dormant and `.codex/hooks.json` is invisible. This was a silent product failure mode pre-v1.4 (install reported success / `EXIT_CODE=0` / "[6/6] coord installation ready" / "next steps: Run parallels-codex" — yet no hook ever fired).
+
+**Fix:** Plan v1.4 / A-M-T1-04 (commit `8cec664`) made the installer always write `.codex/config.toml` regardless of CLI flags. If you installed against this version of parallel-sessions and still see the symptoms above, re-run the installer:
+
+```bash
+bash src/install.sh --uninstall --with-codex
+bash src/install.sh --yes --with-codex
+```
+
+The installer's idempotent merge preserves any other user-authored content in `.codex/config.toml`. If you installed against an older version (pre-8cec664), creating `.codex/config.toml` with the snippet under "Diagnostic command" above resolves it without re-running the installer; the next `parallels-codex` invocation will produce the SessionStart banner.
+
+See `codex-integration-log.md` 2026-05-05 dated section for the full BEFORE/AFTER evidence trail.
 
 ### apply_patch is denied with a "drift" reason but I just read the file
 

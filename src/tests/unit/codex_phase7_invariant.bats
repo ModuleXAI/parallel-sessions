@@ -1,12 +1,11 @@
 #!/usr/bin/env bats
-# Phase 7 ship-gate invariant — Codex adapter (PR F.3).
+# Phase 7 ship-gate invariant — Codex adapter (PR F.3 + A-M-T1-04 plan v1.4).
 #
 # Mirror of src/tests/unit/phase7_invariant.bats focused on Codex-shape
 # regressions. The Claude invariant locks down 19 properties of the
-# Claude adapter; this file locks down 7 properties specific to the
-# Codex adapter (per plan §F.3 estimate ~5; landed at 7 after factoring
-# in tool-name + parser-not-sourced guards that the plan didn't
-# enumerate but that protect equally critical contracts).
+# Claude adapter; this file locks down 8 properties specific to the
+# Codex adapter (originally 7 at F.3; +1 in plan v1.4 for the
+# unconditional config.toml-write contract per A-M-T1-04).
 #
 # Each guard's comment cites the file:line in upstream Codex source
 # (codex-rs/) or in the locked-decision plan that establishes the
@@ -189,6 +188,84 @@ CODEX_INSTALL="$SRC_ROOT/adapters/codex/install.sh"
   fi
   if grep -E 'matcher:[[:space:]]*"apply_patch"' "$CODEX_INSTALL" >/dev/null; then
     echo "VIOLATION: install.sh has UNanchored 'apply_patch' matcher; must be ^apply_patch\$." >&2
+    return 1
+  fi
+}
+
+# === Guard #8 — A-M-T1-04: install.sh writes .codex/config.toml unconditionally =
+
+@test "codex invariant #8: install.sh writes .codex/config.toml unconditionally (A-M-T1-04 / commit 8cec664)" {
+  # WHY: A-M-T1-04 (M-T1-04 manual-test finding, plan v1.4 amendment,
+  # commit 8cec664). Codex hooks discovery requires an "active config
+  # layer" — a sibling `config.toml` in the .codex/ directory. Without
+  # config.toml, .codex/hooks.json is invisible to Codex and the entire
+  # coord pipeline is silently dead (M-T1-04 BEFORE evidence: clean-
+  # install smoke on macOS with Codex CLI v0.128.0 produced
+  # EXIT_CODE=0 / "[6/6] coord installation ready" / NO TUI banner /
+  # ZERO hook lifecycle log lines). The installer must ALWAYS write
+  # the flag, never gate it on --enable-codex-feature.
+  #
+  # Citations:
+  #   - codex-integration-plan.md §"Deviations recorded for E.1"
+  #     A-M-T1-04 (plan v1.4)
+  #   - codex-integration-log.md 2026-05-05 dated section
+  #   - commit 8cec664 (plan v1.4 amendment standalone)
+  #
+  # The guards below pattern-match install.sh against the four markers
+  # that together encode the contract. Each is loose enough to tolerate
+  # cosmetic refactors (spacing, comment rewording, function renames)
+  # but specific enough to catch a regression to flag-gated behavior.
+
+  # Marker 1 — finding ID present in a comment so reviewers find the
+  # historical motivation when reading install.sh.
+  if ! grep -q 'M-T1-04' "$CODEX_INSTALL"; then
+    echo "VIOLATION: install.sh missing M-T1-04 reference comment." >&2
+    echo "Add a comment citing M-T1-04 so the contract motivation is" >&2
+    echo "discoverable when a future contributor reads the installer." >&2
+    return 1
+  fi
+
+  # Marker 2 — plan v1.4 amendment commit pin (8cec664) OR the literal
+  # "plan v1.4" string. Either suffices; whichever the contributor
+  # used, the rationale points to the source-of-truth amendment.
+  if ! grep -qE 'plan v1\.4|8cec664' "$CODEX_INSTALL"; then
+    echo "VIOLATION: install.sh missing plan v1.4 / commit 8cec664 reference." >&2
+    echo "Add 'plan v1.4' or '8cec664' to the install.sh comment block" >&2
+    echo "linking to codex-integration-plan.md §'Deviations recorded for E.1'." >&2
+    return 1
+  fi
+
+  # Marker 3 — the literal `[features]` block + `codex_hooks = true`
+  # write must be present in install.sh. Cosmetic refactors of the
+  # surrounding awk/grep logic are fine; the literal flag content is
+  # not.
+  if ! grep -qE '\[features\]' "$CODEX_INSTALL"; then
+    echo "VIOLATION: install.sh missing the [features] block literal." >&2
+    return 1
+  fi
+  if ! grep -qE 'codex_hooks[[:space:]]*=[[:space:]]*true' "$CODEX_INSTALL"; then
+    echo "VIOLATION: install.sh missing the codex_hooks = true flag literal." >&2
+    return 1
+  fi
+
+  # Marker 4 — regression sentinel. Pre-fix install.sh emitted
+  # `codex install: warn: $CODEX_CONFIG_TOML does not exist.` (and a
+  # multi-line copy-paste-instructions warn block) when the user did
+  # not pass --enable-codex-feature. Plan v1.4 removes ALL of this.
+  # Re-introducing the string is the exact regression M-T1-04 closed.
+  if grep -q 'config.toml does not exist' "$CODEX_INSTALL"; then
+    echo "VIOLATION: install.sh contains the pre-fix 'config.toml does not exist'" >&2
+    echo "warn string. This is the M-T1-04 regression signature: the warn was" >&2
+    echo "the silent-failure surface; the fix replaces it with unconditional" >&2
+    echo "always-write semantics. See plan v1.4 §'Deviations recorded for E.1'" >&2
+    echo "/ A-M-T1-04 / commit 8cec664." >&2
+    grep -n 'config.toml does not exist' "$CODEX_INSTALL" >&2
+    return 1
+  fi
+  if grep -qE 'Re-run with --enable-codex-feature' "$CODEX_INSTALL"; then
+    echo "VIOLATION: install.sh contains pre-fix 'Re-run with --enable-codex-feature'" >&2
+    echo "instruction. The flag is now a no-op back-compat alias; this string" >&2
+    echo "is the M-T1-04 regression signature." >&2
     return 1
   fi
 }

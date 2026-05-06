@@ -73,8 +73,12 @@ usage: install.sh [--yes] [--repair] [--uninstall] [--bypass-permissions]
     --without-claude-code   skip Claude
     --with-codex            install Codex adapter; errors if codex absent
     --without-codex         skip Codex even if codex on PATH
-    --enable-codex-feature  flip [features] codex_hooks = true in
-                            .codex/config.toml (Codex installer only)
+    --enable-codex-feature  DEPRECATED no-op (kept for back-compat).
+                            Per A-M-T1-04 (plan v1.4 / commit 8cec664)
+                            the Codex installer now ALWAYS writes
+                            [features] codex_hooks = true into
+                            .codex/config.toml; passing this flag is
+                            harmless but unnecessary.
 USAGE
       exit 0 ;;
     *) printf 'install.sh: unknown argument: %s\n' "$arg" >&2; exit 2 ;;
@@ -472,11 +476,10 @@ fi
 if [ "$WITH_CODEX" = "1" ]; then
   say "  Codex:"
   say "    Run \`parallels-codex\` to start a coordinated Codex session."
-  if [ ! -f "$REPO_ROOT/.codex/config.toml" ] || \
-     ! grep -qE '^[[:space:]]*codex_hooks[[:space:]]*=[[:space:]]*true' "$REPO_ROOT/.codex/config.toml" 2>/dev/null; then
-    say "    NOTE: enable [features] codex_hooks = true in .codex/config.toml"
-    say "          (or re-run install.sh with --enable-codex-feature)"
-  fi
+  # Pre-v1.4 the dispatcher printed a NOTE block here whenever
+  # .codex/config.toml lacked codex_hooks = true. Per A-M-T1-04 the codex
+  # adapter now writes the flag unconditionally, so the warning path is
+  # unreachable and the block was removed.
 fi
 say "  Verify:    $COORD_DIR/bin/coord status"
 say "  Uninstall: bash $SELF_DIR/install.sh --uninstall"

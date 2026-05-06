@@ -53,11 +53,13 @@ bash src/install.sh
 bash src/install.sh --with-claude-code --with-codex
 
 # Codex only (skip Claude):
-bash src/install.sh --without-claude-code --with-codex --enable-codex-feature
+bash src/install.sh --without-claude-code --with-codex
 
 # Claude only (skip Codex even if codex is on PATH):
 bash src/install.sh --with-claude-code --without-codex
 ```
+
+> The `--enable-codex-feature` flag from earlier releases is **deprecated** but still accepted as a no-op for back-compat with existing runbooks. The Codex installer now always writes `[features] codex_hooks = true` into `.codex/config.toml` (A-M-T1-04, plan v1.4) — Codex's hook discovery requires that "active config layer" alongside `hooks.json`.
 
 Layout produced (mixed-mode, both adapters):
 
