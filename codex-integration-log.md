@@ -2037,6 +2037,164 @@ Policy used for A-D4-01 / A-D4-02.
 - Any feature additions or refactors not directly required by
   M-T1-04 / M-T1-05 fixes.
 
+### PR M.1 COMPLETED — A-M-T1-04 fix + M-T1-05 smoke residue cleanup.
+
+- Branch: feat/codex-integration.
+- Plan amendment commit: 8cec664 (plan v1.4 / A-M-T1-04, recorded
+  earlier in this 2026-05-05 dated section).
+- Fix PR commit: 3cb7ad7.
+- Final diff: 9 files changed, 675 insertions(+), 109 deletions(-).
+  - src/adapters/codex/install.sh:                    +253/-..
+  - src/tests/unit/codex_install.bats:                +238/-..
+  - src/tests/integration/install_dispatcher.bats:    +113/-0
+  - src/tests/unit/codex_phase7_invariant.bats:       +87/-1
+  - docs/codex-quickstart.md:                         +41/-19
+  - src/install.sh:                                   +17/-7
+  - src/adapters/claude-code/install.sh:              +17/-0
+  - CONTRIBUTING.md:                                  +14/-...
+  - README.md:                                        +4/-3
+- Tests added: +13.
+  - codex_install.bats: 14 → 19 (+5 contract paths net; replaced 4
+    stale --enable-codex-feature tests, added 5 contract tests + 1
+    flag-no-op back-compat test + 1 smoke residue assertion + 2
+    uninstall config.toml tests).
+  - install_dispatcher.bats: 11 → 17 (+6: 2 config.toml-existence,
+    2 sessions.json-clean, 2 uninstall preservation).
+  - codex_phase7_invariant.bats: 7 → 8 (+1: Guard #8 unconditional
+    config.toml-write semantics, four-marker pattern: M-T1-04 ID +
+    plan v1.4/8cec664 reference + flag literal + regression sentinel).
+- Test surface state at HEAD:
+  - bats src/tests/unit:                  PASS 843/843 (was 837; +6)
+  - bats src/tests/integration:           PASS  83/83  (was 77;  +6)
+  - bats -r src/tests/integration:        PASS 128/128 (was 122; +6)
+  - bats -r .../cross_agent:              PASS  45/45  (unchanged)
+  - phase{3,4,5,6,7}_ship_gate.sh:        PASS  22/22
+  - two_session_warn.sh:                  PASS   2/2
+                                         (combined 24/24, unchanged)
+  - phase7_invariant.bats (Claude):       PASS  19/19  (unchanged)
+  - codex_phase7_invariant.bats (Codex):  PASS   8/8   (was 7;   +1)
+- Zero failing tests; zero regressions of any prior test (D-13
+  honored).
+- In-scope findings during the fix PR (no plan amendment):
+  - F-M1-01: smoke cleanup race window — pre-fix Codex installer used
+    inline `jq | mv` for sessions.json cleanup, bypassing
+    sessions.lock. Watchdog spawned by session_start.sh's smoke run
+    could re-insert the row after cleanup. Switched to
+    `coord_atomic_edit` (sourced from .coord/lib/atomic_write.sh) per
+    reviewer-mandated atomicity. Same fix applied to Claude installer
+    (which previously had no sessions.json cleanup at all).
+  - F-M1-02: cleanup also clears read_sets / locks / wait_queues for
+    the smoke session id, not just the sessions{} row. Pre-fix code
+    only deleted .sessions[$sid]; in pathological runs the smoke
+    session could leave orphan lock entries pointing at the deleted
+    session id. Defense-in-depth widening, no behavior change for
+    well-behaved smokes.
+  - F-M1-03: `--enable-codex-feature` flag retained as accepted
+    no-op in the codex installer's `--repo-root`-style argument
+    parser (so existing user runbooks/CI scripts that still pass
+    the flag don't trip on "unknown flag, exit 2"). Verified by the
+    new "back-compat" test in codex_install.bats.
+  - F-M1-04: M-T<tier>-<NN> ID schema definition baked into
+    install.sh header docblock per reviewer guidance — first-time
+    readers can derive what `M-T1-04` means without spelunking the
+    log. Same docblock notes the M-T1-* sequence gap (M-T1-02/03
+    unassigned during user's smoke run; M-T1-01 deferred to future
+    "package distribution" effort).
+  - F-M1-05: invariant guard #8 uses four loose pattern markers
+    rather than one strict regex, per reviewer guidance "specific
+    enough to catch regression but not so brittle it breaks on
+    cosmetic refactors". The regression sentinel marker (the literal
+    "config.toml does not exist" warn string) is the highest-signal
+    marker — its presence indicates the M-T1-04 fix has regressed.
+
+### AFTER-evidence (clean-tmp install on this machine)
+
+Captured by running `bash src/install.sh --yes --with-codex` against a
+fresh `mktemp -d` repo with stub `codex` on PATH. The same evidence
+sequence the user captured for BEFORE on `parallel-test-baseline`,
+re-run point-by-point post-fix:
+
+| # | Evidence point                                                          | BEFORE (pre-fix, user-captured)                                                                                  | AFTER (post-fix, this commit)                                                                                                          | Verifiable how                  |
+|---|-------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------|---------------------------------|
+| 1 | Clean repo created                                                      | OK                                                                                                               | OK                                                                                                                                     | mktemp tmpdir + `git init`      |
+| 2 | `bash install.sh --with-codex` (no flag) → rc=0 + `.codex/config.toml`  | rc=0 + `.codex/hooks.json` only; `.codex/config.toml` ABSENT                                                     | rc=0 + `.codex/hooks.json` AND `.codex/config.toml` containing `[features]\ncodex_hooks = true`                                       | machine-verified                |
+| 3 | No "warn: config.toml does not exist" line in install banner            | Three `codex install: warn:` lines printed to stderr listing the missing file + copy-paste fix instructions      | Zero matches; replaced with single neutral info note: `codex install: created ... with [features] codex_hooks = true (active config layer; required per A-M-T1-04)` | machine-verified (`grep -c`)    |
+| 4 | `parallels-codex` opens; SessionStart banner appears in TUI             | NO banner appeared                                                                                               | Banner expected per F-M1 hook layer (machine cannot drive interactive TUI from this shell — runbook below)                            | user-side verification          |
+| 5 | `grep -i hook ~/.codex/log/codex-tui.log` produces hook lifecycle lines | ZERO matches (Codex never attempted hook discovery — layer dormant)                                              | Lifecycle lines expected (loaded N hooks / dispatched / etc.)                                                                          | user-side verification          |
+| 6 | `.coord/events.jsonl` real-session SESSION_REGISTER / PROMPT_SUBMIT / PRE_BASH | Only install-time smoke entries; no real-session rows after `parallels-codex` opened the TUI                | Real-session SESSION_REGISTER + (on prompt) PROMPT_SUBMIT + (on bash tool call) PRE_BASH — same path as Claude                         | user-side verification          |
+| 7 | `coord status` shows `agent=codex state=ACTIVE` for the live TUI        | Only IDLE_CLOSED smoke residue rows; no active codex session                                                     | ACTIVE codex session row visible; smoke residue rows ABSENT (point #8)                                                                | user-side verification          |
+| 8 | `.coord/sessions.json` contains zero install-smoke residue              | One `claude-install-smoke-*` row + one `codex-install-smoke-*` row per install run; accumulated 3+ across reinstalls | Zero residue rows after install completes; zero accumulation across 3 reinstalls (verified by integration test)                       | machine-verified (jq filter)    |
+| 9 | Behavior diff table: BEFORE vs AFTER, one row per evidence point        | (this table)                                                                                                     | (this table)                                                                                                                           | this row                        |
+
+### User-side runbook for evidence points 4-7
+
+Run on a clean macOS install with Codex CLI v0.128.0 (or newer) on
+PATH, mirroring the user's BEFORE-evidence capture:
+
+```
+# Clean repo + install
+TMP=$(mktemp -d -t parallels-after-XXXX) && cd "$TMP" &&
+  git init && git config user.email t@t && git config user.name T &&
+  bash <repo>/src/install.sh --yes --with-codex
+echo "EXIT_CODE=$?"
+cat .codex/config.toml                # point 2
+
+# Quick TUI session
+parallels-codex                       # point 4: SessionStart banner
+                                      #          ("Coord v1.0 active...")
+# (in Codex prompt, type any prompt that issues a Bash command, e.g.:
+#   echo hello
+# then exit)
+
+# Verify points 5/6/7
+grep -i hook ~/.codex/log/codex-tui.log | tail -20    # point 5
+jq -rs '.[] | select(.session != null
+                     and (.session | startswith("codex-install-smoke-") | not)
+                     and (.kind == "SESSION_REGISTER"
+                          or .kind == "PROMPT_SUBMIT"
+                          or .kind == "PRE_BASH"))' \
+  .coord/events.jsonl                                  # point 6
+"$TMP/.coord/bin/coord" status                          # point 7
+jq '.sessions | to_entries
+   | map(select(.key | (startswith("claude-install-smoke-")
+                         or startswith("codex-install-smoke-"))))
+   | length' .coord/sessions.json                       # point 8
+```
+
+If point 4-7 fails on a fresh-clone install, the most likely cause is
+that the install was run against a pre-`8cec664` checkout (i.e. before
+the plan v1.4 amendment). Verify with `git log --oneline | grep
+8cec664` from inside the source tree and re-run the install against
+`feat/codex-integration` HEAD or later.
+
+### Lessons recorded
+
+- **Tests pass ≠ user-facing behavior works.** The H.1 ship-gate's
+  837 unit + 122 integration + 24 ship-gate + 26 invariants all
+  passed, but the user-facing first-run experience on a clean
+  machine was a silent product failure. The gap: tests inject hooks
+  via direct invocation, bypassing Codex's own discovery layer. The
+  invariant guard #8 closes the regression surface, but does not
+  by itself catch this kind of miss — only manual TUI runs against
+  a real installed Codex CLI catch contract violations of the
+  active-config-layer rule. Future post-completion shipping efforts
+  should include a clean-machine smoke run as part of the gate, not
+  just bats counts.
+
+- **Manual-test finding ID schema (M-T<tier>-<NN>).** Filed by the
+  user, baked into install.sh header docblock + log per reviewer
+  guidance. The gap in the M-T1-* sequence (01, 04, 05; no 02/03)
+  is documented; future post-completion findings extend the same
+  scheme.
+
+- **OpenAI Codex hooks docs are load-bearing.** The "active config
+  layers" rule is the source-of-truth that the plan amendment cites
+  permanently. Future Codex-side changes that touch hook discovery
+  must be cross-checked against the upstream docs OR the
+  codex-rs/hooks/src/engine/ source. Citations are baked into both
+  the plan §"Deviations recorded for E.1" and the troubleshooting
+  entry in docs/codex-quickstart.md.
+
 ---
 
 ## Pending entries (will be filled in as PRs progress)
