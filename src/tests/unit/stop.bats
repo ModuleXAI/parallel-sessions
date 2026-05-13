@@ -8,10 +8,10 @@
 
 load "../helpers/common"
 
-H="$SRC_ROOT/hooks/stop.sh"
-HW="$SRC_ROOT/hooks/pre_tool_use_write.sh"
-H_END="$SRC_ROOT/hooks/session_end.sh"
-A="$SRC_ROOT/lib/atomic_write.sh"
+H="$SRC_ROOT/adapters/claude-code/hooks/stop.sh"
+HW="$SRC_ROOT/adapters/claude-code/hooks/pre_tool_use_write.sh"
+H_END="$SRC_ROOT/adapters/claude-code/hooks/session_end.sh"
+A="$SRC_ROOT/core/lib/atomic_write.sh"
 
 setup() {
   TMP="$(mktemp -d -t coord-stop-XXXX)"
@@ -142,11 +142,11 @@ _other_attempt() {
   [ "$output" = "1" ]
   mkdir -p "$COORD_DIR/wakers" "$COORD_DIR/wait_queues"
   # shellcheck disable=SC1091
-  . "$SRC_ROOT/lib/atomic_write.sh"
+  . "$SRC_ROOT/core/lib/atomic_write.sh"
   # shellcheck disable=SC1091
-  . "$SRC_ROOT/lib/log_event.sh"
+  . "$SRC_ROOT/core/lib/log_event.sh"
   # shellcheck disable=SC1091
-  . "$SRC_ROOT/lib/wait_queue.sh"
+  . "$SRC_ROOT/core/lib/wait_queue.sh"
   COORD_DIR="$COORD_DIR" coord_wait_queue_enqueue "$OTHER" "$TARGET1" >/dev/null
   # Now SID stops → release should populate notifications[OTHER][TARGET1].
   CLAUDE_COORD=1 bash -c "echo '$STOP_INPUT' | '$H'" >/dev/null

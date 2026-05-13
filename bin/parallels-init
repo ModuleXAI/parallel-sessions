@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# parallels-init — install / repair / uninstall coord into the current folder.
+#
+# Thin wrapper around src/install.sh. Sub-commands and flags are forwarded
+# verbatim. Run from the directory you want .coord/ to live in.
+#
+# Examples:
+#   parallels-init                # interactive install
+#   parallels-init --yes          # non-interactive install
+#   parallels-init --repair       # overwrite hooks/libs/bin from src/
+#   parallels-init --uninstall    # remove hook registrations
+#
+# Phase B PR B.2.
+
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec bash "$SCRIPT_DIR/../src/install.sh" "$@"

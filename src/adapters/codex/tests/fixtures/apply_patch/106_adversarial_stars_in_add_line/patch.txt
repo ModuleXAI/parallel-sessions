@@ -1,0 +1,6 @@
+*** Begin Patch
+*** Add File: docs.md
++# Patch format docs
++The marker `*** Update File: foo` opens an update block.
++The marker `*** End Patch` terminates the patch.
+*** End Patch

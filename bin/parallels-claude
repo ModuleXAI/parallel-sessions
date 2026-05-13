@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# parallels-claude — start a Claude Code session with coord coordination active.
+#
+# Replaces the old "export CLAUDE_COORD=1; claude" UX. Sets COORD_ENABLED=1
+# (canonical) and execs `claude` with whatever args were passed.
+#
+# Pre-conditions:
+#   - .coord/ exists somewhere at-or-above $PWD (run `parallels-init` first).
+#   - `claude` binary is on PATH.
+#
+# Phase B PR B.2.
+
+set -euo pipefail
+
+# Locate .coord/ via simple cwd-walk-up. The rich resolution algorithm
+# lives in src/core/lib/folder_resolver.sh — but pulling that in would
+# require sourcing the lib + setting up CORE_LIB_DIR plumbing for a
+# launcher script. For the launcher's "did the user run init?" check,
+# a 5-line walk-up is enough.
+_walk_for_coord() {
+  local cur="$PWD"
+  while [ -n "$cur" ] && [ "$cur" != "/" ]; do
+    if [ -d "$cur/.coord" ]; then
+      printf '%s\n' "$cur"
+      return 0
+    fi
+    cur=$(dirname "$cur")
+  done
+  return 1
+}
+
+if ! coord_root=$(_walk_for_coord); then
+  printf 'parallels-claude: no .coord/ found from %s upward.\n' "$PWD" >&2
+  printf '                  Run `parallels-init` first.\n' >&2
+  exit 2
+fi
+
+if ! command -v claude >/dev/null 2>&1; then
+  printf 'parallels-claude: `claude` binary not on PATH.\n' >&2
+  printf '                  Install Claude Code from https://claude.ai/code first.\n' >&2
+  exit 3
+fi
+
+# COORD_ENABLED=1 is the new canonical participation flag (PR B.2).
+# Hooks fall back to CLAUDE_COORD when COORD_ENABLED is unset, so legacy
+# `export CLAUDE_COORD=1; claude` workflows keep working too.
+exec env COORD_ENABLED=1 claude "$@"

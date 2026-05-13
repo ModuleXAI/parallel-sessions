@@ -18,8 +18,8 @@
 
 load "../helpers/common"
 
-LIB="$SRC_ROOT/lib/cost_guards.sh"
-LOG_EVENT="$SRC_ROOT/lib/log_event.sh"
+LIB="$SRC_ROOT/core/lib/cost_guards.sh"
+LOG_EVENT="$SRC_ROOT/core/lib/log_event.sh"
 
 setup() {
   TMP="$(mktemp -d -t coord-cost-guards-XXXX)"

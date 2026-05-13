@@ -3,7 +3,7 @@
 
 load "../helpers/common"
 
-H="$SRC_ROOT/hooks/user_prompt_submit.sh"
+H="$SRC_ROOT/adapters/claude-code/hooks/user_prompt_submit.sh"
 
 setup() {
   TMP="$(mktemp -d -t coord-ups-XXXX)"

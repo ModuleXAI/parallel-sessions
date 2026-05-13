@@ -24,8 +24,8 @@
 
 load "../helpers/common"
 
-H="$SRC_ROOT/hooks/pre_tool_use_write.sh"
-HR="$SRC_ROOT/hooks/pre_tool_use_read.sh"
+H="$SRC_ROOT/adapters/claude-code/hooks/pre_tool_use_write.sh"
+HR="$SRC_ROOT/adapters/claude-code/hooks/pre_tool_use_read.sh"
 
 setup() {
   TMP="$(mktemp -d -t coord-ptuw-pipe-XXXX)"
@@ -220,8 +220,8 @@ _run_hook_with_mocks() {
   bash -c "
     export COORD_DIR='$COORD_DIR'
     export SESSION_ID='$SID'
-    . '$SRC_ROOT/lib/log_event.sh'
-    . '$SRC_ROOT/lib/validator_cache.sh'
+    . '$SRC_ROOT/core/lib/log_event.sh'
+    . '$SRC_ROOT/core/lib/validator_cache.sh'
     coord_validator_cache_write '$SRC' '$STORED_HASH' '$CURRENT_HASH' SAFE prefilter
   "
   # Run the hook — expects cache hit, no spawn, no banner.
@@ -243,8 +243,8 @@ _run_hook_with_mocks() {
   bash -c "
     export COORD_DIR='$COORD_DIR'
     export SESSION_ID='$SID'
-    . '$SRC_ROOT/lib/log_event.sh'
-    . '$SRC_ROOT/lib/validator_cache.sh'
+    . '$SRC_ROOT/core/lib/log_event.sh'
+    . '$SRC_ROOT/core/lib/validator_cache.sh'
     coord_validator_cache_write '$SRC' '$STORED_HASH' '$CURRENT_HASH' MINOR validator_agent 'Cached MINOR summary'
   "
   _run_hook_with_mocks SAFE

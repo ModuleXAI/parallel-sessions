@@ -13,8 +13,8 @@
 
 load "../helpers/common"
 
-H="$SRC_ROOT/hooks/pre_tool_use_write.sh"
-HP="$SRC_ROOT/hooks/post_tool_use_write.sh"
+H="$SRC_ROOT/adapters/claude-code/hooks/pre_tool_use_write.sh"
+HP="$SRC_ROOT/adapters/claude-code/hooks/post_tool_use_write.sh"
 
 setup() {
   TMP="$(mktemp -d -t coord-post-tp-XXXX)"

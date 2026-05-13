@@ -50,9 +50,9 @@ _simulated_spawn_check() {
   bash -c '
     set -euo pipefail
     export COORD_TEST_MODE="'"$mode"'"
-    source "'"$SRC_ROOT"'/lib/log_event.sh"
-    source "'"$SRC_ROOT"'/lib/spawn_helper.sh"
-    source "'"$SRC_ROOT"'/lib/cost_guards.sh"
+    source "'"$SRC_ROOT"'/core/lib/log_event.sh"
+    source "'"$SRC_ROOT"'/core/lib/spawn_helper.sh"
+    source "'"$SRC_ROOT"'/core/lib/cost_guards.sh"
     if coord_spawn_helper_should_use_real_claude "'"$site"'"; then
       if coord_cost_guards_check "'"$site"'"; then
         printf "spawn-real-allow\n"
@@ -228,14 +228,14 @@ EOF
     export COORD_DIR="'"$COORD_DIR"'"
     export SESSION_ID="'"$SESSION_ID"'"
     export COORD_VALIDATOR_MAX_SPAWNS_PER_HOUR=2
-    source "'"$SRC_ROOT"'/lib/log_event.sh"
-    source "'"$SRC_ROOT"'/lib/hash.sh"
-    source "'"$SRC_ROOT"'/lib/read_snapshots.sh"
-    source "'"$SRC_ROOT"'/lib/validator_cache.sh"
-    source "'"$SRC_ROOT"'/lib/validator_prefilter.sh"
-    source "'"$SRC_ROOT"'/lib/validator_spawn.sh"
-    source "'"$SRC_ROOT"'/lib/spawn_helper.sh"
-    source "'"$SRC_ROOT"'/lib/cost_guards.sh"
+    source "'"$SRC_ROOT"'/core/lib/log_event.sh"
+    source "'"$SRC_ROOT"'/core/lib/hash.sh"
+    source "'"$SRC_ROOT"'/core/lib/read_snapshots.sh"
+    source "'"$SRC_ROOT"'/core/lib/validator_cache.sh"
+    source "'"$SRC_ROOT"'/core/lib/validator_prefilter.sh"
+    source "'"$SRC_ROOT"'/core/lib/validator_spawn.sh"
+    source "'"$SRC_ROOT"'/core/lib/spawn_helper.sh"
+    source "'"$SRC_ROOT"'/core/lib/cost_guards.sh"
     # Direct call to validator_spawn with rate-limited counter.
     if coord_validator_spawn "$SESSION_ID" "'"$target"'" abc123 def456 2>/dev/null; then
       printf "spawn-allowed\n"
@@ -276,12 +276,12 @@ EOF
     export SESSION_ID="'"$SESSION_ID"'"
     export COORD_MEDIATOR_MAX_INVOCATIONS_PER_HOUR=2
     export COORD_MEDIATOR_MIN_SECONDS_BETWEEN_INVOCATIONS=0
-    source "'"$SRC_ROOT"'/lib/log_event.sh"
-    source "'"$SRC_ROOT"'/lib/atomic_write.sh" 2>/dev/null || true
-    source "'"$SRC_ROOT"'/lib/mediator_pending.sh" 2>/dev/null || true
-    source "'"$SRC_ROOT"'/lib/mediator_spawn.sh"
-    source "'"$SRC_ROOT"'/lib/spawn_helper.sh"
-    source "'"$SRC_ROOT"'/lib/cost_guards.sh"
+    source "'"$SRC_ROOT"'/core/lib/log_event.sh"
+    source "'"$SRC_ROOT"'/core/lib/atomic_write.sh" 2>/dev/null || true
+    source "'"$SRC_ROOT"'/core/lib/mediator_pending.sh" 2>/dev/null || true
+    source "'"$SRC_ROOT"'/core/lib/mediator_spawn.sh"
+    source "'"$SRC_ROOT"'/core/lib/spawn_helper.sh"
+    source "'"$SRC_ROOT"'/core/lib/cost_guards.sh"
     coord_mediator_spawn p1 1 "" 2>/dev/null || true
   '
   sleep 0.3
@@ -300,12 +300,12 @@ EOF
   # Static check: cost_guards.sh, the modified spawn-site rate-
   # limit blocks, and the pipeline graceful-degrade path must all
   # remain free of permissionDecision strings.
-  ! grep -q 'permissionDecision' "$SRC_ROOT/lib/cost_guards.sh"
-  ! grep -q 'permissionDecision' "$SRC_ROOT/lib/spawn_helper.sh"
+  ! grep -q 'permissionDecision' "$SRC_ROOT/core/lib/cost_guards.sh"
+  ! grep -q 'permissionDecision' "$SRC_ROOT/core/lib/spawn_helper.sh"
   # Spawn-site files: the only permissionDecision uses are in
   # pre_tool_use_write.sh's lock-held branch + lockdown.sh; the
   # spawn-site libs themselves remain clean.
-  ! grep -q 'permissionDecision' "$SRC_ROOT/lib/mediator_spawn.sh"
-  ! grep -q 'permissionDecision' "$SRC_ROOT/lib/validator_spawn.sh"
-  ! grep -q 'permissionDecision' "$SRC_ROOT/lib/task_processor.sh"
+  ! grep -q 'permissionDecision' "$SRC_ROOT/core/lib/mediator_spawn.sh"
+  ! grep -q 'permissionDecision' "$SRC_ROOT/core/lib/validator_spawn.sh"
+  ! grep -q 'permissionDecision' "$SRC_ROOT/core/lib/task_processor.sh"
 }

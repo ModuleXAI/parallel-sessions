@@ -1,0 +1,43 @@
+{
+  "rc": 0,
+  "paths": [
+    "nested/new.txt",
+    "delete.txt",
+    "modify.txt"
+  ],
+  "operations": [
+    {
+      "op": "add",
+      "path": "nested/new.txt",
+      "move_to": null
+    },
+    {
+      "op": "delete",
+      "path": "delete.txt",
+      "move_to": null
+    },
+    {
+      "op": "update",
+      "path": "modify.txt",
+      "move_to": null
+    }
+  ],
+  "hunks_by_path": {
+    "modify.txt": [
+      {
+        "header": "",
+        "pre_image": "line2",
+        "post_image": "changed",
+        "is_end_of_file": false
+      }
+    ],
+    "nested/new.txt": [
+      {
+        "header": "",
+        "pre_image": "",
+        "post_image": "created",
+        "is_end_of_file": false
+      }
+    ]
+  }
+}

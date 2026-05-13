@@ -28,25 +28,25 @@ setup() {
   : >"$COORD_DIR/events.jsonl"
   printf '{"schema_version":"1.0","wait_backend":"polling"}' >"$COORD_DIR/config.json"
   # shellcheck disable=SC1091
-  . "$SRC_ROOT/lib/atomic_write.sh"
+  . "$SRC_ROOT/core/lib/atomic_write.sh"
   # shellcheck disable=SC1091
-  . "$SRC_ROOT/lib/log_event.sh"
+  . "$SRC_ROOT/core/lib/log_event.sh"
   # shellcheck disable=SC1091
-  . "$SRC_ROOT/lib/hash.sh"
+  . "$SRC_ROOT/core/lib/hash.sh"
   # shellcheck disable=SC1091
-  . "$SRC_ROOT/lib/wait_queue.sh"
+  . "$SRC_ROOT/core/lib/wait_queue.sh"
   # shellcheck disable=SC1091
-  . "$SRC_ROOT/lib/cycle_detection.sh"
+  . "$SRC_ROOT/core/lib/cycle_detection.sh"
   # shellcheck disable=SC1091
-  . "$SRC_ROOT/lib/wait_backend.sh"
+  . "$SRC_ROOT/core/lib/wait_backend.sh"
   # shellcheck disable=SC1091
-  . "$SRC_ROOT/lib/validator_cache.sh"
+  . "$SRC_ROOT/core/lib/validator_cache.sh"
   # shellcheck disable=SC1091
-  . "$SRC_ROOT/lib/validator_prefilter.sh"
+  . "$SRC_ROOT/core/lib/validator_prefilter.sh"
   # shellcheck disable=SC1091
-  . "$SRC_ROOT/lib/read_snapshots.sh"
+  . "$SRC_ROOT/core/lib/read_snapshots.sh"
   # shellcheck disable=SC1091
-  . "$SRC_ROOT/lib/notify_waiters.sh"
+  . "$SRC_ROOT/core/lib/notify_waiters.sh"
 }
 teardown() {
   rm -rf "$TMP"
@@ -218,7 +218,7 @@ _release() {
 
 @test "T5.08 S3.d: cycle_detected entry consumable by kind-agnostic mediator_pending pipeline" {
   # shellcheck disable=SC1091
-  . "$SRC_ROOT/lib/mediator_pending.sh"
+  . "$SRC_ROOT/core/lib/mediator_pending.sh"
   _acquire "/p/foo" "sid-A"
   _acquire "/p/bar" "sid-B"
   SESSION_ID=sid-A coord_wait_queue_enqueue sid-A /p/bar >/dev/null

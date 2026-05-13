@@ -80,23 +80,23 @@ teardown() {
 @test "pre_tool_use_write.sh sources spawn_helper.sh + cost_guards.sh defensively" {
   # Static check: T7.05 wired the sourcing in. Regression guard
   # against future edits that drop these lines.
-  grep -q 'spawn_helper.sh' "$SRC_ROOT/hooks/pre_tool_use_write.sh"
-  grep -q 'cost_guards.sh' "$SRC_ROOT/hooks/pre_tool_use_write.sh"
+  grep -q 'spawn_helper.sh' "$SRC_ROOT/adapters/claude-code/hooks/pre_tool_use_write.sh"
+  grep -q 'cost_guards.sh' "$SRC_ROOT/adapters/claude-code/hooks/pre_tool_use_write.sh"
 }
 
 @test "post_tool_use_write.sh sources spawn_helper.sh + cost_guards.sh defensively" {
-  grep -q 'spawn_helper.sh' "$SRC_ROOT/hooks/post_tool_use_write.sh"
-  grep -q 'cost_guards.sh' "$SRC_ROOT/hooks/post_tool_use_write.sh"
+  grep -q 'spawn_helper.sh' "$SRC_ROOT/adapters/claude-code/hooks/post_tool_use_write.sh"
+  grep -q 'cost_guards.sh' "$SRC_ROOT/adapters/claude-code/hooks/post_tool_use_write.sh"
 }
 
 @test "spawn_helper.sh + cost_guards.sh sources are guarded with [ -f ] (graceful degrade)" {
   # Defensive sourcing pattern: `[ -f "$LIB_DIR/<name>.sh" ] && . ...`
   # ensures hooks don't break on a coord installation that
   # predates Phase 7. Per CLAUDE.md §A.5 fail-open posture.
-  grep -q '\[ -f .*spawn_helper\.sh.* \] && \.' "$SRC_ROOT/hooks/pre_tool_use_write.sh"
-  grep -q '\[ -f .*cost_guards\.sh.* \] && \.' "$SRC_ROOT/hooks/pre_tool_use_write.sh"
-  grep -q '\[ -f .*spawn_helper\.sh.* \] && \.' "$SRC_ROOT/hooks/post_tool_use_write.sh"
-  grep -q '\[ -f .*cost_guards\.sh.* \] && \.' "$SRC_ROOT/hooks/post_tool_use_write.sh"
+  grep -q '\[ -f .*spawn_helper\.sh.* \] && \.' "$SRC_ROOT/adapters/claude-code/hooks/pre_tool_use_write.sh"
+  grep -q '\[ -f .*cost_guards\.sh.* \] && \.' "$SRC_ROOT/adapters/claude-code/hooks/pre_tool_use_write.sh"
+  grep -q '\[ -f .*spawn_helper\.sh.* \] && \.' "$SRC_ROOT/adapters/claude-code/hooks/post_tool_use_write.sh"
+  grep -q '\[ -f .*cost_guards\.sh.* \] && \.' "$SRC_ROOT/adapters/claude-code/hooks/post_tool_use_write.sh"
 }
 
 # -----------------------------------------------------------------
@@ -112,7 +112,7 @@ teardown() {
   # block fires regardless of pipeline outcome since hooks always
   # source spawn_helper.sh.
   local input='{"session_id":"'"$SESSION_ID"'","cwd":"'"$TMP"'","hook_event_name":"PreToolUse","tool_name":"Edit","tool_input":{"file_path":"'"$TARGET"'"}}'
-  run env CLAUDE_COORD=1 COORD_TEST_MODE=semi bash -c "printf '%s' '$input' | '$SRC_ROOT/hooks/pre_tool_use_write.sh'"
+  run env CLAUDE_COORD=1 COORD_TEST_MODE=semi bash -c "printf '%s' '$input' | '$SRC_ROOT/adapters/claude-code/hooks/pre_tool_use_write.sh'"
   [ "$status" -eq 0 ]
   sleep 0.3  # let backgrounded log_event flush
 
@@ -141,8 +141,8 @@ teardown() {
   # not trip set -u or set -e even on invalid env-var input.
   run env COORD_TEST_MODE='not-a-valid-mode' bash -c '
     set -euo pipefail
-    source "'"$SRC_ROOT"'/lib/log_event.sh"
-    source "'"$SRC_ROOT"'/lib/spawn_helper.sh"
+    source "'"$SRC_ROOT"'/core/lib/log_event.sh"
+    source "'"$SRC_ROOT"'/core/lib/spawn_helper.sh"
     coord_spawn_helper_resolve_mode
     printf "\n"
     if coord_spawn_helper_should_use_real_claude mediator; then
@@ -170,8 +170,8 @@ teardown() {
     export SESSION_ID="'"$SESSION_ID"'"
     export COORD_MEDIATOR_MAX_INVOCATIONS_PER_HOUR=1
     export COORD_MEDIATOR_MIN_SECONDS_BETWEEN_INVOCATIONS=0
-    source "'"$SRC_ROOT"'/lib/log_event.sh"
-    source "'"$SRC_ROOT"'/lib/cost_guards.sh"
+    source "'"$SRC_ROOT"'/core/lib/log_event.sh"
+    source "'"$SRC_ROOT"'/core/lib/cost_guards.sh"
     coord_cost_guards_check mediator || exit 0  # first allow
     if coord_cost_guards_check mediator; then
       printf "second-allowed\n"
@@ -194,8 +194,8 @@ teardown() {
 @test "realistic-tag stub: spawn_helper resolves to realistic when env set" {
   [ "${COORD_TEST_MODE:-}" = "realistic" ] || skip "realistic-tagged; opt in via COORD_TEST_MODE=realistic"
   run bash -c '
-    source "'"$SRC_ROOT"'/lib/log_event.sh"
-    source "'"$SRC_ROOT"'/lib/spawn_helper.sh"
+    source "'"$SRC_ROOT"'/core/lib/log_event.sh"
+    source "'"$SRC_ROOT"'/core/lib/spawn_helper.sh"
     coord_spawn_helper_resolve_mode
     printf "\n"
   '
@@ -207,8 +207,8 @@ teardown() {
 @test "realistic-tag stub: all 3 sites route to real claude under realistic" {
   [ "${COORD_TEST_MODE:-}" = "realistic" ] || skip "realistic-tagged; opt in via COORD_TEST_MODE=realistic"
   run bash -c '
-    source "'"$SRC_ROOT"'/lib/log_event.sh"
-    source "'"$SRC_ROOT"'/lib/spawn_helper.sh"
+    source "'"$SRC_ROOT"'/core/lib/log_event.sh"
+    source "'"$SRC_ROOT"'/core/lib/spawn_helper.sh"
     for site in mediator validator task_processor; do
       if coord_spawn_helper_should_use_real_claude "$site"; then
         printf "%s=real\n" "$site"

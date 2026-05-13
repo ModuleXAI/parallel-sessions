@@ -46,9 +46,10 @@
 
 load "../helpers/common"
 
-HOOKS_DIR="$SRC_ROOT/hooks"
-LIB_DIR="$SRC_ROOT/lib"
-BIN_DIR="$SRC_ROOT/bin"
+HOOKS_DIR="$SRC_ROOT/adapters/claude-code/hooks"
+LIB_DIR="$SRC_ROOT/core/lib"
+ADAPTER_LIB_DIR="$SRC_ROOT/adapters/claude-code/lib"
+BIN_DIR="$SRC_ROOT/core/bin"
 
 # === Architectural guards (8) — Phase 3+4+5+6 carry-forward ===
 
@@ -257,7 +258,7 @@ BIN_DIR="$SRC_ROOT/bin"
   fi
 }
 
-@test "phase7 invariant #17: src/bin/coord CLI dispatcher contains zero permissionDecision strings (Phase 6 carry-forward from T6.03 + T6.04)" {
+@test "phase7 invariant #17: src/core/bin/coord CLI dispatcher contains zero permissionDecision strings (Phase 6 carry-forward from T6.03 + T6.04)" {
   # CLI subcommands `coord task-open` (T6.03) + `coord
   # self-delegate` (T6.04) reject via exit 1 + stderr ONLY
   # (Decision 6 binding). Comment-only references like
@@ -266,9 +267,9 @@ BIN_DIR="$SRC_ROOT/bin"
   # T7.06a added cleanup_interrupt sync log path (cmd_wait);
   # extension remains deny-free.
   [ -f "$BIN_DIR/coord" ] \
-    || { echo "VIOLATION: src/bin/coord missing"; return 1; }
+    || { echo "VIOLATION: src/core/bin/coord missing"; return 1; }
   if grep -v '^[[:space:]]*#' "$BIN_DIR/coord" | grep -q 'permissionDecision'; then
-    echo "VIOLATION: src/bin/coord emits permissionDecision in code (not just comments)." >&2
+    echo "VIOLATION: src/core/bin/coord emits permissionDecision in code (not just comments)." >&2
     echo "Decision 6 binding: chain depth / cycle / anchor uniqueness / toggle disabled are CLI-level errors (exit 1 + stderr), NOT permissionDecision. Hook layer (pre_tool_use_*.sh) does NOT participate in CLI-level enforcement." >&2
     grep -nv '^[[:space:]]*#' "$BIN_DIR/coord" | grep 'permissionDecision' >&2
     return 1

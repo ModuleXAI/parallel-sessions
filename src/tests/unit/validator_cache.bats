@@ -17,7 +17,7 @@
 
 load "../helpers/common"
 
-LIB="$SRC_ROOT/lib/validator_cache.sh"
+LIB="$SRC_ROOT/core/lib/validator_cache.sh"
 
 setup() {
   TMP="$(mktemp -d -t coord-vcache-XXXX)"
@@ -27,7 +27,7 @@ setup() {
   export COORD_DIR="$COORD"
   export SESSION_ID="vcache-test-sid"
   # shellcheck disable=SC1090
-  . "$SRC_ROOT/lib/log_event.sh"
+  . "$SRC_ROOT/core/lib/log_event.sh"
   # shellcheck disable=SC1090
   . "$LIB"
 }

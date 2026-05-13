@@ -22,9 +22,9 @@
 
 load "../helpers/common"
 
-LIB="$SRC_ROOT/lib/validator_spawn.sh"
-LE="$SRC_ROOT/lib/log_event.sh"
-RS="$SRC_ROOT/lib/read_snapshots.sh"
+LIB="$SRC_ROOT/core/lib/validator_spawn.sh"
+LE="$SRC_ROOT/core/lib/log_event.sh"
+RS="$SRC_ROOT/core/lib/read_snapshots.sh"
 
 setup() {
   TMP="$(mktemp -d -t coord-vspawn-XXXX)"

@@ -1,0 +1,14 @@
+{
+  "rc": 0,
+  "paths": [
+    "obsolete.txt"
+  ],
+  "operations": [
+    {
+      "op": "delete",
+      "path": "obsolete.txt",
+      "move_to": null
+    }
+  ],
+  "hunks_by_path": {}
+}

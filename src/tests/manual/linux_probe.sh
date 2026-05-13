@@ -99,6 +99,15 @@ banner 'bats unit suite'
 bats /work/src/tests/unit
 echo "bats exit=$?"
 
+# Integration suite: bats does NOT recurse by default, so `-r` is
+# required to include src/tests/integration/cross_agent/ (Phase F's
+# 45 cross-agent scenarios). Without `-r`, only the 77 top-level
+# integration tests run and the 45 cross-agent tests are silently
+# excluded — F-F1-04 lesson.
+banner 'bats integration suite (recursive — includes cross_agent)'
+bats -r /work/src/tests/integration
+echo "bats integration exit=$?"
+
 banner 'two_session_warn manual smoke (Phase 1 done-when + Phase 2 02_lock_deny)'
 bash /work/src/tests/manual/two_session_warn.sh
 echo "two_session_warn exit=$?"
@@ -154,13 +163,13 @@ mv "$LX_TMP/.coord/sessions.json.new" "$LX_TMP/.coord/sessions.json"
 LX_F="$LX_TMP/foo.ts"; printf 'foo\n' >"$LX_F"
 export COORD_DIR="$LX_TMP/.coord" CLAUDE_COORD=1
 printf '%s' '{"session_id":"'"$A_SID"'","cwd":"'"$LX_TMP"'","hook_event_name":"PreToolUse","tool_name":"Edit","tool_input":{"file_path":"'"$LX_F"'"}}' \
-  | /work/src/hooks/pre_tool_use_write.sh >/dev/null
+  | /work/src/adapters/claude-code/hooks/pre_tool_use_write.sh >/dev/null
 sleep 1
 DENY_OUT=$(printf '%s' '{"session_id":"'"$B_SID"'","cwd":"'"$LX_TMP"'","hook_event_name":"PreToolUse","tool_name":"Edit","tool_input":{"file_path":"'"$LX_F"'"}}' \
-  | /work/src/hooks/pre_tool_use_write.sh 2>/dev/null)
+  | /work/src/adapters/claude-code/hooks/pre_tool_use_write.sh 2>/dev/null)
 echo "deny stdout (truncated):"; echo "$DENY_OUT" | head -c 200; echo "..."
 printf '%s' '{"session_id":"'"$A_SID"'","cwd":"'"$LX_TMP"'","hook_event_name":"PostToolUse","tool_name":"Edit","tool_input":{"file_path":"'"$LX_F"'"}}' \
-  | /work/src/hooks/post_tool_use_write.sh >/dev/null
+  | /work/src/adapters/claude-code/hooks/post_tool_use_write.sh >/dev/null
 sleep 0.4
 echo "Phase 2 events (kind counts):"
 jq -rs '
@@ -183,7 +192,7 @@ touch "$LXW/.coord/sessions.lock" "$LXW/.coord/events.lock" "$LXW/.coord/session
 # event-driven path (inotifywait on Linux); record both detection and
 # resolved values for the audit trail.
 printf '{"schema_version":"1.0","wait_backend":"auto"}' >"$LXW/.coord/config.json"
-echo "wait_backend detect: $(. /work/src/lib/wait_backend.sh; coord_wait_backend_detect)"
+echo "wait_backend detect: $(. /work/src/core/lib/wait_backend.sh; coord_wait_backend_detect)"
 LXF=$LXW/foo.ts; printf 'foo\n' >"$LXF"
 jq --arg f "$LXF" '.locks[$f] = {session:"holder", acquired_at:"2026-01-01T00:00:00Z", last_refresh_at:"t", tasks:[]}' "$LXW/.coord/sessions.json" > "$LXW/.coord/sessions.json.new"
 mv "$LXW/.coord/sessions.json.new" "$LXW/.coord/sessions.json"
@@ -198,7 +207,7 @@ mv "$LXW/.coord/sessions.json.new" "$LXW/.coord/sessions.json"
        [ -e "$w" ] && printf 'modified by holder\n' > "$w"
      done ) &
 T0=$(date -u +%s%N)
-COORD_DIR="$LXW/.coord" SESSION_ID=waiter /work/src/bin/coord wait "$LXF" --timeout 30 >/dev/null
+COORD_DIR="$LXW/.coord" SESSION_ID=waiter /work/src/core/bin/coord wait "$LXF" --timeout 30 >/dev/null
 T1=$(date -u +%s%N)
 wait
 echo "Linux coord wait detection latency: $(( (T1 - T0) / 1000000 )) ms (release at t=1000ms; expect ~1000-1100ms with inotifywait, ~1000-1300ms with polling)"

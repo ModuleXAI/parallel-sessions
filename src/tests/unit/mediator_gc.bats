@@ -12,8 +12,8 @@
 
 load "../helpers/common"
 
-MP="$SRC_ROOT/lib/mediator_pending.sh"
-LE="$SRC_ROOT/lib/log_event.sh"
+MP="$SRC_ROOT/core/lib/mediator_pending.sh"
+LE="$SRC_ROOT/core/lib/log_event.sh"
 
 setup() {
   TMP="$(mktemp -d -t coord-gc-XXXX)"

@@ -1,0 +1,23 @@
+{
+  "rc": 0,
+  "paths": [
+    "trick.txt"
+  ],
+  "operations": [
+    {
+      "op": "add",
+      "path": "trick.txt",
+      "move_to": null
+    }
+  ],
+  "hunks_by_path": {
+    "trick.txt": [
+      {
+        "header": "",
+        "pre_image": "",
+        "post_image": "heading\n@@ this is literal text not a hunk header\nmore content",
+        "is_end_of_file": false
+      }
+    ]
+  }
+}

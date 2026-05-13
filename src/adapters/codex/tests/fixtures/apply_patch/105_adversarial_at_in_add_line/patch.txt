@@ -1,0 +1,6 @@
+*** Begin Patch
+*** Add File: trick.txt
++heading
++@@ this is literal text not a hunk header
++more content
+*** End Patch

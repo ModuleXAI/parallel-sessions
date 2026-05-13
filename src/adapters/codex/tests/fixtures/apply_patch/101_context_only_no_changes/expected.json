@@ -1,0 +1,23 @@
+{
+  "rc": 0,
+  "paths": [
+    "ctx.txt"
+  ],
+  "operations": [
+    {
+      "op": "update",
+      "path": "ctx.txt",
+      "move_to": null
+    }
+  ],
+  "hunks_by_path": {
+    "ctx.txt": [
+      {
+        "header": "",
+        "pre_image": "unchanged line one\nunchanged line two",
+        "post_image": "unchanged line one\nunchanged line two",
+        "is_end_of_file": false
+      }
+    ]
+  }
+}

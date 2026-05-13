@@ -1,9 +1,13 @@
 {
   "name": "parallel-sessions",
   "version": "1.0.0",
-  "description": "Multi-session coordination for Claude Code — prevent concurrent edits, recover from crashes, delegate work between sessions.",
+  "description": "Multi-session coordination for AI coding agents (Claude Code + OpenAI Codex) — prevent concurrent edits, recover from crashes, delegate work between sessions, across agent types.",
   "bin": {
-    "parallel-sessions": "./bin/parallel-sessions"
+    "parallel-sessions": "./bin/parallel-sessions",
+    "parallels-init": "./bin/parallels-init",
+    "parallels-claude": "./bin/parallels-claude",
+    "parallels-codex": "./bin/parallels-codex",
+    "parallels-status": "./bin/parallels-status"
   },
   "files": [
     "bin/",
@@ -13,15 +17,22 @@
     "LICENSE"
   ],
   "scripts": {
-    "test": "bash src/tests/manual/phase7_ship_gate.sh"
+    "test": "bats src/tests/unit && bats -r src/tests/integration",
+    "test:unit": "bats src/tests/unit",
+    "test:integration": "bats -r src/tests/integration",
+    "test:cross-agent": "bats -r src/tests/integration/cross_agent",
+    "test:ship-gate": "bash src/tests/manual/phase7_ship_gate.sh"
   },
   "keywords": [
     "claude-code",
+    "codex",
+    "openai-codex",
     "multi-session",
     "coordination",
     "lock",
     "hooks",
-    "anthropic"
+    "anthropic",
+    "openai"
   ],
   "author": "Sezer Yavuz",
   "license": "MIT",

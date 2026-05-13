@@ -4,9 +4,9 @@
 
 load "../helpers/common"
 
-CLI="$SRC_ROOT/bin/coord"
-HW="$SRC_ROOT/hooks/pre_tool_use_write.sh"
-HP="$SRC_ROOT/hooks/post_tool_use_write.sh"
+CLI="$SRC_ROOT/core/bin/coord"
+HW="$SRC_ROOT/adapters/claude-code/hooks/pre_tool_use_write.sh"
+HP="$SRC_ROOT/adapters/claude-code/hooks/post_tool_use_write.sh"
 
 setup() {
   TMP="$(mktemp -d -t coord-wait-XXXX)"

@@ -18,12 +18,12 @@
 
 load "../helpers/common"
 
-MS="$SRC_ROOT/lib/mediator_spawn.sh"
-MP="$SRC_ROOT/lib/mediator_pending.sh"
-CC="$SRC_ROOT/lib/critical_check.sh"
-LK="$SRC_ROOT/lib/lockdown.sh"
-LE="$SRC_ROOT/lib/log_event.sh"
-AW="$SRC_ROOT/lib/atomic_write.sh"
+MS="$SRC_ROOT/core/lib/mediator_spawn.sh"
+MP="$SRC_ROOT/core/lib/mediator_pending.sh"
+CC="$SRC_ROOT/core/lib/critical_check.sh"
+LK="$SRC_ROOT/core/lib/lockdown.sh"
+LE="$SRC_ROOT/core/lib/log_event.sh"
+AW="$SRC_ROOT/core/lib/atomic_write.sh"
 
 setup() {
   TMP="$(mktemp -d -t coord-spawn-XXXX)"

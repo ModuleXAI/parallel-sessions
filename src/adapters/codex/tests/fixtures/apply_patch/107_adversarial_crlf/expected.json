@@ -1,0 +1,23 @@
+{
+  "rc": 0,
+  "paths": [
+    "crlf.txt"
+  ],
+  "operations": [
+    {
+      "op": "update",
+      "path": "crlf.txt",
+      "move_to": null
+    }
+  ],
+  "hunks_by_path": {
+    "crlf.txt": [
+      {
+        "header": "",
+        "pre_image": "old",
+        "post_image": "new",
+        "is_end_of_file": false
+      }
+    ]
+  }
+}

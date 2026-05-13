@@ -26,15 +26,15 @@ setup() {
   : >"$COORD_DIR/events.jsonl"
   printf '{"schema_version":"1.0","mediator_enabled":true}' >"$COORD_DIR/config.json"
   # shellcheck disable=SC1091
-  . "$SRC_ROOT/lib/atomic_write.sh"
+  . "$SRC_ROOT/core/lib/atomic_write.sh"
   # shellcheck disable=SC1091
-  . "$SRC_ROOT/lib/log_event.sh"
+  . "$SRC_ROOT/core/lib/log_event.sh"
   # shellcheck disable=SC1091
-  . "$SRC_ROOT/lib/wait_queue.sh"
+  . "$SRC_ROOT/core/lib/wait_queue.sh"
   # shellcheck disable=SC1091
-  . "$SRC_ROOT/lib/cycle_detection.sh"
+  . "$SRC_ROOT/core/lib/cycle_detection.sh"
   # shellcheck disable=SC1091
-  . "$SRC_ROOT/lib/mediator_pending.sh"
+  . "$SRC_ROOT/core/lib/mediator_pending.sh"
 }
 teardown() {
   rm -rf "$TMP"
@@ -99,21 +99,21 @@ _seed_2cycle() {
   # JSON — no kind-specific dispatch. This means cycle_description,
   # session_metadata, and the 3-tier guidance flow into the prompt
   # automatically. Static check via grep on production source.
-  grep -q 'Pending entry that triggered this invocation' "$SRC_ROOT/lib/mediator_spawn.sh"
-  grep -q 'pending_entry' "$SRC_ROOT/lib/mediator_spawn.sh"
+  grep -q 'Pending entry that triggered this invocation' "$SRC_ROOT/core/lib/mediator_spawn.sh"
+  grep -q 'pending_entry' "$SRC_ROOT/core/lib/mediator_spawn.sh"
 }
 
 @test "T5.06: mediator prompt context-builder treats cycle_detected like other kinds (no kind-branching)" {
   # Verify zero kind-specific code paths in mediator_spawn.sh /
   # mediator_pending.sh / verdict_apply.sh. Mediator dispatch must be
   # kind-agnostic per Decision 4.
-  ! grep -q 'cycle_detected' "$SRC_ROOT/lib/mediator_spawn.sh"
-  ! grep -q 'cycle_path' "$SRC_ROOT/lib/mediator_spawn.sh"
-  ! grep -q 'cycle_detected' "$SRC_ROOT/lib/verdict_apply.sh"
+  ! grep -q 'cycle_detected' "$SRC_ROOT/core/lib/mediator_spawn.sh"
+  ! grep -q 'cycle_path' "$SRC_ROOT/core/lib/mediator_spawn.sh"
+  ! grep -q 'cycle_detected' "$SRC_ROOT/core/lib/verdict_apply.sh"
   # mediator_pending.sh may name `cycle_detected` in the kind enum
   # documentation but must NOT have kind-branching code.
-  ! grep -E '^[^#]*case.*cycle_detected' "$SRC_ROOT/lib/mediator_pending.sh"
-  ! grep -E '^[^#]*if.*cycle_detected' "$SRC_ROOT/lib/mediator_pending.sh"
+  ! grep -E '^[^#]*case.*cycle_detected' "$SRC_ROOT/core/lib/mediator_pending.sh"
+  ! grep -E '^[^#]*if.*cycle_detected' "$SRC_ROOT/core/lib/mediator_pending.sh"
 }
 
 # ----- Category 3: 3-action contract handling (mock claude binary) -----
@@ -157,30 +157,30 @@ MOCK
   # Static-check version: confirm advice action_type is documented in
   # MEDIATOR_REFERENCE.md as a valid response for cycle_detected.
   # (Real Mediator spawn is a Phase 7 stress test concern.)
-  grep -q '| `advice` |' "$SRC_ROOT/lib/MEDIATOR_REFERENCE.md"
-  grep -q 'advice.*Shallow cycle' "$SRC_ROOT/lib/MEDIATOR_REFERENCE.md"
+  grep -q '| `advice` |' "$SRC_ROOT/core/lib/MEDIATOR_REFERENCE.md"
+  grep -q 'advice.*Shallow cycle' "$SRC_ROOT/core/lib/MEDIATOR_REFERENCE.md"
 }
 
 @test "T5.06: mock Mediator returns surgical_fix evict_session → action contract documented" {
-  grep -q '| `surgical_fix` (severity=brief) |' "$SRC_ROOT/lib/MEDIATOR_REFERENCE.md"
-  grep -q 'evict_session' "$SRC_ROOT/lib/MEDIATOR_REFERENCE.md"
+  grep -q '| `surgical_fix` (severity=brief) |' "$SRC_ROOT/core/lib/MEDIATOR_REFERENCE.md"
+  grep -q 'evict_session' "$SRC_ROOT/core/lib/MEDIATOR_REFERENCE.md"
   # verdict_apply.sh already implements evict_session (Phase 3+); no
   # new code needed.
-  grep -q 'evict_session' "$SRC_ROOT/lib/verdict_apply.sh"
+  grep -q 'evict_session' "$SRC_ROOT/core/lib/verdict_apply.sh"
 }
 
 @test "T5.06: mock Mediator returns lockdown → action contract documented" {
-  grep -q '| `lockdown` |' "$SRC_ROOT/lib/MEDIATOR_REFERENCE.md"
-  grep -q 'reason_source.*cycle_detected' "$SRC_ROOT/lib/MEDIATOR_REFERENCE.md"
+  grep -q '| `lockdown` |' "$SRC_ROOT/core/lib/MEDIATOR_REFERENCE.md"
+  grep -q 'reason_source.*cycle_detected' "$SRC_ROOT/core/lib/MEDIATOR_REFERENCE.md"
   # lockdown.sh already implements the gate (Phase 3+); no new code
   # needed.
-  grep -q 'coord_lockdown_activate' "$SRC_ROOT/lib/lockdown.sh"
+  grep -q 'coord_lockdown_activate' "$SRC_ROOT/core/lib/lockdown.sh"
 }
 
 # ----- Category 4: Schema documentation completeness -----
 
 @test "T5.06: MEDIATOR_REFERENCE.md §4.X covers all 9 payload keys + 3-tier + decision matrix + silent-2-cycle" {
-  local ref="$SRC_ROOT/lib/MEDIATOR_REFERENCE.md"
+  local ref="$SRC_ROOT/core/lib/MEDIATOR_REFERENCE.md"
   # All 9 payload keys named in the §4.X subsection.
   for k in cycle_path cycle_description involved_files involved_sessions \
            queue_depth_at_detection recent_cycle_count session_metadata \
@@ -223,8 +223,8 @@ MOCK
 @test "T5.06: mediator_pending.sh kind enum doc references cycle_detected" {
   # The kind enum comment in mediator_pending.sh should mention
   # cycle_detected as a valid kind (informational; no code branching).
-  grep -q 'cycle_detected\|cycle detection' "$SRC_ROOT/lib/mediator_pending.sh" \
-    || grep -q 'cycle_detected' "$SRC_ROOT/lib/MEDIATOR_REFERENCE.md"
+  grep -q 'cycle_detected\|cycle detection' "$SRC_ROOT/core/lib/mediator_pending.sh" \
+    || grep -q 'cycle_detected' "$SRC_ROOT/core/lib/MEDIATOR_REFERENCE.md"
   # MEDIATOR_REFERENCE.md kind enum updated.
-  grep -q 'cycle_detected' "$SRC_ROOT/lib/MEDIATOR_REFERENCE.md"
+  grep -q 'cycle_detected' "$SRC_ROOT/core/lib/MEDIATOR_REFERENCE.md"
 }

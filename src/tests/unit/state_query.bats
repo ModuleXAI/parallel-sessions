@@ -3,8 +3,8 @@
 
 load "../helpers/common"
 
-Q="$SRC_ROOT/lib/state_query.sh"
-A="$SRC_ROOT/lib/atomic_write.sh"
+Q="$SRC_ROOT/core/lib/state_query.sh"
+A="$SRC_ROOT/core/lib/atomic_write.sh"
 
 setup() {
   TMP="$(mktemp -d -t coord-state-query-XXXX)"
@@ -18,8 +18,9 @@ teardown() { rm -rf "$TMP"; }
   rm -f "$COORD/sessions.json"
   run "$Q" dump
   [ "$status" -eq 0 ]
+  # Schema 1.1 (PR B.1): empty template now writes the new schema marker.
   run bash -c "'$Q' dump | jq -r .schema_version"
-  [ "$output" = "1.0" ]
+  [ "$output" = "1.1" ]
 }
 
 @test "state_query: lock-holder reports empty for unlocked file" {

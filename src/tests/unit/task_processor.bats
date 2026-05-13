@@ -18,11 +18,11 @@ setup() {
   mk_empty_sessions "$COORD"
   : >"$COORD_DIR/events.jsonl"
   # shellcheck disable=SC1091
-  . "$SRC_ROOT/lib/atomic_write.sh"
+  . "$SRC_ROOT/core/lib/atomic_write.sh"
   # shellcheck disable=SC1091
-  . "$SRC_ROOT/lib/log_event.sh"
+  . "$SRC_ROOT/core/lib/log_event.sh"
   # shellcheck disable=SC1091
-  . "$SRC_ROOT/lib/task_processor.sh"
+  . "$SRC_ROOT/core/lib/task_processor.sh"
 
   HOLDER="sid-tp-A"
   OPENER="sid-tp-B"

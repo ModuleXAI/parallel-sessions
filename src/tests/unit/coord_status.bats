@@ -3,7 +3,7 @@
 
 load "../helpers/common"
 
-C="$SRC_ROOT/bin/coord"
+C="$SRC_ROOT/core/bin/coord"
 
 setup() {
   TMP="$(mktemp -d -t coord-status-XXXX)"

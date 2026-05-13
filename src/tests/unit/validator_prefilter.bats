@@ -25,7 +25,7 @@
 
 load "../helpers/common"
 
-LIB="$SRC_ROOT/lib/validator_prefilter.sh"
+LIB="$SRC_ROOT/core/lib/validator_prefilter.sh"
 
 setup() {
   TMP="$(mktemp -d -t coord-vpf-XXXX)"
@@ -34,9 +34,9 @@ setup() {
   export COORD_DIR="$COORD"
   export SESSION_ID="vpf-test-sid"
   # shellcheck disable=SC1090
-  . "$SRC_ROOT/lib/log_event.sh"
+  . "$SRC_ROOT/core/lib/log_event.sh"
   # shellcheck disable=SC1090
-  . "$SRC_ROOT/lib/read_snapshots.sh"
+  . "$SRC_ROOT/core/lib/read_snapshots.sh"
   # shellcheck disable=SC1090
   . "$LIB"
   SID="vpf-sid-0001"

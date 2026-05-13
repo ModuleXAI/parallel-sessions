@@ -13,9 +13,9 @@
 
 load "../helpers/common"
 
-VA="$SRC_ROOT/lib/verdict_apply.sh"
-AW="$SRC_ROOT/lib/atomic_write.sh"
-LE="$SRC_ROOT/lib/log_event.sh"
+VA="$SRC_ROOT/core/lib/verdict_apply.sh"
+AW="$SRC_ROOT/core/lib/atomic_write.sh"
+LE="$SRC_ROOT/core/lib/log_event.sh"
 
 setup() {
   TMP="$(mktemp -d -t coord-verdict-XXXX)"

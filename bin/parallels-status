@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# parallels-status — alias for `coord status`. Convenience launcher
+# so users don't need to remember the .coord/bin path or the source-tree
+# location of the CLI.
+#
+# Resolves .coord/ via the same cwd-walk-up that parallels-claude uses
+# (rich folder_resolver.sh lib lives in src/core/lib/, but loading it
+# would require LIB_DIR plumbing this thin launcher doesn't need).
+#
+# Phase B PR B.2.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Locate .coord/ via cwd-walk-up (matches parallels-claude). Honor a
+# pre-set $COORD_DIR if the caller has it.
+if [ -z "${COORD_DIR:-}" ]; then
+  cur="$PWD"
+  while [ -n "$cur" ] && [ "$cur" != "/" ]; do
+    if [ -d "$cur/.coord" ]; then
+      COORD_DIR="$cur/.coord"
+      break
+    fi
+    cur=$(dirname "$cur")
+  done
+fi
+
+if [ -z "${COORD_DIR:-}" ] || [ ! -d "$COORD_DIR" ]; then
+  printf 'parallels-status: no .coord/ found from %s upward.\n' "$PWD" >&2
+  printf '                  Run `parallels-init` first.\n' >&2
+  exit 2
+fi
+
+export COORD_DIR
+exec bash "$SCRIPT_DIR/../src/core/bin/coord" status "$@"

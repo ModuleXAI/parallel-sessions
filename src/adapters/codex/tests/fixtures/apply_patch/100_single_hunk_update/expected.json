@@ -1,0 +1,23 @@
+{
+  "rc": 0,
+  "paths": [
+    "small.txt"
+  ],
+  "operations": [
+    {
+      "op": "update",
+      "path": "small.txt",
+      "move_to": null
+    }
+  ],
+  "hunks_by_path": {
+    "small.txt": [
+      {
+        "header": "",
+        "pre_image": "old",
+        "post_image": "new",
+        "is_end_of_file": false
+      }
+    ]
+  }
+}

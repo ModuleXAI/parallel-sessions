@@ -23,21 +23,21 @@ setup() {
   : >"$COORD_DIR/events.jsonl"
   printf '{"schema_version":"1.0","wait_backend":"polling"}' >"$COORD_DIR/config.json"
   # shellcheck disable=SC1091
-  . "$SRC_ROOT/lib/atomic_write.sh"
+  . "$SRC_ROOT/core/lib/atomic_write.sh"
   # shellcheck disable=SC1091
-  . "$SRC_ROOT/lib/log_event.sh"
+  . "$SRC_ROOT/core/lib/log_event.sh"
   # shellcheck disable=SC1091
-  . "$SRC_ROOT/lib/hash.sh"
+  . "$SRC_ROOT/core/lib/hash.sh"
   # shellcheck disable=SC1091
-  . "$SRC_ROOT/lib/wait_queue.sh"
+  . "$SRC_ROOT/core/lib/wait_queue.sh"
   # shellcheck disable=SC1091
-  . "$SRC_ROOT/lib/validator_cache.sh"
+  . "$SRC_ROOT/core/lib/validator_cache.sh"
   # shellcheck disable=SC1091
-  . "$SRC_ROOT/lib/read_snapshots.sh"
+  . "$SRC_ROOT/core/lib/read_snapshots.sh"
   # shellcheck disable=SC1091
-  . "$SRC_ROOT/lib/validator_prefilter.sh"
+  . "$SRC_ROOT/core/lib/validator_prefilter.sh"
   # shellcheck disable=SC1091
-  . "$SRC_ROOT/lib/notify_waiters.sh"
+  . "$SRC_ROOT/core/lib/notify_waiters.sh"
   HOLDER='holder-001'
   WAITER='waiter-001'
   FILE="$TMP/foo.ts"
@@ -307,7 +307,7 @@ _write_read_set_entry() {
 # ----- Category 6: events.jsonl scan deletion verification -----
 
 @test "notify_waiters: lib/notify_waiters.sh contains NO LOCK_DENIED scan" {
-  ! grep -q '"LOCK_DENIED"' "$SRC_ROOT/lib/notify_waiters.sh"
+  ! grep -q '"LOCK_DENIED"' "$SRC_ROOT/core/lib/notify_waiters.sh"
 }
 
 @test "notify_waiters: legacy LOCK_DENIED entries do NOT trigger notification (wait_queues authoritative)" {
@@ -336,9 +336,9 @@ _write_read_set_entry() {
   # filter writes the latest_validator_verdict_ts field. Verifying
   # via grep over the production code (the full hook integration
   # is exercised in pre_tool_use_write_pipeline.bats).
-  grep -q 'latest_validator_verdict_ts' "$SRC_ROOT/hooks/pre_tool_use_write.sh"
+  grep -q 'latest_validator_verdict_ts' "$SRC_ROOT/adapters/claude-code/hooks/pre_tool_use_write.sh"
   # And the field is plumbed via TARGET_VERDICT_TS captured from the
   # pipeline's _COORD_PHASE4_LAST_VERDICT_TS output variable.
-  grep -q 'TARGET_VERDICT_TS=' "$SRC_ROOT/hooks/pre_tool_use_write.sh"
-  grep -q '_COORD_PHASE4_LAST_VERDICT_TS' "$SRC_ROOT/hooks/pre_tool_use_write.sh"
+  grep -q 'TARGET_VERDICT_TS=' "$SRC_ROOT/adapters/claude-code/hooks/pre_tool_use_write.sh"
+  grep -q '_COORD_PHASE4_LAST_VERDICT_TS' "$SRC_ROOT/adapters/claude-code/hooks/pre_tool_use_write.sh"
 }

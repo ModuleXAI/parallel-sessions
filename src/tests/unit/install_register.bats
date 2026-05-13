@@ -177,7 +177,7 @@ JSON
   [ "$output" -ge "8" ]
   # Source-vs-installed hash match (idempotent first install).
   local src_hash dst_hash
-  src_hash=$(shasum -a 256 "$SRC_ROOT/lib/VALIDATOR_REFERENCE.md" | awk '{print $1}')
+  src_hash=$(shasum -a 256 "$SRC_ROOT/core/lib/VALIDATOR_REFERENCE.md" | awk '{print $1}')
   dst_hash=$(shasum -a 256 "$TMP/.coord/validator/VALIDATOR_REFERENCE.md" | awk '{print $1}')
   [ "$src_hash" = "$dst_hash" ]
 }

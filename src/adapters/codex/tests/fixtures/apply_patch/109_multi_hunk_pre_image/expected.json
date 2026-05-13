@@ -1,0 +1,29 @@
+{
+  "rc": 0,
+  "paths": [
+    "many.txt"
+  ],
+  "operations": [
+    {
+      "op": "update",
+      "path": "many.txt",
+      "move_to": null
+    }
+  ],
+  "hunks_by_path": {
+    "many.txt": [
+      {
+        "header": "",
+        "pre_image": "line2",
+        "post_image": "changed2",
+        "is_end_of_file": false
+      },
+      {
+        "header": "",
+        "pre_image": "line9",
+        "post_image": "changed9",
+        "is_end_of_file": false
+      }
+    ]
+  }
+}

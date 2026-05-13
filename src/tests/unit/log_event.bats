@@ -7,7 +7,7 @@
 
 load "../helpers/common"
 
-LOG="$SRC_ROOT/lib/log_event.sh"
+LOG="$SRC_ROOT/core/lib/log_event.sh"
 
 setup() {
   TMP="$(mktemp -d -t coord-logevent-XXXX)"

@@ -1,0 +1,6 @@
+*** Begin Patch
+*** Update File: trail.txt
+@@
+-old
++new
+*** End Patch   

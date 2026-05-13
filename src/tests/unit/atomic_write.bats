@@ -6,7 +6,7 @@
 
 load "../helpers/common"
 
-A="$SRC_ROOT/lib/atomic_write.sh"
+A="$SRC_ROOT/core/lib/atomic_write.sh"
 
 setup() {
   TMP="$(mktemp -d -t coord-atomic-XXXX)"
