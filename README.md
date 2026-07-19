@@ -1,4 +1,48 @@
-# Parallel Sessions
+<p align="center">
+  <a href="https://modulex.dev" target="_blank" rel="noopener noreferrer">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/ModuleXAI/modulex-integrations/main/docs/assets/modulex-logo-dark.svg">
+      <img src="https://raw.githubusercontent.com/ModuleXAI/modulex-integrations/main/docs/assets/modulex-logo-light.svg" alt="ModuleX" width="220">
+    </picture>
+  </a>
+</p>
+
+<h1 align="center">parallel-sessions</h1>
+
+<p align="center">
+  <b>Claude Code + OpenAI Codex · 959 tests · 15 hook scripts · 0 servers</b><br>
+  A coordination layer for running many AI coding sessions against one repo —
+  file locking, crash recovery, and cross-session task delegation, in pure Bash.
+</p>
+
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-3B82F6?labelColor=1A1A1A" alt="License: MIT"></a>
+  <a href="https://claude.com/claude-code"><img src="https://img.shields.io/badge/Claude%20Code-adapter-3B82F6?logo=anthropic&logoColor=white&labelColor=1A1A1A" alt="Claude Code adapter"></a>
+  <img src="https://img.shields.io/badge/OpenAI%20Codex-adapter-3B82F6?labelColor=1A1A1A" alt="OpenAI Codex adapter">
+  <img src="https://img.shields.io/badge/Bash-3.2%2B-3B82F6?logo=gnubash&logoColor=white&labelColor=1A1A1A" alt="Bash 3.2+">
+  <img src="https://img.shields.io/badge/tests-959%20passing-3B82F6?labelColor=1A1A1A" alt="959 tests passing">
+  <img src="https://img.shields.io/badge/status-production--ready-3B82F6?labelColor=1A1A1A" alt="Status: production-ready">
+</p>
+
+<p align="center">
+  <a href="https://modulex.dev" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/Website-modulex.dev-E6E6E6?labelColor=C3C3C3&color=E6E6E6" alt="modulex.dev"></a>
+  <a href="https://github.com/ModuleXAI/parallel-sessions" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/GitHub-ModuleXAI%2Fparallel--sessions-E6E6E6?logo=github&logoColor=1A1A1A&labelColor=C3C3C3&color=E6E6E6" alt="GitHub"></a>
+  <a href="https://github.com/ModuleXAI/parallel-sessions/issues" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/Issues-open-E6E6E6?labelColor=C3C3C3&color=E6E6E6" alt="Issues"></a>
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/Claude%20Code-1A1A1A?logo=anthropic&logoColor=white" alt="Claude Code" height="28">&nbsp;&nbsp;
+  <img src="https://img.shields.io/badge/OpenAI%20Codex-1A1A1A" alt="OpenAI Codex" height="28">&nbsp;&nbsp;
+  <img src="https://img.shields.io/badge/GNU%20Bash-1A1A1A?logo=gnubash&logoColor=white" alt="GNU Bash" height="28">&nbsp;&nbsp;
+  <img src="https://img.shields.io/badge/jq-1A1A1A?logoColor=white" alt="jq" height="28">&nbsp;&nbsp;
+  <img src="https://img.shields.io/badge/flock-1A1A1A" alt="flock" height="28">&nbsp;&nbsp;
+  <img src="https://img.shields.io/badge/Git-1A1A1A?logo=git&logoColor=white" alt="Git" height="28">&nbsp;&nbsp;
+  <img src="https://img.shields.io/badge/npm-1A1A1A?logo=npm&logoColor=white" alt="npm" height="28">&nbsp;&nbsp;
+  <img src="https://img.shields.io/badge/macOS-1A1A1A?logo=apple&logoColor=white" alt="macOS" height="28">&nbsp;&nbsp;
+  <img src="https://img.shields.io/badge/Linux-1A1A1A?logo=linux&logoColor=white" alt="Linux" height="28">
+</p>
+
+---
 
 Multi-session coordination for AI coding agents (Claude Code + OpenAI Codex) — prevent concurrent edits, recover from crashes, delegate work between sessions, across agent types in the same repository.
 
@@ -8,9 +52,18 @@ When you run multiple AI coding sessions against the same repository, they have 
 
 Parallel Sessions is a coordination layer that sits between your AI coding agents and your repository. It registers hooks (Claude Code: `PreToolUse`, `PostToolUse`, `Stop`, `SessionStart`, `SessionEnd`; Codex: `PreToolUse`, `PostToolUse`, `Stop`, `SessionStart`, `UserPromptSubmit`) that observe and arbitrate every Read, Write, Edit, or `apply_patch`. Files get locked when a session starts editing them; other sessions trying to write the same file see a deny banner with three options (delegate the work, self-delegate and come back later, or wait). Stale reads are detected and classified by a Validator agent into SAFE, MINOR, or CRITICAL drift. Crashes are recovered by a Watchdog and a Mediator agent.
 
+```mermaid
+flowchart LR
+  A["Claude Code + Codex sessions"] -->|"Read / Write / Edit / apply_patch"| H["Coord hooks<br/>pure Bash 3.2 + jq + flock"]
+  H --> S["(.coord/sessions.json)<br/>flock-guarded state"]
+  H --> L["(.coord/events.jsonl)<br/>append-only audit log"]
+  H -->|"conflict / drift / crash / cycle"| M["Mediator + Validator<br/>spawned via claude -p"]
+  M -->|"advice / surgical_fix / lockdown"| H
+```
+
 The mental model is deliberately small. There is no server, no daemon, no UI. State lives at `.coord/sessions.json` (atomically edited under `flock`). The audit log lives at `.coord/events.jsonl`. The hooks are pure Bash 3.2 + `jq` + `flock`. Everything is observable; nothing runs unless an AI session triggers it.
 
-Scope: single-developer / single-machine. Multi-machine team scenarios are out of scope for v1.
+> **Scope:** single-developer / single-machine. Multi-machine team scenarios are out of scope for v1.
 
 ## Supported agents
 
@@ -148,16 +201,16 @@ If you are a Codex operator wondering why a banner you'd expect on `PreToolUse` 
 
 ## Features
 
-- **File locking with actionable deny banner** — three options offered: delegate a SIMPLE/MODERATE task to the holder, self-delegate (defer your work and come back), or wait passively for release.
-- **Multi-file `apply_patch` all-or-deny atomicity** (Codex) — N-file patches succeed only if every target is free; one blocked file denies the entire patch.
-- **Crash recovery** — Watchdog detects dead sessions via 3-signal consensus (PID liveness + last-activity + lock-refresh age); Mediator agent decides whether to evict, surgical-fix, or lockdown. Symmetric across agent types.
-- **Stale-read drift classification** — Claude: 3-stage pipeline (cache → pre-filter → Validator agent) classifies drift as SAFE / MINOR / CRITICAL. Codex: structural per-hunk pre-image search; mismatch denies the patch.
-- **Multi-waiter FIFO queue with event-driven wake-up** — `fswatch` (macOS) / `inotifywait` (Linux) / 250 ms polling fallback. Sub-100 ms wake-up latency in the event-driven path.
-- **Lock-dependency cycle detection** — bipartite session/file DFS triggered when a wait queue grows; Mediator resolves by evicting the lowest-priority session.
-- **Cross-session task delegation** — a session blocked on a locked file can hand off the edit (`coord task-open`) with anchor + complexity + chain-depth + cycle-detection guards.
-- **Self-delegation lifecycle** — `coord self-delegate` records deferred work; reminders fire on every `PreToolUse` (Claude) and are recorded to `SELF_TASK_REMINDER` audit events on every `PreToolUse` (Codex, no in-turn banner per A-D4-02 — see `coord status` to surface pending self-tasks); `Stop` blocks once if self-tasks are unresolved.
-- **Three-mode operator switch** — `COORD_TEST_MODE=mock|semi|realistic` routes the 3 spawn sites between mock fakes and real `claude -p` for staged validation.
-- **Cost-guard rate-limit enforcement** — sliding-window counters guard the Mediator + Validator + Task-Processor spawn sites against runaway invocations.
+- **🔒 File locking with actionable deny banner** — three options offered: delegate a SIMPLE/MODERATE task to the holder, self-delegate (defer your work and come back), or wait passively for release.
+- **🧩 Multi-file `apply_patch` all-or-deny atomicity** (Codex) — N-file patches succeed only if every target is free; one blocked file denies the entire patch.
+- **♻️ Crash recovery** — Watchdog detects dead sessions via 3-signal consensus (PID liveness + last-activity + lock-refresh age); Mediator agent decides whether to evict, surgical-fix, or lockdown. Symmetric across agent types.
+- **🧭 Stale-read drift classification** — Claude: 3-stage pipeline (cache → pre-filter → Validator agent) classifies drift as SAFE / MINOR / CRITICAL. Codex: structural per-hunk pre-image search; mismatch denies the patch.
+- **⏱️ Multi-waiter FIFO queue with event-driven wake-up** — `fswatch` (macOS) / `inotifywait` (Linux) / 250 ms polling fallback. Sub-100 ms wake-up latency in the event-driven path.
+- **🔗 Lock-dependency cycle detection** — bipartite session/file DFS triggered when a wait queue grows; Mediator resolves by evicting the lowest-priority session.
+- **🤝 Cross-session task delegation** — a session blocked on a locked file can hand off the edit (`coord task-open`) with anchor + complexity + chain-depth + cycle-detection guards.
+- **📝 Self-delegation lifecycle** — `coord self-delegate` records deferred work; reminders fire on every `PreToolUse` (Claude) and are recorded to `SELF_TASK_REMINDER` audit events on every `PreToolUse` (Codex, no in-turn banner per A-D4-02 — see `coord status` to surface pending self-tasks); `Stop` blocks once if self-tasks are unresolved.
+- **🎚️ Three-mode operator switch** — `COORD_TEST_MODE=mock|semi|realistic` routes the 3 spawn sites between mock fakes and real `claude -p` for staged validation.
+- **💰 Cost-guard rate-limit enforcement** — sliding-window counters guard the Mediator + Validator + Task-Processor spawn sites against runaway invocations.
 
 ## How it works
 
@@ -169,11 +222,13 @@ When something the deterministic logic cannot handle arises — corrupt state, a
 
 `COORD_TEST_MODE` selects which spawn sites use real `claude -p` versus mock fakes:
 
-- **mock** (default; CI + daily dev) — all 3 spawn sites use mocks. Fast, free, deterministic, CI-safe.
-- **semi** (weekly stakes-coverage smoke) — Mediator + Task Processor real Claude; Validator stays mock.
-- **realistic** (pre-release smoke) — all 3 sites real Claude.
+| Mode | When | Mediator | Task Processor | Validator |
+| --- | --- | :---: | :---: | :---: |
+| **mock** | default · CI + daily dev | mock | mock | mock |
+| **semi** | weekly stakes-coverage smoke | real | real | mock |
+| **realistic** | pre-release smoke | real | real | real |
 
-Manual stress runs:
+`mock` is fast, free, deterministic, and CI-safe. Manual stress runs:
 
 ```bash
 bash scripts/stress_semi.sh
@@ -184,31 +239,33 @@ Output lands under `scripts/stress_<mode>_out/<ISO_ts>.log` (gitignored).
 
 ## Documentation
 
-- `LICENSE` — MIT.
-- `CONTRIBUTING.md` — setup, coding standards, PR process, codex-adapter conventions.
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — setup, coding standards, PR process, codex-adapter conventions.
+- [`LICENSE`](LICENSE) — MIT.
 - `docs/codex-quickstart.md` — Codex-specific install and usage walkthrough (next PR; G.2).
 
 ## Status
 
 v1 production-ready at single-developer / single-machine scale, both Claude Code and OpenAI Codex adapters. Verification surface:
 
-- 837 unit tests (`bats src/tests/unit`)
-- 77 integration tests (`bats src/tests/integration` — top-level)
-- 45 cross-agent integration tests (`bats -r src/tests/integration/cross_agent`)
-- 122 integration tests total with recursive discovery (`bats -r src/tests/integration`)
-- 24 ship-gate fixtures (Phase 3-7 driver scripts)
-- 19-guard architectural invariant for Claude (`phase7_invariant.bats`)
-- 7-guard architectural invariant for Codex (`codex_phase7_invariant.bats`)
+| Surface | Count |
+| --- | ---: |
+| Unit tests (`bats src/tests/unit`) | 837 |
+| Integration tests, top-level (`bats src/tests/integration`) | 77 |
+| Cross-agent integration tests (`bats -r src/tests/integration/cross_agent`) | 45 |
+| Integration tests total, recursive (`bats -r src/tests/integration`) | 122 |
+| Ship-gate fixtures (Phase 3–7 driver scripts) | 24 |
+| Architectural invariant guards — Claude (`phase7_invariant.bats`) | 19 |
+| Architectural invariant guards — Codex (`codex_phase7_invariant.bats`) | 7 |
 
 Multi-machine team scenarios are deferred to the next major version.
 
 ## Contributing
 
-See `CONTRIBUTING.md`.
+See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
-MIT — see `LICENSE`.
+MIT — see [LICENSE](LICENSE).
 
 ## Acknowledgments
 
