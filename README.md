@@ -48,38 +48,25 @@ Parallel Sessions is a coordination layer that sits between your AI coding agent
 
 ```mermaid
 flowchart LR
-  subgraph AGENTS["AI coding sessions · any mix, one repo"]
-    direction TB
-    C1["Claude Code A"]
-    C2["Claude Code B"]
-    X1["OpenAI Codex"]
-  end
+  C1["Claude Code A"]
+  C2["Claude Code B"]
+  X1["OpenAI Codex"]
 
-  subgraph COORD["parallel-sessions · coordination layer"]
-    direction TB
-    GATE{{"Arbitrate every action<br/>Read · Write · Edit · apply_patch"}}
-    DET["Deterministic core<br/>locks · drift · FIFO queue · cycle detection"]
-    ESC["LLM escalation<br/>Mediator + Validator · claude -p"]
-    GATE --> DET
-    DET -. "corrupt · stuck · cycle<br/>CRITICAL drift" .-> ESC
-  end
+  GATE{{"Coordination hooks<br/>arbitrate Read · Write · Edit · apply_patch"}}
+  DET["Deterministic core<br/>locks · drift · FIFO queue · cycle detection"]
+  ESC["LLM escalation<br/>Mediator + Validator · claude -p"]
 
-  subgraph STATE["Shared .coord/ · source of truth"]
-    direction TB
-    SESS[("sessions.json<br/>flock-guarded locks")]
-    LOG[["events.jsonl<br/>append-only audit log"]]
-  end
+  SESS[("sessions.json<br/>flock-guarded locks")]
+  LOG[["events.jsonl<br/>append-only audit log"]]
 
   C1 --> GATE
   C2 --> GATE
   X1 --> GATE
+  GATE --> DET
+  DET -. "corrupt · stuck · cycle · CRITICAL drift" .-> ESC
   DET --> SESS
   DET --> LOG
   ESC -- "advice · surgical_fix · lockdown" --> SESS
-
-  style AGENTS fill:#F4F2FB,stroke:#C9C4E8,color:#3B3B4F
-  style COORD fill:#F4F2FB,stroke:#C9C4E8,color:#3B3B4F
-  style STATE fill:#F4F2FB,stroke:#C9C4E8,color:#3B3B4F
 ```
 
 <p align="center"><sub><b>Figure 1 · Architecture</b> — any mix of Claude Code and Codex sessions, one coordination layer, one shared source of truth. Deterministic logic handles the common path; the LLM Mediator/Validator is spawned <i>only</i> for the hard cases.</sub></p>
