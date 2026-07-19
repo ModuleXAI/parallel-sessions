@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/parallel-agents.png" alt="parallel-sessions — many AI coding agents working one repo, coordinated" width="100%">
+</p>
+
 <h1 align="center">parallel-sessions</h1>
 
 <p align="center">
@@ -73,15 +77,9 @@ flowchart LR
   DET --> LOG
   ESC -- "advice · surgical_fix · lockdown" --> SESS
 
-  classDef agent fill:#DBEAFE,stroke:#3B82F6,stroke-width:1px,color:#1E3A8A
-  classDef core fill:#3B82F6,stroke:#1E40AF,stroke-width:1px,color:#FFFFFF
-  classDef store fill:#F1F5F9,stroke:#64748B,stroke-width:1px,color:#0F172A
-  class C1,C2,X1 agent
-  class GATE,DET,ESC core
-  class SESS,LOG store
-  style AGENTS fill:#EFF6FF,stroke:#93C5FD,color:#1E3A8A
-  style COORD fill:#EFF6FF,stroke:#93C5FD,color:#1E3A8A
-  style STATE fill:#F8FAFC,stroke:#CBD5E1,color:#0F172A
+  style AGENTS fill:#F4F2FB,stroke:#C9C4E8,color:#3B3B4F
+  style COORD fill:#F4F2FB,stroke:#C9C4E8,color:#3B3B4F
+  style STATE fill:#F4F2FB,stroke:#C9C4E8,color:#3B3B4F
 ```
 
 <p align="center"><sub><b>Figure 1 · Architecture</b> — any mix of Claude Code and Codex sessions, one coordination layer, one shared source of truth. Deterministic logic handles the common path; the LLM Mediator/Validator is spawned <i>only</i> for the hard cases.</sub></p>
