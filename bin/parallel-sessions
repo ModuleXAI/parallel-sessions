@@ -30,7 +30,7 @@ init flags (forwarded to install.sh):
                           DANGEROUS — disables every Claude Code tool-permission
                           prompt in this repo. Off by default.
 
-Documentation: https://github.com/ModuleXAI/parallel-sessions
+Documentation: https://github.com/sezeryavuz/parallel-sessions
 `);
 }
 

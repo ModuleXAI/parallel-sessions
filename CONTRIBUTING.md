@@ -4,7 +4,7 @@ Thanks for your interest. Parallel Sessions is a small, opinionated coordination
 
 ## Reporting issues
 
-File issues at [github.com/ModuleXAI/parallel-sessions/issues](https://github.com/ModuleXAI/parallel-sessions/issues). Please include:
+File issues at [github.com/sezeryavuz/parallel-sessions/issues](https://github.com/sezeryavuz/parallel-sessions/issues). Please include:
 
 - OS (`uname -a`) and Bash version (`bash --version`)
 - `jq --version`, `flock --version` (Linux) or note macOS, `perl -v`
@@ -18,7 +18,7 @@ If the issue is intermittent, attach the relevant slice of `.coord/events.jsonl`
 ## Development setup
 
 ```bash
-git clone https://github.com/ModuleXAI/parallel-sessions.git
+git clone https://github.com/sezeryavuz/parallel-sessions.git
 cd parallel-sessions
 
 # Run the unit suite (843 tests across the bats files):

@@ -18,7 +18,7 @@ A walkthrough for OpenAI Codex CLI users adding Parallel Sessions to their workf
 ### Option A — Codex only
 
 ```bash
-git clone https://github.com/ModuleXAI/parallel-sessions.git ~/parallel-sessions
+git clone https://github.com/sezeryavuz/parallel-sessions.git ~/parallel-sessions
 cd ~/parallel-sessions
 bash src/install.sh \
   --yes \

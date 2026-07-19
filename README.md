@@ -1,12 +1,3 @@
-<p align="center">
-  <a href="https://modulex.dev" target="_blank" rel="noopener noreferrer">
-    <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/ModuleXAI/modulex-integrations/main/docs/assets/modulex-logo-dark.svg">
-      <img src="https://raw.githubusercontent.com/ModuleXAI/modulex-integrations/main/docs/assets/modulex-logo-light.svg" alt="ModuleX" width="220">
-    </picture>
-  </a>
-</p>
-
 <h1 align="center">parallel-sessions</h1>
 
 <p align="center">
@@ -25,9 +16,8 @@
 </p>
 
 <p align="center">
-  <a href="https://modulex.dev" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/Website-modulex.dev-E6E6E6?labelColor=C3C3C3&color=E6E6E6" alt="modulex.dev"></a>
-  <a href="https://github.com/ModuleXAI/parallel-sessions" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/GitHub-ModuleXAI%2Fparallel--sessions-E6E6E6?logo=github&logoColor=1A1A1A&labelColor=C3C3C3&color=E6E6E6" alt="GitHub"></a>
-  <a href="https://github.com/ModuleXAI/parallel-sessions/issues" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/Issues-open-E6E6E6?labelColor=C3C3C3&color=E6E6E6" alt="Issues"></a>
+  <a href="https://github.com/sezeryavuz/parallel-sessions" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/GitHub-sezeryavuz%2Fparallel--sessions-E6E6E6?logo=github&logoColor=1A1A1A&labelColor=C3C3C3&color=E6E6E6" alt="GitHub"></a>
+  <a href="https://github.com/sezeryavuz/parallel-sessions/issues" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/Issues-open-E6E6E6?labelColor=C3C3C3&color=E6E6E6" alt="Issues"></a>
 </p>
 
 <p align="center">
@@ -86,7 +76,7 @@ Both agents coordinate through one shared `.coord/` per repository. Mixed-mode (
 Parallel Sessions v1 ships with a Bash installer.
 
 ```bash
-git clone https://github.com/ModuleXAI/parallel-sessions.git
+git clone https://github.com/sezeryavuz/parallel-sessions.git
 cd parallel-sessions
 ```
 
