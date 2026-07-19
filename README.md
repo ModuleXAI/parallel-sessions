@@ -44,12 +44,47 @@ Parallel Sessions is a coordination layer that sits between your AI coding agent
 
 ```mermaid
 flowchart LR
-  A["Claude Code + Codex sessions"] -->|"Read / Write / Edit / apply_patch"| H["Coord hooks<br/>pure Bash 3.2 + jq + flock"]
-  H --> S["(.coord/sessions.json)<br/>flock-guarded state"]
-  H --> L["(.coord/events.jsonl)<br/>append-only audit log"]
-  H -->|"conflict / drift / crash / cycle"| M["Mediator + Validator<br/>spawned via claude -p"]
-  M -->|"advice / surgical_fix / lockdown"| H
+  subgraph AGENTS["AI coding sessions · any mix, one repo"]
+    direction TB
+    C1["Claude Code A"]
+    C2["Claude Code B"]
+    X1["OpenAI Codex"]
+  end
+
+  subgraph COORD["parallel-sessions · coordination layer"]
+    direction TB
+    GATE{{"Arbitrate every action<br/>Read · Write · Edit · apply_patch"}}
+    DET["Deterministic core<br/>locks · drift · FIFO queue · cycle detection"]
+    ESC["LLM escalation<br/>Mediator + Validator · claude -p"]
+    GATE --> DET
+    DET -. "corrupt · stuck · cycle<br/>CRITICAL drift" .-> ESC
+  end
+
+  subgraph STATE["Shared .coord/ · source of truth"]
+    direction TB
+    SESS[("sessions.json<br/>flock-guarded locks")]
+    LOG[["events.jsonl<br/>append-only audit log"]]
+  end
+
+  C1 --> GATE
+  C2 --> GATE
+  X1 --> GATE
+  DET --> SESS
+  DET --> LOG
+  ESC -- "advice · surgical_fix · lockdown" --> SESS
+
+  classDef agent fill:#DBEAFE,stroke:#3B82F6,stroke-width:1px,color:#1E3A8A
+  classDef core fill:#3B82F6,stroke:#1E40AF,stroke-width:1px,color:#FFFFFF
+  classDef store fill:#F1F5F9,stroke:#64748B,stroke-width:1px,color:#0F172A
+  class C1,C2,X1 agent
+  class GATE,DET,ESC core
+  class SESS,LOG store
+  style AGENTS fill:#EFF6FF,stroke:#93C5FD,color:#1E3A8A
+  style COORD fill:#EFF6FF,stroke:#93C5FD,color:#1E3A8A
+  style STATE fill:#F8FAFC,stroke:#CBD5E1,color:#0F172A
 ```
+
+<p align="center"><sub><b>Figure 1 · Architecture</b> — any mix of Claude Code and Codex sessions, one coordination layer, one shared source of truth. Deterministic logic handles the common path; the LLM Mediator/Validator is spawned <i>only</i> for the hard cases.</sub></p>
 
 The mental model is deliberately small. There is no server, no daemon, no UI. State lives at `.coord/sessions.json` (atomically edited under `flock`). The audit log lives at `.coord/events.jsonl`. The hooks are pure Bash 3.2 + `jq` + `flock`. Everything is observable; nothing runs unless an AI session triggers it.
 
@@ -160,6 +195,33 @@ EOF
 
 Codex's `pre_tool_use_apply_patch.sh` hook fires, sees the lock held by the Claude session, and emits a `permissionDecision: deny` with a deny banner naming the holder. The patch is rejected before `apply_patch` runs; Codex's session receives an actionable message offering the same three options (delegate / self-delegate / wait). The reverse direction (Codex holds the lock, Claude attempts to `Edit`) works symmetrically.
 
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Cl as Claude session
+    participant H as Coord hooks
+    participant St as .coord / sessions.json
+    participant Cx as Codex session
+
+    Cl->>H: Edit src/foo.ts
+    H->>St: acquire lock — foo.ts
+    St-->>Cl: granted — write allowed
+
+    Cx->>H: apply_patch src/foo.ts
+    H->>St: check lock — foo.ts
+    St-->>Cx: DENY — held by Claude
+    Note over Cx: deny banner offers 3 options —<br/>delegate · self-delegate · wait
+
+    Cl->>H: Stop / PostToolUse
+    H->>St: release lock — foo.ts
+    H-->>Cx: FIFO wake-up — foo.ts is free
+    Cx->>H: retry apply_patch
+    H->>St: acquire lock — foo.ts
+    St-->>Cx: granted — write allowed
+```
+
+<p align="center"><sub><b>Figure 2 · Cross-agent arbitration</b> — a Claude lock denies a Codex <code>apply_patch</code>, which receives three actionable options. When the lock releases, the FIFO queue wakes the waiting Codex session and its retry succeeds. The reverse direction is symmetric.</sub></p>
+
 For multi-file `apply_patch`, the contract is **all-or-deny atomicity**: if any one of N target files is held by another session (of either agent type), the entire patch is denied; no partial acquire. Multi-file deny banners enumerate every blocked file with its holder.
 
 This is verified end-to-end across 45 cross-agent integration tests covering lock contention, watchdog symmetry, schema 1.1 mixed rows, Mediator dispatch, HEAD tracking, notification fan-out, FIFO ordering, and bipartite cycle detection.
@@ -207,6 +269,30 @@ If you are a Codex operator wondering why a banner you'd expect on `PreToolUse` 
 The hooks register into `.claude/settings.local.json` (Claude) and `.codex/hooks.json` (Codex) at install time. On `SessionStart`, your session is registered into `.coord/sessions.json` and assigned a coordination UUID with an `agent` field (`"claude_code"` or `"codex"`). Each agent's hooks observe and arbitrate writes specific to that agent's tool surface (Claude: `Read`/`Write`/`Edit`/`NotebookEdit`; Codex: `apply_patch` for file writes, `Bash` for audit logging, `*` for cross-cutting bookkeeping).
 
 When something the deterministic logic cannot handle arises — corrupt state, a stuck session, a lock-dependency cycle, a CRITICAL drift verdict — a Mediator pending entry is written to `.coord/mediator/pending.jsonl` and a `claude -p` subprocess is spawned to analyze and decide. The Mediator's verdict is one of three actions: advice, surgical_fix, or lockdown. This 3-action contract is fixed by design — new failure kinds added in the future must fit it without code changes.
+
+```mermaid
+stateDiagram-v2
+    direction TB
+    [*] --> Active: SessionStart
+    Active --> Holding: acquire lock
+    Holding --> Active: release
+
+    Active --> Suspect: heartbeat stale
+    Holding --> Suspect: lock-refresh stale
+    Suspect --> Active: activity resumes
+    Suspect --> Dead: Watchdog 3-signal consensus
+
+    Active --> Blocked: wait-queue grows
+    Blocked --> Active: FIFO wake-up
+
+    Dead --> Mediator: spawn claude -p
+    Blocked --> Mediator: lock cycle / CRITICAL drift
+    Mediator --> Active: advice / surgical_fix
+    Mediator --> Lockdown: lockdown
+    Lockdown --> [*]: repo paused until cleared
+```
+
+<p align="center"><sub><b>Figure 3 · Session lifecycle &amp; self-healing</b> — graceful release keeps the common loop cheap; crashes are caught by the Watchdog's 3-signal consensus (PID + activity + lock-refresh), and every anomaly resolves through the Mediator's fixed 3-action verdict — <code>advice</code>, <code>surgical_fix</code>, or <code>lockdown</code>.</sub></p>
 
 ## Test modes
 
